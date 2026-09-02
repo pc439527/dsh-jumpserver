@@ -1,0 +1,384 @@
+/**
+ * Browser bridge for the JumpServer sidebar tab.
+ *
+ * All conversation-sensitive routes carry sessionId and only touch that
+ * conversation's SessionRegistry bundle:
+ *   POST /api/jumpserver.status   -> state snapshot
+ *   POST /api/jumpserver.snapshot -> TerminalObserver long-poll
+ *   POST /api/jumpserver.manual   -> explicit HUMAN command in ASSET_SHELL
+ *   POST /api/jumpserver.test     -> throwaway gateway connection test
+ *
+ * Manual input does not go through the Agent permission gate because the user
+ * typed it explicitly. It does NOT write raw PTY bytes either: the Host routes
+ * it through SessionManager.exec so mutex/state/marker completion/audit remain
+ * authoritative and the UI cannot silently desynchronize the connector.
+ */
+import type { IncomingMessage, ServerResponse } from 'node:http'
+import { DEFAULT_TIMEOUTS, type JumpServerConfig } from '../config/types.js'
+import { JumpServerSession, type SessionRuntimeConfig } from '../jumpserver/session.js'
+import { toRuntimeConfig } from '../jumpserver/session-manager.js'
+import { SessionState } from '../jumpserver/state-machine.js'
+import type { TerminalObserver } from '../jumpserver/terminal-observer.js'
+import { PROTOCOL_VERSION, PLUGIN_VERSION, hostBuild } from '../version.js'
+import { manualPolicyOf, type ManualPolicy } from '../config/types.js'
+
+export interface BridgeServices {
+  getConfig: () => JumpServerConfig
+  /** V0.3.1: optional credential-ref (env name) override for draft testing. */
+  resolvePassword: (env?: string) => Promise<string | undefined>
+  statusFor: (sessionId: string | undefined) => {
+    state: SessionState
+    gateway: string
+    target: string | null
+    hostname: string | null
+    user: string | null
+    connected: boolean
+    configured: boolean
+    permissionMode: string
+    granted: boolean
+  }
+  /** V0.2.4: whether the conversation holds a JumpServer Session Grant. */
+  grantedFor: (sessionId: string | undefined) => boolean
+  observerFor: (sessionId: string | undefined) => TerminalObserver | null
+  /** V0.2.7: recent audited commands of one conversation (ring, last 200). */
+  auditFor: (sessionId: string | undefined) => Array<Record<string, unknown>>
+  /** V0.2.7: configured asset group names (for the picker chips). */
+  assetGroupNames: () => string[]
+  /** V0.2.7: asset picker data (listAssets with filter/group/refresh). */
+  assetList: (
+    sessionId: string,
+    opts: { filter?: string; group?: string; refresh?: boolean },
+  ) => Promise<{
+    assets: Array<{ name: string; ip: string | null; platform: string | null; node: string | null }>
+    count: number
+    reportedTotal: number | null
+    complete: boolean
+    health: string
+    filter: string | null
+    group: string | null
+    groupMatched: number
+  } | null>
+  /**
+   * Execute an explicit user-entered command in one existing conversation.
+   * V0.2.7: the handler is state-aware (menu verbs / exit / policy gate) and
+   * receives the client's confirm flag for CONFIRM_MODIFY.
+   */
+  manualExec: (sessionId: string, command: string, signal?: AbortSignal, confirmed?: boolean) => Promise<Record<string, unknown>>
+}
+
+const SNAPSHOT_HOLD_MS = 12000
+const MAX_MANUAL_COMMAND_CHARS = 8192
+const JSON_HEADERS = { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' } as const
+
+function json(res: ServerResponse, status: number, body: Record<string, unknown>): void {
+  if (res.writableEnded || res.destroyed) return
+  try {
+    res.writeHead(status, JSON_HEADERS)
+    res.end(JSON.stringify(body))
+  } catch {
+    /* client already gone */
+  }
+}
+
+async function readJsonBody(req: IncomingMessage, limit = 64 * 1024): Promise<Record<string, unknown>> {
+  const chunks: Buffer[] = []
+  let size = 0
+  for await (const chunk of req) {
+    const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array)
+    size += buf.length
+    if (size > limit) throw new Error('body too large')
+    chunks.push(buf)
+  }
+  if (chunks.length === 0) return {}
+  try {
+    const parsed = JSON.parse(Buffer.concat(chunks).toString('utf8'))
+    return parsed !== null && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : {}
+  } catch {
+    return {}
+  }
+}
+
+function statusPayload(services: BridgeServices, sessionId: string | undefined): Record<string, unknown> {
+  const st = services.statusFor(sessionId)
+  const cfg = services.getConfig()
+  const observer = services.observerFor(sessionId)
+  return {
+    state: st.state,
+    connected: st.connected,
+    configured: st.configured,
+    enabled: cfg.enabled,
+    gateway: st.gateway,
+    target: st.target,
+    hostname: st.hostname,
+    user: st.user,
+    permissionMode: st.permissionMode,
+    manualPolicy: manualPolicyOf(cfg),
+    granted: services.grantedFor(sessionId),
+    lastSeq: observer?.cursorSeq ?? 0,
+    // V0.2.6 P0 version handshake: the sidebar compares these against the
+    // client's own bundled identity and warns when a restart is required.
+    pluginVersion: PLUGIN_VERSION,
+    hostBuild: hostBuild(),
+    protocolVersion: PROTOCOL_VERSION,
+  }
+}
+
+function requirePost(req: IncomingMessage, res: ServerResponse): boolean {
+  if (req.method === 'POST') return true
+  res.writeHead(405)
+  res.end()
+  return false
+}
+
+export function registerBridgeRoutes(webServer: {
+  register(route: { kind: 'exact'; path: string; handler: (req: IncomingMessage, res: ServerResponse) => void }): () => void
+}, services: BridgeServices): () => void {
+  const disposers: Array<() => void> = []
+
+  // V0.2.7 P1: side-effect-capable routes are POST-only (no GET around) —
+  // writes happen in manual, stateful reads in snapshot/status/test/assets/audit.
+  disposers.push(webServer.register({
+    kind: 'exact',
+    path: '/api/jumpserver.status',
+    handler: (req, res) => {
+      if (!requirePost(req, res)) return
+      void (async () => {
+        const body = await readJsonBody(req)
+        const sessionId = typeof body.sessionId === 'string' ? body.sessionId : undefined
+        json(res, 200, { ok: true, sessionId: sessionId ?? null, ...statusPayload(services, sessionId) })
+      })()
+    },
+  }))
+
+  disposers.push(webServer.register({
+    kind: 'exact',
+    path: '/api/jumpserver.snapshot',
+    handler: (req, res) => {
+      if (!requirePost(req, res)) return
+      void (async () => {
+        try {
+          const body = await readJsonBody(req)
+          const sinceSeq = typeof body.sinceSeq === 'number' && Number.isFinite(body.sinceSeq) ? body.sinceSeq : 0
+          const sessionId = typeof body.sessionId === 'string' ? body.sessionId : undefined
+          const observer = services.observerFor(sessionId)
+          if (observer !== null) {
+            const holdUntil = Date.now() + SNAPSHOT_HOLD_MS
+            while (observer.cursorSeq <= sinceSeq && Date.now() < holdUntil && !res.destroyed) {
+              await new Promise((r) => setTimeout(r, 150))
+            }
+          }
+          const events = observer !== null ? observer.snapshotSince(sinceSeq) : []
+          json(res, 200, {
+            ok: true,
+            lastSeq: observer?.cursorSeq ?? 0,
+            events,
+            sessionId: sessionId ?? null,
+            ...statusPayload(services, sessionId),
+          })
+        } catch (error) {
+          json(res, 400, { ok: false, code: 'BRIDGE_ERROR', message: error instanceof Error ? error.message : String(error) })
+        }
+      })()
+    },
+  }))
+
+  disposers.push(webServer.register({
+    kind: 'exact',
+    path: '/api/jumpserver.manual',
+    handler: (req, res) => {
+      if (!requirePost(req, res)) return
+      void (async () => {
+        try {
+          const body = await readJsonBody(req)
+          const sessionId = typeof body.sessionId === 'string' ? body.sessionId.trim() : ''
+          const command = typeof body.command === 'string' ? body.command : ''
+          const confirmed = body.confirmed === true
+          if (sessionId.length === 0 || sessionId.length > 512) {
+            json(res, 400, { ok: false, code: 'INVALID_SESSION', message: 'valid sessionId is required' })
+            return
+          }
+          if (command.trim().length === 0 || command.length > MAX_MANUAL_COMMAND_CHARS || /[\r\n\x00]/.test(command)) {
+            json(res, 400, {
+              ok: false,
+              code: 'INVALID_COMMAND',
+              message: 'manual command must be one non-empty line of at most ' + MAX_MANUAL_COMMAND_CHARS + ' characters',
+            })
+            return
+          }
+          const controller = new AbortController()
+          const onAborted = (): void => controller.abort()
+          req.once('aborted', onAborted)
+          try {
+            const result = await services.manualExec(sessionId, command, controller.signal, confirmed)
+            json(res, result.ok === false ? 409 : 200, result)
+          } finally {
+            req.off('aborted', onAborted)
+          }
+        } catch (error) {
+          json(res, 500, { ok: false, code: 'MANUAL_EXEC_FAILED', message: error instanceof Error ? error.message : String(error) })
+        }
+      })()
+    },
+  }))
+
+  disposers.push(webServer.register({
+    kind: 'exact',
+    path: '/api/jumpserver.test',
+    handler: (req, res) => {
+      if (!requirePost(req, res)) return
+      void (async () => {
+        const body = await readJsonBody(req)
+        const result = await runConnectionTest(services, body as { host?: unknown; port?: unknown; username?: unknown; password?: unknown })
+        json(res, 200, result)
+      })()
+    },
+  }))
+
+  // V0.2.7 P1: asset picker data for the sidebar (menu state required).
+  disposers.push(webServer.register({
+    kind: 'exact',
+    path: '/api/jumpserver.assets',
+    handler: (req, res) => {
+      if (!requirePost(req, res)) return
+      void (async () => {
+        try {
+          const body = await readJsonBody(req)
+          const sessionId = typeof body.sessionId === 'string' ? body.sessionId : undefined
+          const observer = services.observerFor(sessionId)
+          if (observer === null) {
+            json(res, 409, { ok: false, code: 'NO_SESSION', message: 'no JumpServer session for this conversation' })
+            return
+          }
+          const bundle = await services.assetList(sessionId ?? '', {
+            filter: typeof body.filter === 'string' ? body.filter : undefined,
+            group: typeof body.group === 'string' ? body.group : undefined,
+            refresh: body.refresh === true,
+          })
+          if (bundle === null) {
+            json(res, 409, { ok: false, code: 'NOT_AT_MENU', message: 'assets are available at the JumpServer menu; connect or return to the bastion menu first' })
+            return
+          }
+          json(res, 200, {
+            ok: true,
+            count: bundle.count,
+            reportedTotal: bundle.reportedTotal,
+            complete: bundle.complete,
+            health: bundle.health,
+            filter: bundle.filter,
+            group: bundle.group,
+            groupMatched: bundle.groupMatched,
+            groups: services.assetGroupNames(),
+            rows: bundle.assets,
+            sessionId: sessionId ?? null,
+          })
+        } catch (error) {
+          json(res, 400, { ok: false, code: 'BRIDGE_ERROR', message: error instanceof Error ? error.message : String(error) })
+        }
+      })()
+    },
+  }))
+
+  // V0.2.7 P1: per-conversation recent audit ring for the sidebar audit tab.
+  disposers.push(webServer.register({
+    kind: 'exact',
+    path: '/api/jumpserver.audit',
+    handler: (req, res) => {
+      if (!requirePost(req, res)) return
+      void (async () => {
+        const body = await readJsonBody(req)
+        const sessionId = typeof body.sessionId === 'string' ? body.sessionId : undefined
+        json(res, 200, { ok: true, records: services.auditFor(sessionId), sessionId: sessionId ?? null })
+      })()
+    },
+  }))
+
+  return () => {
+    for (const dispose of disposers) {
+      try {
+        dispose()
+      } catch {
+        /* already disposed */
+      }
+    }
+  }
+}
+
+/**
+ * Throwaway connection test; never touches a conversation-owned session.
+ * V0.2.7 P1: an optional DRAFT ({host,port,username,password}) overrides the
+ * saved config, so "test connection" after editing the form tests what the
+ * user actually typed — not the previously saved values.
+ * V0.3.1 P1: the draft also carries passwordEnv, so changing the credential
+ * ref (without retyping the password) is tested against the DRAFT ref, and
+ * `draft` is true whenever ANY draft credential/connection field was used.
+ */
+export function draftPasswordSource(
+  draft: { password?: unknown; passwordEnv?: unknown },
+  cfg: JumpServerConfig,
+): { env: string | null } {
+  if (typeof draft.password === 'string' && draft.password.length > 0) return { env: null } // literal draft password wins
+  const env = typeof draft.passwordEnv === 'string' && draft.passwordEnv.trim().length > 0 ? draft.passwordEnv.trim() : cfg.passwordEnv
+  return { env }
+}
+
+export async function runConnectionTest(
+  services: BridgeServices,
+  draft: { host?: unknown; port?: unknown; username?: unknown; password?: unknown; passwordEnv?: unknown } = {},
+): Promise<Record<string, unknown>> {
+  const cfg = services.getConfig()
+  const host = typeof draft.host === 'string' && draft.host.trim().length > 0 ? draft.host.trim() : cfg.host
+  const port = typeof draft.port === 'number' && Number.isFinite(draft.port) ? Math.trunc(draft.port) : cfg.port
+  const username = typeof draft.username === 'string' && draft.username.trim().length > 0 ? draft.username.trim() : cfg.username
+  const enabled = cfg.enabled
+  if (enabled === false) return { ok: false, code: 'DISABLED', message: 'JumpServer is disabled in settings' }
+  if (!host || !username || port < 1) {
+    return { ok: false, code: 'NOT_CONFIGURED', message: 'JumpServer host/username are not configured' }
+  }
+  const source = draftPasswordSource(draft, cfg)
+  let password: string | undefined
+  if (source.env === null) {
+    password = String(draft.password) // transient draft password (same-origin bridge)
+  } else {
+    // V0.3.1: resolve against the DRAFT credential ref when one was provided,
+    // never silently against the saved passwordEnv.
+    password = await services.resolvePassword(source.env)
+  }
+  if (password === undefined || password.length === 0) {
+    return { ok: false, code: 'NOT_CONFIGURED', message: 'JumpServer password is not configured (set ' + source.env + ' or the password setting)' }
+  }
+  const runtime: SessionRuntimeConfig = {
+    ...toRuntimeConfig({ ...cfg, host, port, username }, password, undefined),
+    connectTimeoutMs: Math.min(cfg.connectTimeout * 1000, DEFAULT_TIMEOUTS.connect * 2),
+  }
+  const session = new JumpServerSession(runtime, {})
+  const started = Date.now()
+  const gateway = host + ':' + port
+  try {
+    await session.connect()
+    const state = session.state
+    const latencyMs = Date.now() - started
+    await session.close()
+    return {
+      ok: state === SessionState.JUMPSERVER_MENU || state === SessionState.ASSET_SHELL,
+      message: 'JumpServer 连接成功（菜单识别完成）',
+      gateway,
+      user: username,
+      latencyMs,
+      state,
+      // V0.3.1: password / passwordEnv are draft fields too — editing ONLY the
+      // credential (without touching host/port/username) must still flag draft.
+      draft: draft.host !== undefined || draft.port !== undefined || draft.username !== undefined
+        || draft.password !== undefined || draft.passwordEnv !== undefined,
+    }
+  } catch (error) {
+    const code = error instanceof Error && (error as { code?: string }).code !== undefined ? String((error as { code?: string }).code) : 'FAILED'
+    const message = error instanceof Error ? error.message : String(error)
+    return { ok: false, code, message, latencyMs: Date.now() - started, gateway, user: username, draft: true }
+  } finally {
+    try {
+      await session.close()
+    } catch {
+      /* already closed */
+    }
+  }
+}

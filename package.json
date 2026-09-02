@@ -1,0 +1,103 @@
+{
+  "name": "dsh-jumpserver",
+  "version": "0.3.1",
+  "description": "JumpServer (KoKo) bastion connector for DeepSeek Harness: /jumpserver session-grant security, one SSH/PTY session PER conversation, menu/asset state machine, target verification, permission-gated Agent commands, audited human sidebar input, target-affinity batch execution, asset discovery with payload-phase capture + KoKo footer verification + verified-parse-health caching (refresh supported), FD-redirection-aware READ_ONLY classification, timeout recovery with shell re-verification, V0.3.0 Ops Investigation (triage/compare/case/remediate + evidence ledger + RCA report), ANSI/VT100 terminal sanitizing, and dsh-better-sidebar integration.",
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "types": "./lib/types/client/index.d.ts",
+      "default": "./lib/client.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.client.json --noEmit",
+    "typecheck:host": "tsc -p tsconfig.json --noEmit",
+    "typecheck:client": "tsc -p tsconfig.client.json --noEmit",
+    "build": "tsc -p tsconfig.build.json && node scripts/build-version.mjs && node scripts/build-client.mjs",
+    "build:client": "node scripts/build-version.mjs && node scripts/build-client.mjs",
+    "build:version": "node scripts/build-version.mjs",
+    "test": "vitest run",
+    "smoke": "node scripts/smoke.mjs",
+    "smoke:client": "node scripts/client-bundle-smoke.mjs",
+    "sync": "npm run build && node scripts/sync-profile.mjs",
+    "deploy:web": "npm run typecheck && npm test && npm run build && npm run smoke:client && node scripts/sync-profile.mjs"
+  },
+  "dependencies": {
+    "ssh2": "^1.16.0",
+    "zod": "^4.5.4"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/cordis-plugin-timer": "^1.1.4",
+    "@deepseek-ai/dsh-agent": "^0.1.2-alpha.2",
+    "@deepseek-ai/dsh-credentials": "^0.1.2-alpha.2",
+    "@deepseek-ai/dsh-home-paths": "^0.1.2-alpha.2",
+    "@deepseek-ai/dsh-llm": "^0.1.2-alpha.2",
+    "@deepseek-ai/dsh-session": "^0.1.2-alpha.2",
+    "@deepseek-ai/dsh-settings": "^0.1.2-alpha.2",
+    "@deepseek-ai/dsh-storage-domain": "^0.1.2-alpha.2",
+    "@deepseek-ai/dsh-tools": "^0.1.2-alpha.2",
+    "@deepseek-ai/dsh-user-approval": "^0.1.2-alpha.2",
+    "@deepseek-ai/schemastery": "^3.18.1",
+    "dsh-better-sidebar": "^0.18.0-alpha.0"
+  },
+  "peerDependenciesMeta": {
+    "dsh-better-sidebar": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/cordis-plugin-timer": "^1.1.4",
+    "@deepseek-ai/dsh-agent": "0.1.2-alpha.2",
+    "@deepseek-ai/dsh-code-runtime": "^0.1.2-alpha.2",
+    "@deepseek-ai/dsh-code-runtime-worker-thread": "^0.1.2-alpha.2",
+    "@deepseek-ai/dsh-credentials": "0.1.2-alpha.2",
+    "@deepseek-ai/dsh-home-paths": "0.1.2-alpha.2",
+    "@deepseek-ai/dsh-llm": "0.1.2-alpha.2",
+    "@deepseek-ai/dsh-scope": "^0.1.2-alpha.2",
+    "@deepseek-ai/dsh-session": "0.1.2-alpha.2",
+    "@deepseek-ai/dsh-settings": "0.1.2-alpha.2",
+    "@deepseek-ai/dsh-storage-domain": "0.1.2-alpha.2",
+    "@deepseek-ai/dsh-tools": "0.1.2-alpha.2",
+    "@deepseek-ai/dsh-user-approval": "0.1.2-alpha.2",
+    "@deepseek-ai/schemastery": "^3.18.1",
+    "@types/node": "^22.10.0",
+    "@types/react": "^18.3.1",
+    "@types/react-dom": "^18.3.7",
+    "@types/ssh2": "^1.15.4",
+    "dsh-better-sidebar": "0.18.0-alpha.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "ssh2": "^1.16.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.8"
+  },
+  "dsh": {
+    "client": {
+      "inject": [
+        "slots",
+        "locale",
+        "settingsScope",
+        "connection",
+        "betterSidebar"
+      ],
+      "platform": "web",
+      "immediately": true
+    }
+  }
+}

@@ -1,0 +1,32 @@
+import { z } from 'zod'
+import type { AuditRecord } from '../jumpserver/session-manager.js'
+
+/** zod record schema for the storageDomain audit table. */
+export const auditRecordSchema = z.object({
+  timestamp: z.string(),
+  operation: z.string(),
+  gateway: z.string(),
+  target: z.string().nullable(),
+  hostname: z.string().nullable(),
+  command: z.string().nullable(),
+  /** V0.3.1: AGENT | HUMAN; default AGENT keeps records written pre-0.3.1 readable. */
+  actor: z.string().default('AGENT'),
+  risk: z.string(),
+  permissionMode: z.string(),
+  result: z.string(),
+  exitCode: z.number().nullable(),
+  durationMs: z.number().nullable(),
+})
+
+export type StructuredAuditRecord = z.infer<typeof auditRecordSchema>
+
+export function toStructuredAuditRecord(record: AuditRecord): StructuredAuditRecord {
+  return auditRecordSchema.parse(record)
+}
+
+/** Simple monotonic sequence for record keys within one process. */
+let recordSeq = 0
+export function nextAuditKey(timestampIso: string): string {
+  recordSeq += 1
+  return timestampIso + ':' + recordSeq.toString(36).padStart(4, '0')
+}

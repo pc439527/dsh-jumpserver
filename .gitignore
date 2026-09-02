@@ -1,0 +1,17 @@
+node_modules/
+lib/
+dist/
+*.tsbuildinfo
+
+# Local scratch: npm cache routing, package extractions, probe scripts
+.tmp-*
+
+# Local diagnostics / acceptance artifacts (contain real internal network info)
+*.log
+CONOUT$
+npm.log
+pnpm-check.log
+acceptance-snapshot.md
+
+# Local credentials (never commit)
+.credentials.yaml

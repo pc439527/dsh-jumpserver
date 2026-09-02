@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  verify:
+    name: typecheck + tests + build + smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: Install
+        # DSH alpha packages carry mutually-conflicting peer ranges upstream;
+        # --legacy-peer-deps mirrors how the project is installed (package-lock
+        # is generated with npm install --package-lock-only --legacy-peer-deps).
+        run: npm ci --legacy-peer-deps
+      - name: Typecheck (host + client)
+        run: npm run typecheck
+      - name: Unit tests
+        run: npm test
+      - name: Build (host + version meta + client bundle)
+        run: npm run build
+      - name: Client bundle smoke
+        run: npm run smoke:client
