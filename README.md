@@ -57,6 +57,8 @@ dsh plugin --profile web add dsh-better-sidebar@latest    # stable core
 dsh plugin --profile web add "file:<本插件所在路径>"
 ## 发布到 npm 后可直接：
 dsh plugin --profile web add dsh-jumpserver
+## 或直接从 GitHub 仓库安装（收录清单要求的可安装方式）：
+dsh plugin --profile web add github:pc439527/dsh-jumpserver
 ```
 
 > 也可以让模型代劳：在 DSH 里说「帮我安装 dsh-jumpserver 插件（DSH 侧边栏 JumpServer 终端标签页 + 堡垒机工具）」，把上面的命令贴给它执行。

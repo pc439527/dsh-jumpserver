@@ -1,0 +1,18 @@
+# dsh-jumpserver bundle patch — declared by "dsh.bundle.patch" in package.json.
+#
+# When the plugin is installed through the official CLI —
+#
+#   dsh plugin --profile web add dsh-jumpserver
+#   # or from source / GitHub:
+#   dsh plugin --profile web add github:pc439527/dsh-jumpserver
+#
+# — the CLI appends dsh-jumpserver to the bundle stack and the profile boot
+# merges THIS patch (a single `insert` of the plugin row). No manual profile
+# cordis.patch.yml mount line is needed.
+#
+# If an older manual mount line for dsh-jumpserver still exists in the profile's
+# own cordis.patch.yml, remove it before switching to the bundle channel to
+# avoid double-mounting.
+- insert:
+    - id: jumpserver
+      name: dsh-jumpserver
