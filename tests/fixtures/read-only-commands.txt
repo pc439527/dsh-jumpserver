@@ -392,3 +392,42 @@ who -u
 ps -L -p 1234
 ls -l /sys/block/sda
 file /dev/sda
+
+# classifier V2.1 semantic hardening
+hostname -f
+date -u
+ip addr show
+journalctl -u nginx --since 30m
+dmesg -T
+sysctl -a
+sed -n '1p' /etc/hosts
+sort /etc/hosts
+uniq /etc/hosts
+awk '{ print $1 }' /etc/hosts
+systemctl --no-pager
+kubectl config get-contexts
+kubectl auth whoami
+redis-cli INFO
+redis-cli CONFIG GET maxmemory
+/usr/emp/cachesrv/redis/bin/redis-cli INFO
+/usr/bin/hostname
+env /bin/date -u
+systemctl --failed --no-pager
+systemctl --state=failed
+systemctl --type=service --state=running
+ip -br addr
+ip link show
+ip -s link
+ip route show
+ip route get 8.8.8.8
+ip neigh show
+ip rule show
+ip maddr
+ip monitor
+ip netns list
+journalctl --disk-usage
+dmesg --level=err,warn
+sed 's/a/b/' /etc/hosts
+sort -n /etc/hosts
+redis-cli -p 6381 INFO
+/usr/emp/cachesrv/redis/bin/redis-cli -p 6381 INFO | head -n 20

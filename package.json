@@ -31,6 +31,7 @@
     "build:client": "node scripts/build-version.mjs && node scripts/build-client.mjs",
     "build:version": "node scripts/build-version.mjs",
     "test": "vitest run",
+    "test:e2e": "vitest run tests/browser-regression.test.ts tests/sidebar-tab.test.ts",
     "smoke": "node scripts/smoke.mjs",
     "report:classifier": "node scripts/classifier-report.mjs",
     "smoke:client": "node scripts/client-bundle-smoke.mjs",

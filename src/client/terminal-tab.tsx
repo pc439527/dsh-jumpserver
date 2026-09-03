@@ -11,7 +11,7 @@
  * a slim single-line header with an info popover, and windowed row rendering.
  */
 import * as React from 'react'
-import { fetchAssets, fetchAudit, fetchSnapshot, fetchStatus, sendManualCommand, type StatusResponse } from './api.js'
+import { fetchAssets, fetchAudit, fetchSnapshot, fetchStatus, sendManualCommand, terminateJumpServer, type StatusResponse } from './api.js'
 import { applySnapshot, clearBuffer, createTerminalBuffer, setScrollback, type TerminalBuffer, type TerminalRow } from './terminal-view.js'
 import { CLIENT_BUILD, CLIENT_VERSION } from './version.js'
 
@@ -327,7 +327,7 @@ export function JumpServerSidebarTab(props: JumpServerSidebarTabProps): React.Re
       if (result.kind === 'assets') { setNotice('资产列表：' + String(result.count ?? 0) + ' 台'); setTab('assets'); setAssets((prev) => ({ ...prev, rows: (result.rows ?? []) as AssetRow[], count: result.count ?? prev.count, fetchedAt: Date.now() })) }
       else if (result.kind === 'enter') { setTab('term'); setNotice('已进入服务器 ' + String(result.target ?? '')) }
       else if (result.kind === 'leave') { setNotice('已返回 JumpServer 菜单'); setTab('term'); void loadAssets(false, assetsGroupRef.current) }
-      else if (result.kind === 'close') { setNotice('JumpServer 会话已关闭') }
+      else if (result.kind === 'close') { setNotice('JumpServer 已结束并锁定'); setStatus((prev) => ({ ...prev, state: 'DISCONNECTED', connected: false, granted: false })) }
       if (result.state !== undefined) setStatus((prev) => ({ ...prev, state: result.state }))
     } catch (error) {
       if (!(error instanceof Error && error.name === 'AbortError')) {
@@ -338,6 +338,19 @@ export function JumpServerSidebarTab(props: JumpServerSidebarTabProps): React.Re
       setManualBusy(false)
     }
   }, [manualAvailable, manualCommand, sessionId, t])
+
+  const endAndLock = React.useCallback(async (): Promise<void> => {
+    if (sessionId.length === 0) return
+    try {
+      const result = await terminateJumpServer(sessionId) as StatusResponse & { code?: string; message?: string }
+      if (result.ok === false) throw new Error(result.message ?? result.code ?? '结束失败')
+      setConfirmReq(null)
+      setNotice('JumpServer 已结束并锁定；重新使用需要 /jumpserver on 或 /jumpserver <任务>')
+      setStatus((prev) => ({ ...prev, state: 'DISCONNECTED', connected: false, granted: false, target: null, hostname: null }))
+    } catch (error) {
+      setManualError(error instanceof Error ? error.message : String(error))
+    }
+  }, [sessionId])
 
   // V0.3.1 P1: assets are cache-first. Only the explicit ↻ button passes
   // force=true (a new 'p' to KoKo); opening the tab, switching groups and
@@ -481,12 +494,13 @@ export function JumpServerSidebarTab(props: JumpServerSidebarTabProps): React.Re
       h('span', { className: 'js-term-auditWho' }, [String(r['actor'] ?? ''), String(r['operation'] ?? 'exec')].filter(Boolean).join(' ')),
       h('span', { className: 'js-term-auditRisk' + (warn ? ' js-term-warn' : '') }, riskStr),
       h('span', { className: 'js-term-auditTarget' }, String(r['target'] ?? '?')),
-      h('span', { className: 'js-term-auditCmd' }, String(r['command'] ?? '')),
+      h('span', { className: 'js-term-auditCmd' }, String(r['redactedCommand'] ?? r['command'] ?? '')),
       h('span', { className: 'js-term-auditMeta' }, 'rc=' + String(r['exitCode'] ?? '?') + ' ' + String(r['durationMs'] ?? '?') + 'ms'),
       expanded
         ? h('div', { className: 'js-term-auditDetail' },
             h('div', null, 'Rule: ' + (rule.length > 0 ? rule : '—') + ' · confidence ' + (conf.length > 0 ? conf : '—') + (v > 0 ? ' · classifier v' + String(v) : '')),
-            h('div', null, 'Reason: ' + (reason.length > 0 ? reason : '—')),
+            h('div', null, 'Reason: ' + (riskStr === 'UNKNOWN' ? '无法确认只读；' : riskStr === 'MODIFY' ? '已确认修改服务器状态；' : '') + (reason.length > 0 ? reason : '—')),
+            h('div', null, 'Target: ' + String(r['target'] ?? '?') + ' · Hostname: ' + String(r['hostname'] ?? '?') + ' · Permission: ' + String(r['permissionMode'] ?? '?')),
             h('div', null, 'Approval: ' + approval + (r['approvalRequired'] === true ? ' (required)' : '') + ' · normalized: ' + String(r['normalizedCommand'] ?? '')),
           )
         : null,
@@ -508,19 +522,20 @@ export function JumpServerSidebarTab(props: JumpServerSidebarTabProps): React.Re
     setAssetWinH(ch)
     setAssetWinStart(st)
   }
-  const assetRows = filteredAssets.slice(assetWinStart, assetWinEnd).map((a, i) =>
-    h('button', {
+  const assetRows = filteredAssets.slice(assetWinStart, assetWinEnd).map((a, i) => {
+    const unsupportedWindows = String(a.platform ?? '').toLowerCase() === 'windows'
+    return h('button', {
       type: 'button', className: 'js-term-assetItem', key: assetWinStart + i,
-      style: { height: ASSET_ROW_H + 'px' },
-      title: '点击进入 ' + String(a.name ?? a.ip ?? ''),
-      onClick: () => enterAsset(a),
+      style: { height: ASSET_ROW_H + 'px' }, disabled: unsupportedWindows,
+      title: unsupportedWindows ? '当前插件不支持该资产类型' : '点击进入 ' + String(a.name ?? a.ip ?? ''),
+      onClick: unsupportedWindows ? undefined : () => enterAsset(a),
     },
       h('span', { className: 'js-term-assetIp' }, a.ip ?? a.name ?? '?'),
       h('span', { className: 'js-term-assetName' }, a.name ?? ''),
       h('span', { className: 'js-term-assetMeta' }, [a.platform, a.node].filter((v) => v !== null && v !== undefined).join(' · ')),
-      h('span', { className: 'js-term-assetGo' }, '›'),
-    ),
-  )
+      h('span', { className: 'js-term-assetGo' }, unsupportedWindows ? '当前插件不支持该资产类型' : '›'),
+    )
+  })
 
   const visibleTotal = buffer.rows.length
   const windowEnd = Math.min(visibleTotal, windowStart + Math.ceil(viewportH / ROW_H) + OVERSCAN * 2)
@@ -644,6 +659,7 @@ export function JumpServerSidebarTab(props: JumpServerSidebarTabProps): React.Re
       ),
       h('div', { className: 'js-term-actions' },
         h('button', { type: 'button', className: 'js-term-iconBtn', 'data-active': follow || undefined, 'aria-pressed': follow, 'aria-label': t('followTooltip'), title: t('followTooltip'), onClick: () => setFollow(!follow) }, followIcon(14)),
+        h('button', { type: 'button', className: 'js-term-btn js-term-btnDanger', disabled: status.granted !== true, title: '关闭 SSH 并撤销本对话授权', onClick: () => void endAndLock() }, '🔒 结束并锁定'),
         h('button', { type: 'button', className: 'js-term-iconBtn', 'aria-label': t('clearTooltip'), title: t('clearTooltip'), onClick: clear }, clearIcon(14)),
       ),
     ),

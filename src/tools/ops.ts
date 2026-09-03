@@ -18,6 +18,7 @@ import { AbortRequestedError, JumpServerError } from '../jumpserver/errors.js'
 import type { SessionRegistry } from '../jumpserver/session-registry.js'
 import { JUMPSERVER_NOT_ARMED, NOT_ARMED_MESSAGE, type SessionGrant } from '../security/grant.js'
 import { classifyCommand } from '../security/command-classifier.js'
+import { redactCommandSecrets } from '../security/command-redaction.js'
 import { trustedRead } from '../ops/collect.js'
 import type { OpsCaseRegistry } from '../ops/evidence.js'
 import { compareCommands, deriveFindings, metricsOf, runProfileSweep, type CollectedCommand } from '../ops/collect.js'
@@ -28,7 +29,7 @@ const CMD_EXCERPT = 200
 interface CompactCommand {
   category: string
   command: string
-  exitCode: number | null
+  exitCode?: number
   truncated: boolean
   outputLength: number
   excerpt: string
@@ -38,8 +39,8 @@ interface CompactCommand {
 function compactOf(commands: CollectedCommand[]): CompactCommand[] {
   return commands.map((c) => ({
     category: c.category,
-    command: c.command,
-    exitCode: c.exitCode,
+    command: redactCommandSecrets(c.command),
+    ...(c.exitCode !== null ? { exitCode: c.exitCode } : {}),
     truncated: c.truncated,
     outputLength: c.output.length,
     excerpt: c.error !== null ? '(error ' + c.error.code + ': ' + c.error.message + ')' : c.output.slice(0, CMD_EXCERPT),
@@ -136,7 +137,7 @@ function evidenceInput(kind: 'triage' | 'compare' | 'remediate', target: string,
     target,
     hostname,
     category: c.category,
-    command: c.command,
+    command: redactCommandSecrets(c.command),
     exitCode: c.exitCode,
     output: c.output,
     truncated: c.truncated,

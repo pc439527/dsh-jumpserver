@@ -45,3 +45,9 @@ dstat -af
 iotop -bn1
 htop -d 1
 iftop -t
+/opt/tools/hostname
+/tmp/redis-cli INFO
+/opt/bin/env hostname
+redis-cli EVAL "return redis.call('GET','x')" 0
+redis-cli EVALSHA abc123 0
+redis-cli MYSTERYCOMMAND
