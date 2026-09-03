@@ -6,6 +6,9 @@
 >
 > 当前版本：**V0.3.1**（`jumpserver_status` 返回 `pluginVersion / hostBuild / protocolVersion`）。
 
+<img width="1920" height="945" alt="a3070d99cfbb293dd3b2e2b06c72e380" src="https://github.com/user-attachments/assets/d1eb386f-830a-4bf1-ab96-15d5cbf421d2" />
+
+
 ## 特性
 
 - **持久 SSH/PTY 会话**：每个对话一条独立会话，绝不逐命令重连；显式状态机 `DISCONNECTED → CONNECTING → JUMPSERVER_MENU → ENTERING_ASSET → ASSET_SHELL → COMMAND_RUNNING → …`，非法迁移一律落 `UNKNOWN`，禁止猜测当前服务器。
