@@ -172,3 +172,69 @@ env timeout 3 sed -i s/a/b/ f
 watch -n 2 'rm -rf /tmp/x'
 strace -o /tmp/trace.log true
 tcpdump -w /tmp/cap.pcap -i eth0
+
+# classifier V2.1 semantic hardening
+hostname prod.example
+date --set=tomorrow
+ip link set eth0 down
+journalctl --rotate
+dmesg --clear
+sysctl vm.drop_caches=3
+sed -n '1w /tmp/sed.out' /etc/hosts
+sort --output=/tmp/sorted /etc/hosts
+uniq input.txt output.txt
+awk '{ print $1 > "/tmp/awk.out" }' /etc/hosts
+kubectl config use-context prod
+kubectl auth reconcile -f role.yaml
+redis-cli SET key value
+/usr/sbin/sysctl -w vm.drop_caches=3
+hostname new-host
+date -s "2026-09-03 10:00:00"
+ip addr add 192.168.1.2/24 dev eth0
+ip addr del 192.168.1.2/24 dev eth0
+ip route add default via 192.168.1.1
+ip route del default
+ip route replace default via 192.168.1.2
+ip neigh add 192.168.1.9 lladdr aa:bb:cc:dd:ee:ff dev eth0
+ip neigh del 192.168.1.9 dev eth0
+ip rule add pref 100 from all
+ip rule del pref 100
+ip netns add testns
+ip netns del testns
+journalctl --vacuum-size=500M
+journalctl --vacuum-time=7d
+journalctl --vacuum-files=5
+journalctl --flush
+journalctl --sync
+dmesg -C
+dmesg -c
+dmesg --read-clear
+dmesg -n 3
+dmesg --console-level 3
+sysctl --write vm.swappiness=10
+sysctl --system
+sysctl -p
+sysctl --load /etc/sysctl.conf
+sed --in-place 's/a/b/' /tmp/test
+sed '1w /tmp/out' /tmp/input
+sort -o /tmp/out /tmp/in
+kubectl config set-context prod --cluster=prod
+kubectl config unset current-context
+kubectl config delete-context prod
+kubectl config rename-context old new
+redis-cli DEL key
+redis-cli CONFIG SET maxmemory 100mb
+redis-cli CLIENT KILL 127.0.0.1:1234
+redis-cli SAVE
+redis-cli BGSAVE
+redis-cli BGREWRITEAOF
+ss -K dst 192.0.2.10
+history -c
+history -w
+sar -o /tmp/sar.data 1 1
+find /tmp -fprint /tmp/files.txt
+blkid -w /tmp/blkid.tab
+nfsstat -Z
+systemd-analyze set-log-level debug
+curl --json '{"x":1}' http://127.0.0.1/
+ulimit -n 1024

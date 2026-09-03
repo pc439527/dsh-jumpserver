@@ -8,6 +8,7 @@ import { SessionMutex } from './mutex.js'
 import { JumpServerSession, type ExecOutcome, type SessionRuntimeConfig, type SessionStatus } from './session.js'
 import { SessionState } from './state-machine.js'
 import { sleep } from './timing.js'
+import { normalizedRedactedCommand, redactCommandSecrets } from '../security/command-redaction.js'
 
 export interface AuditRecord {
   timestamp: string
@@ -15,7 +16,10 @@ export interface AuditRecord {
   gateway: string
   target: string | null
   hostname: string | null
+  /** Persisted compatibility field; always redacted, never the raw execution command. */
   command: string | null
+  redactedCommand?: string
+  normalizedRedactedCommand?: string
   /** V0.3.1: who ran the command — AGENT (tool path), HUMAN (sidebar input) or SYSTEM_PROFILE (ops sweep). */
   actor: 'AGENT' | 'HUMAN' | 'SYSTEM_PROFILE'
   /** Risk class (READ/PRIVILEGED_READ/UNKNOWN/MODIFY/DANGEROUS). */
@@ -794,20 +798,25 @@ export class SessionManager {
     if (this.options.onAudit === undefined) return
     const session = this.session
     const classification = partial.classification
+    const redactedCommand = partial.command !== null && partial.command !== undefined ? redactCommandSecrets(partial.command) : null
     const record: AuditRecord = {
       timestamp: new Date().toISOString(),
       operation: partial.operation,
       gateway: cfg.host + ':' + cfg.port,
       target: partial.target ?? (session?.currentTarget ?? null),
       hostname: partial.hostname ?? (session?.currentHostname ?? null),
-      command: partial.command ?? null,
+      command: redactedCommand,
+      redactedCommand: redactedCommand ?? undefined,
+      normalizedRedactedCommand: redactedCommand !== null ? normalizedRedactedCommand(redactedCommand) : undefined,
       actor: partial.actor ?? 'AGENT',
       risk: partial.risk,
       riskReason: classification?.reason,
       riskRuleId: classification?.ruleId,
       riskConfidence: classification?.confidence,
       classifierVersion: classification?.classifierVersion,
-      normalizedCommand: classification?.normalizedCommand ?? (partial.command !== null && partial.command !== undefined ? partial.command.replace(/\s+/g, ' ').trim() : undefined),
+      normalizedCommand: redactedCommand !== null
+        ? normalizedRedactedCommand(classification?.normalizedCommand ?? redactedCommand)
+        : undefined,
       approvalRequired: partial.approvalRequired ?? false,
       approvalResult: partial.approvalResult ?? 'none',
       permissionMode: cfg.permissionMode,

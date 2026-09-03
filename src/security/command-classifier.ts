@@ -24,7 +24,7 @@ import type { CommandRisk } from '../config/types.js'
  * command's risk: the inner command goes through the SAME full pipeline.
  */
 
-export const CLASSIFIER_VERSION = 2
+export const CLASSIFIER_VERSION = 3
 
 export type Confidence = 'HIGH' | 'LOW'
 
@@ -436,8 +436,16 @@ function serviceSpecial(tokens: string[], _segment: string): CommandRisk | null 
 
 const FORBIDDEN_ARGUMENT_PATTERNS: Array<{ match: RegExp; reason: string }> = [
   { match: /\bfind\b[^&|;]*\s-(?:exec|delete|ok)\b/, reason: 'find -exec/-delete mutates' },
+  { match: /\bfind\b[^&|;]*\s-f(?:print|printf|ls)\b/, reason: 'find -fprint/-fprintf/-fls writes files' },
+  { match: /\bss\b[^&|;]*\s-K\b/, reason: 'ss -K destroys matching sockets' },
+  { match: /\bhistory\b[^&|;]*\s-(?:c|w|a|n|d)\b/, reason: 'history option changes the history file/list' },
+  { match: /\bsar\b[^&|;]*\s-o\b/, reason: 'sar -o writes an activity file' },
+  { match: /\bblkid\b[^&|;]*\s-w\b/, reason: 'blkid -w writes its cache' },
+  { match: /\bnfsstat\b[^&|;]*\s-[zZ]\b/, reason: 'nfsstat -z/-Z resets counters' },
+  { match: /\bsystemd-analyze\b[^&|;]*\sset-log-(?:level|target)\b/, reason: 'systemd-analyze set-log changes runtime logging state' },
   { match: /\bsysctl\b[^&|;]*\s-(?:w|write)\b/, reason: 'sysctl -w mutates' },
-  { match: /\bcurl\b[^&|;]*\s-{1,2}(?:o|output|O|remote-name|T|upload-file|F|form|d|data|data-binary)\b/, reason: 'curl writes files / posts data / uploads' },
+  { match: /\bcurl\b[^&|;]*\s-{1,2}(?:o|output|O|remote-name|T|upload-file|F|form|d|data|data-binary|data-raw|data-urlencode|json)\b/, reason: 'curl writes files / posts data / uploads' },
+  { match: /\bcurl\b[^&|;]*\s-X[A-Za-z]+\b/, reason: 'curl -XVERB sends a non-query request' },
   { match: /\bcurl\b[^&|;]*\s(?:-X|--request)\s+\S+(?<!GET|HEAD)\b/i, reason: 'curl non-GET/HEAD mutates' },
   { match: /\bawk\b[^&|;]*\bsystem\s*\(/, reason: 'awk system() may run anything' },
   { match: /\bfuser\b[^&|;]*\s-k\b/, reason: 'fuser -k kills processes' },
@@ -448,11 +456,29 @@ const FORBIDDEN_ARGUMENT_PATTERNS: Array<{ match: RegExp; reason: string }> = [
 // ---------------- tokenization & quoting ----------------
 
 /** First significant token after stripping a leading env assignment. */
+const TRUSTED_SYSTEM_DIRS = new Set(['/bin', '/sbin', '/usr/bin', '/usr/sbin'])
+const TRUSTED_COMMAND_ALIASES: Record<string, readonly string[]> = {
+  'redis-cli': ['/usr/emp/cachesrv/redis/bin/redis-cli'],
+}
+
+export function canonicalExecutable(token: string): string | undefined {
+  if (!token.includes('/')) return token
+  if (!token.startsWith('/')) return undefined
+  const normalized = token.replace(/\/{2,}/g, '/')
+  const parts = normalized.split('/').filter(Boolean)
+  if (parts.some((part) => part === '.' || part === '..')) return undefined
+  const base = parts.at(-1)
+  if (base === undefined) return undefined
+  const parent = '/' + parts.slice(0, -1).join('/')
+  if (TRUSTED_SYSTEM_DIRS.has(parent)) return base
+  return TRUSTED_COMMAND_ALIASES[base]?.includes(normalized) === true ? base : undefined
+}
+
 function firstToken(segment: string): string | undefined {
   const toks = tokensOf(segment)
   for (const t of toks) {
     if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(t)) continue
-    return t
+    return canonicalExecutable(t)
   }
   return undefined
 }
@@ -565,6 +591,129 @@ function stripWrapper(segment: string, wrapper: string): string {
   return toks.slice(i).join(' ')
 }
 
+type SemanticVerdict = { risk: CommandRisk; ruleId: string; reason: string; confidence?: Confidence }
+const verdict = (risk: CommandRisk, ruleId: string, reason: string, confidence: Confidence = 'HIGH'): SemanticVerdict => ({ risk, ruleId, reason, confidence })
+const semanticRead = (ruleId: string, reason: string): SemanticVerdict => verdict('READ', ruleId, reason)
+
+function semanticV21(segment: string): SemanticVerdict | null {
+  const tokens = tokensOf(segment)
+  const raw = tokens.find((t) => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(t))
+  const command = raw === undefined ? undefined : canonicalExecutable(raw)
+  if (command === undefined) return null
+  const start = tokens.indexOf(raw!) + 1
+  const args = tokens.slice(start)
+  const lower = args.map((t) => t.toLowerCase())
+
+  if (command === 'hostname') {
+    if (args.some((t) => t === '-F' || t === '--file' || !t.startsWith('-'))) return verdict('MODIFY', 'hostname.set', 'hostname argument or -F changes the system hostname')
+    return semanticRead('hostname.show', 'hostname display form is read-only')
+  }
+  if (command === 'date') {
+    if (args.some((t) => t === '-s' || t === '--set' || t.startsWith('--set='))) return verdict('MODIFY', 'date.set', 'date -s/--set changes the system clock')
+    return semanticRead('date.show', 'date display form is read-only')
+  }
+  if (command === 'journalctl') {
+    const mut = args.find((t) => t === '--rotate' || t === '--flush' || t === '--sync' || /^--vacuum-(?:size|time|files)=/.test(t))
+    if (mut !== undefined) {
+      const kind = mut.startsWith('--vacuum-') ? 'vacuum' : mut.slice(2)
+      return verdict('MODIFY', 'journalctl.mutate.' + kind, 'journalctl ' + mut + ' changes journal state or files')
+    }
+    return semanticRead('journalctl.read', 'journalctl query form is read-only')
+  }
+  if (command === 'dmesg') {
+    if (args.some((t) => ['-C', '--clear', '-c', '--read-clear'].includes(t))) return verdict('MODIFY', 'dmesg.clear', 'dmesg clear/read-clear changes the kernel ring buffer')
+    if (args.some((t) => t === '-n' || t === '--console-level' || t.startsWith('--console-level='))) return verdict('MODIFY', 'dmesg.console-level', 'dmesg console-level changes kernel console state')
+    return semanticRead('dmesg.read', 'dmesg query form is read-only')
+  }
+  if (command === 'sysctl') {
+    if (args.some((t) => ['-w', '--write', '--system', '-p', '--load'].includes(t) || t.startsWith('--load=') || (!t.startsWith('-') && t.includes('=')))) return verdict('MODIFY', 'sysctl.write', 'sysctl write/load form changes kernel runtime parameters')
+    return semanticRead('sysctl.read', 'sysctl query form is read-only')
+  }
+  if (command === 'sort') {
+    if (args.some((t) => t === '-o' || t === '--output' || t.startsWith('--output='))) return verdict('MODIFY', 'sort.output', 'sort -o/--output writes a file')
+    return semanticRead('sort.stdout', 'sort writes only to stdout')
+  }
+  if (command === 'uniq') {
+    const valueOpts = new Set(['-f', '-s', '-w', '--skip-fields', '--skip-chars', '--check-chars'])
+    const positional: string[] = []
+    for (let i = 0; i < args.length; i++) { const t = args[i]!; if (valueOpts.has(t)) { i++; continue }; if (!t.startsWith('-')) positional.push(t) }
+    if (positional.length >= 2) return verdict('MODIFY', 'uniq.output', 'uniq second positional path is an output file')
+    return semanticRead('uniq.stdout', 'uniq has no output file')
+  }
+  if (command === 'sed') {
+    if (args.some((t) => /^-i(?:$|.|[^a-zA-Z])/.test(t) || t === '--in-place' || t.startsWith('--in-place='))) return verdict('MODIFY', 'sed.in-place', 'sed in-place editing writes files')
+    if (/(?:^|[\s;{,'/$^*+0-9])[wW]\s+\S/.test(segment)) return verdict('MODIFY', 'sed.script-write', 'sed program contains w/W file output')
+    return semanticRead('sed.stdout', 'sed program writes only to stdout')
+  }
+  if (command === 'awk') {
+    if (/\bsystem\s*\(/.test(segment)) return verdict('MODIFY', 'awk.system', 'awk system() executes arbitrary commands')
+    if (/[>]{1,2}\s*["']/.test(segment)) return verdict('MODIFY', 'awk.redirect', 'awk program redirects output to a file')
+    if (/[>]{1,2}/.test(segment) && !/(?:NR|NF|\$\d+)\s*>[=]?\s*\d/.test(segment)) return verdict('UNKNOWN', 'awk.redirect-ambiguous', 'awk output redirection cannot be excluded', 'LOW')
+    return semanticRead('awk.stdout', 'awk program has no file-write construct')
+  }
+  if (command === 'systemctl') {
+    const verb = args.find((t) => !t.startsWith('-'))
+    if (verb === undefined) return semanticRead('systemctl.flag-list', 'systemctl flag-only form lists units')
+    if (SYSTEMCTL_READ.has(verb)) return semanticRead('systemctl.' + verb, 'systemctl ' + verb + ' is read-only')
+    return null
+  }
+  if (command === 'ip') {
+    const significant = lower.filter((t) => !t.startsWith('-'))
+    const group = significant[0]
+    const sub = significant[1]
+    if (group === undefined || ['monitor', 'help'].includes(group)) return semanticRead('ip.show', 'ip display form is read-only')
+    const mutation: Record<string, Set<string>> = {
+      link: new Set(['set','add','del','delete','replace']), addr: new Set(['add','del','delete','replace','flush','change']), address: new Set(['add','del','delete','replace','flush','change']),
+      route: new Set(['add','del','delete','replace','flush','change','append','prepend']), neigh: new Set(['add','del','delete','replace','flush']), neighbour: new Set(['add','del','delete','replace','flush']),
+      rule: new Set(['add','del','delete','flush']), maddr: new Set(['add','del','delete']), netns: new Set(['add','del','delete','set']),
+    }
+    if (sub !== undefined && mutation[group]?.has(sub) === true) return verdict('MODIFY', 'ip.mutate.' + sub, 'ip ' + group + ' ' + sub + ' changes network state')
+    const groups = new Set(['addr','address','link','route','neigh','neighbour','rule','maddr','mroute','netns'])
+    if (!groups.has(group)) return null
+    if (sub === undefined || ['show','list','get','monitor'].includes(sub)) return semanticRead('ip.' + group + '.' + (sub ?? 'show'), 'ip query form is read-only')
+    return null
+  }
+  if (command === 'kubectl') {
+    const verb = lower[0]
+    const sub = lower[1]
+    if (verb === 'config') {
+      if (['view','current-context','get-contexts','get-clusters','get-users'].includes(sub ?? '')) return semanticRead('kubectl.config.' + sub, 'kubectl config query is read-only')
+      if (sub !== undefined && (sub === 'use-context' || sub === 'unset' || sub === 'rename-context' || sub.startsWith('set-') || sub.startsWith('delete-'))) return verdict('MODIFY', 'kubectl.config.' + sub, 'kubectl config ' + sub + ' writes kubeconfig')
+      return null
+    }
+    if (verb === 'auth') {
+      if (sub === 'can-i' || sub === 'whoami') return semanticRead('kubectl.auth.' + sub, 'kubectl auth query is read-only')
+      if (sub === 'reconcile') return verdict('MODIFY', 'kubectl.auth.reconcile', 'kubectl auth reconcile changes RBAC resources')
+    }
+    return null
+  }
+  if (command === 'ulimit') {
+    if (args.some((t) => !t.startsWith('-')) || args.some((t) => /^-[A-Za-z]+\d/.test(t))) return verdict('MODIFY', 'ulimit.set', 'ulimit with a value changes the shell resource limit')
+    return semanticRead('ulimit.show', 'ulimit query form is read-only')
+  }
+  if (command === 'redis-cli') {
+    const valued = new Set(['-h','-p','-s','-n','-a','--user','--pass','--cert','--key','--cacert'])
+    const words: string[] = []
+    for (let i = 0; i < args.length; i++) { const t = args[i]!; if (t.startsWith('-')) { if (valued.has(t) && !t.includes('=')) i++; continue }; words.push(t.toUpperCase()) }
+    const cmd = words[0]; const sub = words[1]
+    if (cmd === undefined) return semanticRead('redis-cli.help', 'bare redis-cli is non-mutating')
+    if (['FLUSHDB','FLUSHALL','SHUTDOWN'].includes(cmd) || (cmd === 'DEBUG' && sub === 'SEGFAULT')) return verdict('DANGEROUS', 'redis-cli.dangerous.' + cmd.toLowerCase(), 'Redis ' + cmd + ' is destructive')
+    if (cmd === 'EVAL' || cmd === 'EVALSHA') return verdict('UNKNOWN', 'redis-cli.unknown.' + cmd.toLowerCase(), 'Redis scripts may read or write', 'LOW')
+    const read = new Set(['PING','INFO','DBSIZE','TIME','ROLE','COMMAND','GET','MGET','HGET','HGETALL','HMGET','LRANGE','LLEN','SCARD','SMEMBERS','ZRANGE','ZCARD','TTL','PTTL','TYPE','EXISTS','SCAN','SSCAN','HSCAN','ZSCAN','KEYS','RANDOMKEY'])
+    const modify = new Set(['SET','SETEX','PSETEX','MSET','DEL','UNLINK','EXPIRE','PEXPIRE','EXPIREAT','PERSIST','HSET','HDEL','LPUSH','RPUSH','LPOP','RPOP','SADD','SREM','ZADD','ZREM','INCR','DECR','SAVE','BGSAVE','BGREWRITEAOF','REPLICAOF','SLAVEOF','MIGRATE','RESTORE'])
+    if (cmd === 'CONFIG') { if (sub === 'GET') return semanticRead('redis-cli.read.config-get','Redis CONFIG GET is read-only'); if (sub === 'SET' || sub === 'REWRITE') return verdict('MODIFY','redis-cli.mutate.config-' + sub.toLowerCase(),'Redis CONFIG changes server state') }
+    if (cmd === 'CLIENT') { if (sub === 'LIST' || sub === 'INFO') return semanticRead('redis-cli.read.client-' + sub.toLowerCase(),'Redis CLIENT query is read-only'); if (sub === 'KILL' || sub === 'PAUSE') return verdict('MODIFY','redis-cli.mutate.client-' + sub.toLowerCase(),'Redis CLIENT command changes connection state') }
+    if (cmd === 'SLOWLOG' && (sub === 'GET' || sub === 'LEN')) return semanticRead('redis-cli.read.slowlog-' + sub.toLowerCase(),'Redis SLOWLOG query is read-only')
+    if (cmd === 'MEMORY' && (sub === 'STATS' || sub === 'DOCTOR')) return semanticRead('redis-cli.read.memory-' + sub.toLowerCase(),'Redis MEMORY query is read-only')
+    if (cmd === 'ACL') { if (sub !== undefined && ['LIST','GETUSER','WHOAMI'].includes(sub)) return semanticRead('redis-cli.read.acl-' + sub.toLowerCase(),'Redis ACL query is read-only'); if (sub === 'SETUSER' || sub === 'DELUSER') return verdict('MODIFY','redis-cli.mutate.acl-' + sub.toLowerCase(),'Redis ACL command changes users') }
+    if (cmd === 'SCRIPT' && (sub === 'FLUSH' || sub === 'LOAD')) return verdict('MODIFY','redis-cli.mutate.script-' + sub.toLowerCase(),'Redis SCRIPT command changes script cache')
+    if (read.has(cmd)) return semanticRead('redis-cli.read.' + cmd.toLowerCase(), 'Redis ' + cmd + ' is read-only')
+    if (modify.has(cmd)) return verdict('MODIFY','redis-cli.mutate.' + cmd.toLowerCase(),'Redis ' + cmd + ' changes data or server state')
+    return verdict('UNKNOWN','redis-cli.unknown','Redis command semantics are unknown','LOW')
+  }
+  return null
+}
+
 // ---------------- classification core ----------------
 
 function classificationOf(risk: CommandRisk, reason: string, ruleId: string, command: string, confidence: Confidence = 'HIGH'): Classification {
@@ -581,6 +730,8 @@ function classificationOf(risk: CommandRisk, reason: string, ruleId: string, com
 
 /** Classify one pipeline segment (no sudo/wrapper prefix). Full reader rule. */
 function classifyPlainSegment(segment: string, whole: string): Classification {
+  const semantic = semanticV21(segment)
+  if (semantic !== null) return classificationOf(semantic.risk, semantic.reason, semantic.ruleId, segment, semantic.confidence ?? 'HIGH')
   const token = firstToken(segment)
   const rule = token !== undefined ? READ_RULES[token] : undefined
 
@@ -683,8 +834,10 @@ function scanWholeCommand(command: string): Classification | null {
 
   // 3) confirmed mutation anywhere (verb-scoped + plain modifier verbs + write redirect)
   const whole = ' ' + masked + ' '
+  const systemctlMutation = whole.match(/\bsystemctl\b[^&|;]*\s(start|stop|restart|reload|reload-or-restart|try-restart|condrestart|force-reload|enable|disable|reenable|mask|unmask|daemon-reload|daemon-reexec|kill|reset-failed|set-default|set-property|edit|add-wants|add-requires|preset|preset-all|isolate|switch-root|halt|poweroff|reboot|kexec|suspend|hibernate|hybrid-sleep|freeze|exit|rescue|emergency)\b/)
+  if (systemctlMutation !== null) return classificationOf('MODIFY', 'systemctl ' + systemctlMutation[1] + ' changes server state', 'systemctl.mutate.' + systemctlMutation[1], trimmed)
+  if (SED_INPLACE.test(whole)) return classificationOf('MODIFY', 'sed in-place editing writes files', 'sed.in-place', trimmed)
   if (
-    SYSTEMCTL_MODIFY.test(whole) ||
     SERVICE_MODIFY.test(whole) ||
     PKG_MODIFY.test(whole) ||
     SED_INPLACE.test(whole) ||

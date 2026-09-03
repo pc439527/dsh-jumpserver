@@ -114,6 +114,15 @@ export function apply(ctx: Context, config: JumpServerConfig): void {
     },
   })
 
+  /** One authoritative end-and-lock lifecycle for every explicit close path. */
+  const terminateConversationJumpServer = async (sessionId: string) => {
+    grants.revoke(sessionId)
+    confirmTokens.delete(sessionId)
+    const bundle = registry.get(sessionId)
+    if (bundle === undefined) return null
+    return bundle.manager.close()
+  }
+
   // Live settings seam; supports current provider API and the legacy helper.
   ctx.effect(
     async () => {
@@ -186,11 +195,11 @@ export function apply(ctx: Context, config: JumpServerConfig): void {
       }, 30000)
       const cfgAtBoot = getConfig()
       ctx.logger.warn('[dsh-jumpserver] started: gateway=' + cfgAtBoot.host + ':' + cfgAtBoot.port + ' mode=' + cfgAtBoot.permissionMode)
-      const disposers = registerJumpServerTools(ctx, registry, getConfig, grants)
+      const disposers = registerJumpServerTools(ctx, registry, getConfig, grants, terminateConversationJumpServer)
       // V0.3.0: ops investigation tools (triage/compare/case/remediate) share the
       // same grant boundary and the per-conversation case registry.
       const opsDisposers = registerOpsTools(ctx, registry, getConfig, grants, cases)
-      const disposeCommand = registerJumpServerCommand(ctx, registry, getConfig, grants)
+      const disposeCommand = registerJumpServerCommand(ctx, registry, getConfig, grants, terminateConversationJumpServer)
       return () => {
         stopIdle()
         disposeCommand?.()
@@ -233,6 +242,7 @@ export function apply(ctx: Context, config: JumpServerConfig): void {
     getConfig,
     resolvePassword,
     grantedFor: (sessionId: string | undefined) => grants.isGranted(sessionId ?? ''),
+    terminateFor: terminateConversationJumpServer,
     statusFor: (sessionId: string | undefined) => {
       const cfgNow = getConfig()
       const bundle = sessionId !== undefined ? registry.get(sessionId) : undefined
@@ -318,8 +328,8 @@ export function apply(ctx: Context, config: JumpServerConfig): void {
           }
         }
         if (kind === 'q') {
-          await bundle.manager.close()
-          return { ok: true, kind: 'close', message: 'JumpServer 会话已关闭', sessionId }
+          await terminateConversationJumpServer(sessionId)
+          return { ok: true, kind: 'close', message: 'JumpServer 已结束并锁定', state: SessionState.DISCONNECTED, connected: false, sessionId, granted: false }
         }
         if (kind === 'enter') {
           try {
@@ -383,7 +393,7 @@ export function apply(ctx: Context, config: JumpServerConfig): void {
             confirmTokens.delete(sessionId)
             return { ok: false, code: 'CONFIRMATION_EXPIRED', message: '确认已过期，请重新发起该命令', state: st.state, sessionId }
           }
-          if (challenge.commandHash !== commandHashOf(command) || challenge.risk !== risk) {
+          if (confirmToken === undefined || challenge.token !== confirmToken || challenge.commandHash !== commandHashOf(command) || challenge.risk !== risk) {
             confirmTokens.delete(sessionId)
             return { ok: false, code: 'CONFIRMATION_MISMATCH', message: '确认内容与原始命令不一致，已拒绝执行', state: st.state, sessionId }
           }

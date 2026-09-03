@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { classifyCommand, hasFileWriteRedirection, isReadOnlyAllowed } from '../src/security/command-classifier.js'
+import { CLASSIFIER_VERSION, classifyCommand, hasFileWriteRedirection, isReadOnlyAllowed } from '../src/security/command-classifier.js'
 import { gateDecision } from '../src/security/permission.js'
 
 describe('read-only allowlist', () => {
@@ -327,14 +327,64 @@ describe('V0.3.1 semantic registry + UNKNOWN (P0)', () => {
   it('classification carries ruleId / reason / confidence / classifierVersion', () => {
     const c = classifyCommand('systemctl status nginx')
     expect(c.risk).toBe('READ')
-    expect(c.ruleId).toBe('systemctl.rule')
+    expect(c.ruleId).toBe('systemctl.status')
     expect(c.reason.length).toBeGreaterThan(0)
-    expect(c.classifierVersion).toBe(2)
+    expect(c.classifierVersion).toBe(3)
     expect(c.normalizedCommand).toBe('systemctl status nginx')
     const u = classifyCommand('fooctl bar')
     expect(u.ruleId).toBe('unknown.command')
     expect(u.confidence).toBe('LOW')
     const m = classifyCommand('systemctl restart nginx')
-    expect(m.ruleId).toBe('mutation.verb')
+    expect(m.ruleId).toBe('systemctl.mutate.restart')
+  })
+})
+
+describe('Classifier V2.1 semantic hardening', () => {
+  it.each([
+    ['hostname prod.example', 'hostname.set'],
+    ['hostname -F /tmp/hostname', 'hostname.set'],
+    ['date -s 2025-01-01', 'date.set'],
+    ['date --set=tomorrow', 'date.set'],
+    ['ip link set eth0 down', 'ip.mutate.set'],
+    ['ip addr add 192.0.2.2/24 dev eth0', 'ip.mutate.add'],
+    ['journalctl --rotate', 'journalctl.mutate.rotate'],
+    ['journalctl --vacuum-time=1d', 'journalctl.mutate.vacuum'],
+    ['dmesg -C', 'dmesg.clear'],
+    ['dmesg --read-clear', 'dmesg.clear'],
+    ['sysctl vm.drop_caches=3', 'sysctl.write'],
+    ["sed -n '1w /tmp/sed.out' /etc/hosts", 'sed.script-write'],
+    ['sort -o /tmp/sorted /etc/hosts', 'sort.output'],
+    ['uniq input.txt output.txt', 'uniq.output'],
+    ["awk '{ print $1 > \"/tmp/awk.out\" }' /etc/hosts", 'awk.redirect'],
+    ['kubectl config use-context prod', 'kubectl.config.use-context'],
+    ['kubectl auth reconcile -f role.yaml', 'kubectl.auth.reconcile'],
+    ['redis-cli SET key value', 'redis-cli.mutate.set'],
+  ])('classifies %s as MODIFY with a precise rule', (command, ruleId) => {
+    expect(classifyCommand(command)).toMatchObject({ risk: 'MODIFY', ruleId })
+  })
+
+  it.each([
+    'hostname', 'hostname -f', 'date -u', 'ip addr show', 'journalctl -u nginx',
+    'dmesg -T', 'sysctl -a', "sed -n '1p' /etc/hosts", 'sort /etc/hosts',
+    'uniq input.txt', "awk '{ print $1 }' /etc/hosts", 'systemctl --no-pager',
+    'systemctl --version', 'kubectl config view', 'kubectl config current-context',
+    'kubectl config get-contexts', 'kubectl auth can-i get pods', 'kubectl auth whoami',
+    'redis-cli INFO', 'redis-cli CONFIG GET maxmemory',
+    '/usr/emp/cachesrv/redis/bin/redis-cli INFO', '/usr/bin/hostname',
+    'env /bin/date -u', '/usr/bin/timeout 5 /usr/bin/hostname',
+  ])('keeps confirmed read form READ: %s', (command) => {
+    expect(classifyCommand(command).risk).toBe('READ')
+  })
+
+  it('normalizes only trusted executable paths and wrappers', () => {
+    expect(classifyCommand('/usr/sbin/sysctl -w vm.drop_caches=3')).toMatchObject({ risk: 'MODIFY', ruleId: 'sysctl.write' })
+    expect(classifyCommand('/opt/tools/hostname').risk).toBe('UNKNOWN')
+    expect(classifyCommand('/tmp/redis-cli INFO').risk).toBe('UNKNOWN')
+    expect(classifyCommand('/opt/bin/env hostname').risk).toBe('UNKNOWN')
+  })
+
+  it('upgrades classifier metadata to V2.1', () => {
+    expect(CLASSIFIER_VERSION).toBe(3)
+    expect(classifyCommand('hostname').classifierVersion).toBe(3)
   })
 })
