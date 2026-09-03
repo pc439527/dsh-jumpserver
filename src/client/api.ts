@@ -8,6 +8,9 @@ const HOST_BASE = (): string => {
 export interface SnapshotResponse {
   ok?: boolean
   lastSeq: number
+  /** V0.3.1: oldest retained event seq (0 while empty) — lets the client
+   *  detect a ring-buffer gap and warn instead of faking continuous output. */
+  oldestSeq?: number
   events: Array<{
     seq: number
     timestamp: number
@@ -90,6 +93,10 @@ export interface ManualCommandResponse {
   /** V0.2.7: CONFIRM_MODIFY gate requires a second confirmation for this command. */
   risk?: string
   command?: string
+  /** V0.3.1: one-time confirmation challenge (single use, TTL). */
+  confirmToken?: string
+  commandHash?: string
+  expiresAt?: number
   /** V0.2.7: menu 'p' asset rows. */
   rows?: Array<{ name?: string; ip?: string | null; platform?: string | null; node?: string | null; comment?: string | null }>
   count?: number
@@ -164,11 +171,14 @@ export function fetchStatus(sessionId: string, signal?: AbortSignal): Promise<St
 
 
 /** Explicit HUMAN command from the sidebar; see Host bridge for safety rules.
- *  V0.2.7: confirmed=true acknowledges the CONFIRM_MODIFY gate for one call. */
-export function sendManualCommand(sessionId: string, command: string, signal?: AbortSignal, confirmed = false): Promise<ManualCommandResponse> {
+ *  V0.2.7: confirmed=true acknowledges the CONFIRM_MODIFY gate for one call.
+ *  V0.3.1: the confirmed call must present the one-time confirmToken issued by
+ *  the first MANUAL_CONFIRM_REQUIRED response (host validates session + command
+ *  hash + risk + single use). */
+export function sendManualCommand(sessionId: string, command: string, signal?: AbortSignal, confirmed = false, confirmToken?: string): Promise<ManualCommandResponse> {
   return postJson<ManualCommandResponse>(
     '/api/jumpserver.manual',
-    { sessionId, command, confirmed },
+    { sessionId, command, confirmed, confirmToken },
     { signal, timeoutMs: 605000, acceptErrorBody: true },
   )
 }
@@ -188,4 +198,21 @@ export function fetchAudit(sessionId: string, signal?: AbortSignal): Promise<Aud
  *  (without retyping the password) must test against the NEW ref. */
 export function fetchTestConnection(draft?: { host?: string; port?: number; username?: string; password?: string; passwordEnv?: string }): Promise<TestResponse> {
   return postJson<TestResponse>('/api/jumpserver.test', draft ?? {}, { timeoutMs: 30000 })
+}
+
+/** V0.3.1 #16: command risk checker — pure classification, never connects. */
+export interface ClassifyResponse {
+  ok?: boolean
+  code?: string
+  message?: string
+  risk?: string
+  reason?: string
+  ruleId?: string
+  confidence?: string
+  classifierVersion?: number
+  normalizedCommand?: string
+}
+
+export function fetchClassify(command: string, signal?: AbortSignal): Promise<ClassifyResponse> {
+  return postJson<ClassifyResponse>('/api/jumpserver.classify', { command }, { signal, timeoutMs: 10000 })
 }

@@ -70,11 +70,30 @@ export class TerminalRingBuffer {
   private events: TerminalEvent[] = []
   private cursor = 0
   private outputBytes = 0
+  private maxEvents: number
 
   constructor(
-    private readonly maxEvents = 20000,
+    maxEvents = 20000,
     private readonly maxOutputBytes = MAX_TERMINAL_BYTES,
-  ) {}
+  ) {
+    this.maxEvents = maxEvents
+  }
+
+  /**
+   * V0.3.1 P2: re-budget on live settings change — terminalScrollback now sets
+   * the HOST retention too, not just the browser row cap. Trims oldest events
+   * when the new budget is smaller.
+   */
+  setScrollbackRows(rows: number): void {
+    const next = Math.max(1000, Math.min(200000, Math.round(rows) * 4))
+    if (next === this.maxEvents) return
+    this.maxEvents = next
+    while (this.events.length > this.maxEvents) {
+      const head = this.events[0]!
+      if (head.type === 'output') this.outputBytes -= head.data.length
+      this.events.shift()
+    }
+  }
 
   /** Append one event; drops oldest events to respect the caps. */
   push(event: TerminalNewEvent): TerminalEvent {
@@ -176,14 +195,18 @@ export class TerminalObserver {
     this.buffer.clear()
   }
 
-  /** @internal mirrors the configured scrollback for future row-based budgeting. */
+  /** Mirrors the configured scrollback budget (rows). */
   get scrollback(): number {
     return this.scrollbackRows
   }
 
-  /** Re-budget on live settings change (P2: terminalScrollback now controls the observer too). */
+  /** V0.3.1 P2: terminalScrollback now controls the ObservER retention too
+   *  (event budget = rows*4, floored at 1000) — the host ring shrinks with the
+   *  browser cap instead of silently keeping 20k events. */
   setScrollbackRows(rows: number): void {
-    this.scrollbackRows = Math.max(200, rows)
+    const effective = Math.max(200, rows)
+    this.scrollbackRows = effective
+    this.buffer.setScrollbackRows(effective)
   }
 }
 

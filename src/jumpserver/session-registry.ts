@@ -29,6 +29,10 @@ export interface SessionRegistryOptions {
   create: (sessionId: string) => SessionBundle
   now?: () => number
   detachGraceMs?: number
+  /** V0.3.1 P2: called when a conversation bundle is detached — the owner
+   *  cleans every session-attached structure (recent audits, cases, grants,
+   *  confirmation tokens) so long-running hosts do not leak Maps. */
+  onDetach?: (sessionId: string) => void
 }
 
 /** Fallback only for direct/mock tool calls that carry no Agent session. */
@@ -84,6 +88,7 @@ export class SessionRegistry {
       if (state === SessionState.DISCONNECTED && unusedFor >= this.detachGraceMs) {
         this.bundles.delete(sessionId)
         bundle.manager.dispose()
+        this.options.onDetach?.(sessionId)
       }
     }
   }
@@ -92,6 +97,7 @@ export class SessionRegistry {
     for (const [sessionId, bundle] of [...this.bundles]) {
       this.bundles.delete(sessionId)
       bundle.manager.dispose()
+      this.options.onDetach?.(sessionId)
     }
   }
 }

@@ -16,10 +16,22 @@ export interface AuditRecord {
   target: string | null
   hostname: string | null
   command: string | null
-  /** V0.3.1: who ran the command — AGENT (tool path) or HUMAN (sidebar input). */
-  actor: 'AGENT' | 'HUMAN'
-  /** Risk class (READ/LOW/MODIFY/DANGEROUS); manual commands keep their classification. */
+  /** V0.3.1: who ran the command — AGENT (tool path), HUMAN (sidebar input) or SYSTEM_PROFILE (ops sweep). */
+  actor: 'AGENT' | 'HUMAN' | 'SYSTEM_PROFILE'
+  /** Risk class (READ/PRIVILEGED_READ/UNKNOWN/MODIFY/DANGEROUS). */
   risk: string
+  /** V0.3.1: why the classifier chose this risk (audit must explain itself). */
+  riskReason?: string
+  /** V0.3.1: matched semantic rule id (systemctl.status / unknown.command / ...). */
+  riskRuleId?: string
+  riskConfidence?: string
+  classifierVersion?: number
+  /** V0.3.1: whitespace-normalized command. */
+  normalizedCommand?: string
+  /** V0.3.1: whether a human approval was required for this command. */
+  approvalRequired: boolean
+  /** V0.3.1: 'none' | 'approved' | 'denied' — the gate outcome. */
+  approvalResult: string
   permissionMode: PermissionMode
   result: string
   exitCode: number | null
@@ -47,7 +59,12 @@ export interface ExecRequest {
   timeoutMs?: number
   risk: string
   /** V0.3.1: audit actor — defaults to AGENT for the tool path. */
-  actor?: 'AGENT' | 'HUMAN'
+  actor?: 'AGENT' | 'HUMAN' | 'SYSTEM_PROFILE'
+  /** V0.3.1: full classification (rule/reason/confidence) so the audit is self-explanatory. */
+  classification?: { risk: string; reason?: string; ruleId?: string; confidence?: string; classifierVersion?: number; normalizedCommand?: string }
+  /** V0.3.1: approval outcomes from the gate. */
+  approvalRequired?: boolean
+  approvalResult?: string
   signal?: AbortSignal
 }
 
@@ -57,6 +74,12 @@ export interface RunRequest {
   timeoutMs?: number
   risk: string
   signal?: AbortSignal
+  /** V0.3.1: audit actor (default AGENT). */
+  actor?: 'AGENT' | 'HUMAN' | 'SYSTEM_PROFILE'
+  /** V0.3.1: full classification for the audit. */
+  classification?: { risk: string; reason?: string; ruleId?: string; confidence?: string; classifierVersion?: number; normalizedCommand?: string }
+  approvalRequired?: boolean
+  approvalResult?: string
   /** Runs right after navigation (target verified) and immediately before exec. */
   beforeExec?: () => Promise<void>
 }
@@ -66,6 +89,12 @@ export interface BatchCommandRequest {
   command: string
   timeoutMs?: number
   risk: string
+  /** V0.3.1: audit actor for this batch command (SYSTEM_PROFILE for ops sweeps). */
+  actor?: 'AGENT' | 'HUMAN' | 'SYSTEM_PROFILE'
+  /** V0.3.1: full classification for the audit. */
+  classification?: { risk: string; reason?: string; ruleId?: string; confidence?: string; classifierVersion?: number; normalizedCommand?: string }
+  approvalRequired?: boolean
+  approvalResult?: string
   /** Runs right after the target is verified and immediately before this command's exec. */
   beforeExec?: () => Promise<void>
 }
@@ -307,6 +336,10 @@ export class SessionManager {
         hostname: session.currentHostname,
         command: request.command,
         risk: request.risk,
+        actor: request.actor,
+        classification: request.classification,
+        approvalRequired: request.approvalRequired,
+        approvalResult: request.approvalResult,
         result: outcome.executionState,
         exitCode: outcome.kind === 'completed' ? outcome.exitCode : null,
         durationMs,
@@ -349,6 +382,10 @@ export class SessionManager {
         hostname: st.hostname,
         command: request.command,
         risk: request.risk,
+        actor: request.actor,
+        classification: request.classification,
+        approvalRequired: request.approvalRequired,
+        approvalResult: request.approvalResult,
         result: outcome.executionState,
         exitCode: outcome.kind === 'completed' ? outcome.exitCode : null,
         durationMs,
@@ -431,6 +468,10 @@ export class SessionManager {
             hostname: session.currentHostname,
             command: item.command,
             risk: item.risk,
+            actor: item.actor,
+            classification: item.classification,
+            approvalRequired: item.approvalRequired,
+            approvalResult: item.approvalResult,
             result: outcome.executionState,
             exitCode: outcome.kind === 'completed' ? outcome.exitCode : null,
             durationMs,
@@ -451,6 +492,10 @@ export class SessionManager {
             hostname: session.currentHostname,
             command: item.command,
             risk: item.risk,
+            actor: item.actor,
+            classification: item.classification,
+            approvalRequired: item.approvalRequired,
+            approvalResult: item.approvalResult,
             result: 'error',
             exitCode: null,
             durationMs: null,
@@ -734,8 +779,11 @@ export class SessionManager {
     target?: string | null
     hostname?: string | null
     command?: string | null
-    /** V0.3.1: AGENT by default; the manual bridge passes HUMAN. */
-    actor?: 'AGENT' | 'HUMAN'
+    /** V0.3.1: AGENT by default; the manual bridge passes HUMAN; ops sweeps pass SYSTEM_PROFILE. */
+    actor?: 'AGENT' | 'HUMAN' | 'SYSTEM_PROFILE'
+    classification?: { risk: string; reason?: string; ruleId?: string; confidence?: string; classifierVersion?: number; normalizedCommand?: string }
+    approvalRequired?: boolean
+    approvalResult?: string
     risk: string
     result: string
     exitCode?: number | null
@@ -745,6 +793,7 @@ export class SessionManager {
     if (!cfg.enableAudit) return
     if (this.options.onAudit === undefined) return
     const session = this.session
+    const classification = partial.classification
     const record: AuditRecord = {
       timestamp: new Date().toISOString(),
       operation: partial.operation,
@@ -754,6 +803,13 @@ export class SessionManager {
       command: partial.command ?? null,
       actor: partial.actor ?? 'AGENT',
       risk: partial.risk,
+      riskReason: classification?.reason,
+      riskRuleId: classification?.ruleId,
+      riskConfidence: classification?.confidence,
+      classifierVersion: classification?.classifierVersion,
+      normalizedCommand: classification?.normalizedCommand ?? (partial.command !== null && partial.command !== undefined ? partial.command.replace(/\s+/g, ' ').trim() : undefined),
+      approvalRequired: partial.approvalRequired ?? false,
+      approvalResult: partial.approvalResult ?? 'none',
       permissionMode: cfg.permissionMode,
       result: partial.result,
       exitCode: partial.exitCode ?? null,

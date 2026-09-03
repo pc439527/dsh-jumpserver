@@ -154,6 +154,11 @@ export class OpsCaseRegistry {
     return [...(this.cases.get(conversation) ?? [])]
   }
 
+  /** V0.3.1 P2: drop every case of a detached conversation (memory hygiene). */
+  deleteConversation(conversation: string): void {
+    this.cases.delete(conversation)
+  }
+
   requireCurrent(conversation: string): OpsCase {
     const c = this.current(conversation)
     if (c === undefined) throw new Error('NO_CASE: create an investigation case first (jumpserver_case action=new)')

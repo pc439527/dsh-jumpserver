@@ -4,11 +4,44 @@
  * runProfileSweep drives ONE target-affinity batch turn per phase through the
  * conversation's SessionManager (enter->probe->commands in a single mutex
  * turn), so a triage on 'auto' reuses the already-entered asset for phase 2.
- * All commands are static READ commands (see ops/profiles.ts + the
- * READ-classification test), so no approval prompts fire in READ_ONLY.
+ *
+ * V0.3.1: profiles no longer hard-code risk='READ'. Every profile command is
+ * re-classified by the SAME classifier as agent commands; a command that the
+ * classifier does not confirm as READ aborts the sweep with
+ * PROFILE_RISK_MISMATCH (never silently executes under a declared risk).
  */
 import type { SessionManager } from '../jumpserver/session-manager.js'
+import { JumpServerError } from '../jumpserver/errors.js'
+import { classifyCommand } from '../security/command-classifier.js'
 import { DETECT_PROFILE, LINUX_BASE, detectAppIds, errorCommands, linuxCommands, profileCommands, resolveProfile, sanitizeSince, type ProfileCommand } from './profiles.js'
+
+export interface TrustedReadCommand {
+  command: string
+  risk: string
+  actor: 'SYSTEM_PROFILE'
+  classification: { risk: string; reason?: string; ruleId?: string; confidence?: string; classifierVersion?: number; normalizedCommand?: string }
+}
+
+/**
+ * V0.3.1 P0: one trusted-read entry. The classifier — not the profile author —
+ * decides the risk; anything the classifier does not confirm as READ aborts
+ * with PROFILE_RISK_MISMATCH instead of executing.
+ */
+export function trustedRead(command: string): TrustedReadCommand {
+  const c = classifyCommand(command)
+  if (c.risk !== 'READ') {
+    throw new JumpServerError(
+      'PROFILE_RISK_MISMATCH',
+      'profile command is not a confirmed READ: ' + command + ' (classified ' + c.risk + ' / ' + c.ruleId + '); sweep aborted',
+    )
+  }
+  return {
+    command,
+    risk: c.risk,
+    actor: 'SYSTEM_PROFILE',
+    classification: { risk: c.risk, reason: c.reason, ruleId: c.ruleId, confidence: c.confidence, classifierVersion: c.classifierVersion, normalizedCommand: c.normalizedCommand },
+  }
+}
 
 export interface CollectedCommand {
   command: string
@@ -73,7 +106,7 @@ export async function runProfileSweep(manager: SessionManager, target: string, o
   const since = sanitizeSince(options.since)
   const phase1 = await manager.runTargetBatch({
     target,
-    commands: phaseOne(profileId, since).commands.map((c) => ({ command: c.command, risk: 'READ' })),
+    commands: phaseOne(profileId, since).commands.map((c) => trustedRead(c.command)),
     signal: options.signal,
   })
   if (phase1.error !== null) {
@@ -109,7 +142,7 @@ export async function runProfileSweep(manager: SessionManager, target: string, o
   if (extra.length > 0) {
     const phase2 = await manager.runTargetBatch({
       target,
-      commands: extra.map((c) => ({ command: c.command, risk: 'READ' })),
+      commands: extra.map((c) => trustedRead(c.command)),
       signal: options.signal,
     })
     if (phase2.error === null) second = collectedOf(phase2, extra)

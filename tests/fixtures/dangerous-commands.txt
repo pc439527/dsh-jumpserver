@@ -1,0 +1,26 @@
+# V0.3.1 dangerous corpus — host-destructive / irreversible.
+rm -rf /
+rm -rf /*
+rm -fr /
+rm -rf / --no-preserve-root
+mkfs /dev/sda
+mkfs.ext4 /dev/sdb1
+mkfs.xfs /dev/sdc1
+wipefs -a /dev/sdb
+dd if=/dev/zero of=/dev/sda bs=1M count=1
+dd if=/dev/random of=/dev/sdb
+shutdown -h now
+shutdown -r now
+reboot
+poweroff
+halt
+iptables -F
+iptables -X
+iptables -P INPUT DROP
+kill -9 -1
+DROP DATABASE prod;
+TRUNCATE TABLE audit_log;
+:(){ :|:& };:
+chmod -R 777 /
+sudo rm -rf /
+sudo dd if=/dev/zero of=/dev/sda

@@ -1,0 +1,394 @@
+# V0.3.1 read-only corpus — real daily Linux ops commands that MUST classify READ.
+# Lines starting with '#' are comments; blank lines are skipped.
+
+# system / identity
+hostname
+hostname -f
+hostname -I
+uname -a
+uname -r
+uname -m
+uname -n
+whoami
+id
+id -u
+id -g
+groups
+who
+who -b
+who -r
+w
+last -n 10
+last -x
+lastlog
+uptime
+uptime -p
+date
+date -u
+date +%Y-%m-%d
+cal
+nproc
+lscpu
+lscpu -e
+lsb_release -a
+cat /etc/os-release
+cat /etc/redhat-release
+cat /etc/passwd
+cat /etc/group
+cat /etc/hostname
+hostnamectl status
+hostnamectl
+systemd-detect-virt
+timedatectl status
+timedatectl show
+timedatectl list-timezones
+localectl status
+localectl show
+localectl list-locales
+locale
+locale -a
+ulimit -a
+ulimit -n
+ulimit -u
+getconf PAGESIZE
+getconf LONG_BIT
+sysctl kernel.hostname
+sysctl net.ipv4.ip_forward
+sysctl -a
+env
+printenv
+printenv PATH
+which nginx
+which java
+type nginx
+type -a ls
+readlink -f /proc/1/exe
+realpath /etc/nginx/nginx.conf
+
+# cpu / memory
+lscpu
+nproc
+free -m
+free -h
+free -m -t
+vmstat 1 3
+vmstat -s
+iostat -x 1 2
+iostat -d 1
+mpstat -P ALL 1
+mpstat 1 3
+pidstat -d 1
+pidstat -r 1
+sar -u 1 3
+sar -r 1 3
+top -bn1
+top -b -n 1
+top -b -n 1 -o %MEM
+numactl --hardware
+numactl --show
+ps -ef
+ps aux
+ps aux --sort=-%mem
+ps -eo pid,ppid,user,%cpu,%mem,cmd --sort=-%cpu
+ps -eo pid,rss,user,cmd --sort=-rss
+ps -eo stat,cmd
+w
+uptime
+
+# disk / filesystem
+df -h
+df -i
+df -hT
+df -ah
+du -sh /data
+du -sh *
+du -xsh /
+du -m /var | sort -rn | head -20
+lsblk
+lsblk -f
+lsblk -o NAME,SIZE,TYPE,MOUNTPOINT
+blkid
+findmnt
+findmnt -T /data
+findmnt -o SOURCE,TARGET,FSTYPE
+findmnt -r
+mount
+mount -l
+fdisk -l
+stat -f /data
+stat -c '%n %s %U:%G %a' /etc/hosts
+iostat -x 1 2
+
+# files
+ls -la /etc
+ls -l /proc/1/exe
+ls -lah /opt/app
+stat /etc/hosts
+stat -c '%n %s' /opt/app/app.jar
+file /opt/app/app.jar
+file /etc/passwd
+readlink -f /proc/1/exe
+realpath /etc/hosts
+namei -l /opt/app/config
+getfacl /data
+getfacl -p /etc/hosts
+lsattr /etc/hosts
+lsattr -d /data
+sha1sum /opt/app/app.jar
+sha256sum /opt/app/app.jar
+sha512sum /etc/hosts
+md5sum /opt/app/app.jar
+cksum /opt/app/app.jar
+strings /opt/app/app.jar
+strings -n 8 /opt/app/app.jar
+cat /etc/hosts
+cat -n /etc/passwd
+head -n 20 /etc/passwd
+head -c 1024 /dev/sda
+tail -n 50 /var/log/messages
+tail -n 30 /var/log/secure
+wc -l /etc/passwd
+wc -c /opt/app/app.jar
+sort /etc/passwd
+sort -u /etc/group
+cut -d: -f1 /etc/passwd
+uniq /tmp/dupes.txt
+grep -i error /var/log/app.log
+grep -E 'a|b' /etc/hosts
+grep -c 'root' /etc/passwd
+grep -v '^#' /etc/nginx/nginx.conf | head -40
+awk '{print $2}' /proc/meminfo
+awk -F: '$3==0{print $1}' /etc/passwd
+awk 'NR>=5 && NR<=15' /var/log/app.log
+diff /etc/hosts /etc/hosts.bak 2>/dev/null
+find /etc/nginx -maxdepth 2 -name '*.conf'
+find /var/log -name '*.log' -mtime -1
+find / -xdev -type f -size +100M -ls 2>/dev/null
+find /opt -maxdepth 2 -type d -name '*java*'
+ls /opt 2>/dev/null | head -20
+
+# processes / threads
+ps -ef
+ps aux
+pstree
+pstree -ap
+pstree -p 1234
+pmap -x 1234
+pmap 1234
+lsns
+cat /proc/1234/status
+ls -l /proc/1234/fd
+lsof
+lsof -i
+lsof -iTCP:80
+lsof -p 1234
+lsof -i :3306
+ss -lntup
+ss -lnt
+ss -s
+ss -lntp | grep nginx
+netstat -tulpn
+netstat -s
+netstat -i
+fuser -v 80/tcp
+
+# network
+ip addr
+ip -br addr
+ip link
+ip -s link
+ip route
+ip route get 10.0.0.1
+ip neigh
+ip rule
+ip mroute show
+bridge link
+bridge vlan show
+resolvectl status
+resolvectl query localhost
+nmcli device show
+nmcli connection show
+nmcli general status
+ethtool eth0
+ethtool -i eth0
+ethtool -k eth0
+ping -c 3 10.0.0.1
+ping -c 1 -W 1 203.0.113.1
+traceroute -n 10.0.0.1
+host example.com
+dig example.com
+dig +short example.com A
+dig +short example.com MX
+nslookup example.com
+getent hosts example.com
+getent passwd
+getent group
+curl -s http://127.0.0.1/health
+curl -sI http://127.0.0.1/
+curl -s -m 5 http://127.0.0.1/status
+
+# systemd / services
+systemctl status sshd
+systemctl status --no-pager nginx
+systemctl show sshd
+systemctl show -p ActiveState sshd
+systemctl cat sshd
+systemctl list-units
+systemctl list-units --type=service --state=running --no-pager
+systemctl list-unit-files
+systemctl list-timers
+systemctl list-sockets
+systemctl list-dependencies nginx
+systemctl is-active nginx
+systemctl is-enabled nginx
+systemctl is-failed nginx
+systemctl is-system-running
+systemd-analyze blame
+systemd-analyze verify /etc/systemd/system/nginx.service
+service sshd status
+
+# logs
+journalctl -u nginx --since 30m --no-pager
+journalctl -p err --since 1h --no-pager
+journalctl --disk-usage
+journalctl --list-boots
+journalctl -u sshd --since '1 hour ago' --no-pager | tail -n 50
+dmesg
+dmesg -T
+dmesg --level=err,warn | tail -n 50
+tail -n 100 /var/log/resin/*.log 2>/dev/null
+grep -i 'error' /var/log/*.log 2>/dev/null
+
+# java
+java -version
+jcmd -l
+ps -eo pid,rss,user,cmd --sort=-rss | grep -E '[j]ava'
+ss -lntp | grep java
+ls -la /usr/lib/jvm 2>/dev/null | head -20
+
+# nginx
+nginx -v
+nginx -V
+nginx -t
+nginx -T 2>&1 | head -20
+nginx -T 2>&1 | grep -E 'server_name|listen' | head -40
+ps -eo pid,user,%cpu,%mem,cmd | grep -E '[n]ginx'
+ss -lntp | grep -E ':80|:443'
+curl -sI http://127.0.0.1/ | head -n 10
+
+# apache / httpd
+httpd -V 2>&1 | head -20
+httpd -t
+apachectl -S 2>&1 | head -40
+apachectl -t
+ps -eo pid,user,cmd | grep -E '[h]ttpd|[a]pache2'
+ss -lntp | grep -E ':80|:443'
+tail -n 40 /var/log/httpd/error_log 2>/dev/null
+
+# resin / tomcat
+ps -eo pid,user,cmd | grep -E '[r]esin'
+ps -eo pid,user,cmd | grep -E '[c]atalina|[t]omcat'
+find /opt /usr/local -maxdepth 2 -type d -name 'apache-tomcat*' 2>/dev/null
+tail -n 80 /opt/*/tomcat*/logs/catalina.out 2>/dev/null
+systemctl status resin --no-pager | head -n 15
+
+# node
+node --version
+node -v
+ps -eo pid,user,%cpu,%mem,cmd | grep -E '[n]ode'
+
+# docker
+docker ps
+docker ps -a
+docker inspect nginx
+docker inspect --format '{{.State.Status}}' nginx
+docker logs -n 50 nginx
+docker logs --tail 100 nginx
+docker images
+docker top nginx
+docker stats --no-stream
+docker info
+docker version
+docker system df
+docker network ls
+docker network inspect bridge
+docker volume ls
+docker volume inspect vol1
+docker port nginx
+docker history nginx
+docker diff nginx
+docker compose ps
+docker compose logs --tail 50
+docker compose config
+
+# kubernetes
+kubectl get nodes
+kubectl get pods -A
+kubectl get pods -n kube-system -o wide
+kubectl get deploy -n prod
+kubectl describe pod nginx-7f8c -n prod
+kubectl logs nginx-7f8c -n prod
+kubectl top nodes
+kubectl top pods -A
+kubectl cluster-info
+kubectl api-resources
+kubectl api-versions
+kubectl explain pods
+kubectl events -n prod
+kubectl version --short
+kubectl auth can-i create deployments
+kubectl config view
+kubectl diff -f /tmp/deploy.yaml 2>/dev/null
+kubectl options
+
+# crictl / podman
+crictl ps
+crictl pods
+crictl images
+crictl stats
+crictl info
+crictl version
+crictl inspect 1234
+crictl logs 1234
+podman ps
+podman images
+podman stats --no-stream
+podman version
+podman inspect 1234
+
+# oracle / mysql / redis
+ps -eo pid,user,cmd | grep -E '[o]racle|[t]nslsnr'
+ps -eo pid,user,cmd | grep -E '[m]ysqld|[m]ariadb'
+ps -eo pid,user,cmd | grep -E '[r]edis'
+ss -lntp | grep -E '1521|oracle'
+ss -lntp | grep -E '3306|mysql'
+ss -lntp | grep -E '6379|redis'
+systemctl status mysqld --no-pager | head -n 15
+systemctl status redis --no-pager | head -n 15
+journalctl -u redis --since 30m --no-pager | tail -n 60
+
+# nfs / tls / misc
+openssl version
+openssl s_client -connect 127.0.0.1:443 -brief </dev/null 2>/dev/null
+openssl ciphers -v | head -20
+openssl list -cipher-algorithms | head -20
+nfsstat 2>/dev/null || true
+cat /proc/mounts
+cat /proc/self/cgroup
+cat /proc/cpuinfo | head -40
+cat /proc/meminfo
+ls /sys/class/net
+watch -n 5 free -m
+strace -c true
+tcpdump -c 5 -i eth0 2>/dev/null
+lspci
+lspci -nnk
+lsusb
+lsusb -t
+fdisk -l
+last -n 20
+uptime -p
+who -u
+ps -L -p 1234
+ls -l /sys/block/sda
+file /dev/sda

@@ -3,8 +3,22 @@ export type PermissionMode = 'READ_ONLY' | 'AUTO' | 'FULL_ACCESS'
 
 export const PERMISSION_MODES: readonly PermissionMode[] = ['READ_ONLY', 'AUTO', 'FULL_ACCESS'] as const
 
-/** Risk class of one remote command; LOW is reserved for privileged reads (sudo ...). */
-export type CommandRisk = 'READ' | 'LOW' | 'MODIFY' | 'DANGEROUS'
+/**
+ * V0.3.1 risk classes (single fact source for gating + audit):
+ *   READ             - confirmed read-only (semantic rule matched)
+ *   PRIVILEGED_READ  - confirmed read-only, needs root/sudo (sudo cat /etc/shadow)
+ *   UNKNOWN          - the classifier has NO semantic rule for this command; it is
+ *                      NOT claimed to modify anything
+ *   MODIFY           - confirmed state change (mutating verb / write redirect)
+ *   DANGEROUS        - host-destructive / irreversible (rm -rf /, mkfs, reboot...)
+ */
+export type CommandRisk = 'READ' | 'PRIVILEGED_READ' | 'UNKNOWN' | 'MODIFY' | 'DANGEROUS'
+
+/** Every risk value in matrix order (README + classifier snapshot report). */
+export const COMMAND_RISKS: readonly CommandRisk[] = ['READ', 'PRIVILEGED_READ', 'UNKNOWN', 'MODIFY', 'DANGEROUS'] as const
+
+/** Legacy alias (V0.2.x LOW == privileged read). Kept for config compat. */
+export const LEGACY_RISK_LOW = 'LOW' as const
 
 /**
  * V0.2.7: how the HUAMN sidebar terminal input is gated (Agent commands keep
@@ -39,6 +53,11 @@ export interface JumpServerConfig {
   idleTimeout: number
   /** Command permission mode (default READ_ONLY) */
   permissionMode: PermissionMode
+  /**
+   * V0.3.1: whether PRIVILEGED_READ (sudo ... reads) may auto-run in READ_ONLY
+   * mode (default false — READ_ONLY only auto-runs plain READ).
+   */
+  privilegedReadInReadOnly?: boolean
   /** V0.2.7: manual sidebar terminal input policy (default CONFIRM_MODIFY). */
   manualPermissionMode?: ManualPolicy
   /** How long one capture of the KoKo 'p' asset list is cached per conversation (seconds; default 300). */

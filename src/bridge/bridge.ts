@@ -21,6 +21,7 @@ import { SessionState } from '../jumpserver/state-machine.js'
 import type { TerminalObserver } from '../jumpserver/terminal-observer.js'
 import { PROTOCOL_VERSION, PLUGIN_VERSION, hostBuild } from '../version.js'
 import { manualPolicyOf, type ManualPolicy } from '../config/types.js'
+import { classifyCommand } from '../security/command-classifier.js'
 
 export interface BridgeServices {
   getConfig: () => JumpServerConfig
@@ -62,8 +63,10 @@ export interface BridgeServices {
    * Execute an explicit user-entered command in one existing conversation.
    * V0.2.7: the handler is state-aware (menu verbs / exit / policy gate) and
    * receives the client's confirm flag for CONFIRM_MODIFY.
+   * V0.3.1: the confirmed path must additionally present the one-time
+   * confirmToken issued by the first MANUAL_CONFIRM_REQUIRED response.
    */
-  manualExec: (sessionId: string, command: string, signal?: AbortSignal, confirmed?: boolean) => Promise<Record<string, unknown>>
+  manualExec: (sessionId: string, command: string, signal?: AbortSignal, confirmed?: boolean, confirmToken?: string) => Promise<Record<string, unknown>>
 }
 
 const SNAPSHOT_HOLD_MS = 12000
@@ -171,6 +174,9 @@ export function registerBridgeRoutes(webServer: {
           json(res, 200, {
             ok: true,
             lastSeq: observer?.cursorSeq ?? 0,
+            // V0.3.1 P2: the oldest retained event seq lets the browser insert
+            // a "output dropped" notice instead of a silently-faked continuous log.
+            oldestSeq: observer?.oldestSeq ?? 0,
             events,
             sessionId: sessionId ?? null,
             ...statusPayload(services, sessionId),
@@ -193,6 +199,7 @@ export function registerBridgeRoutes(webServer: {
           const sessionId = typeof body.sessionId === 'string' ? body.sessionId.trim() : ''
           const command = typeof body.command === 'string' ? body.command : ''
           const confirmed = body.confirmed === true
+          const confirmToken = typeof body.confirmToken === 'string' && body.confirmToken.length > 0 ? body.confirmToken : undefined
           if (sessionId.length === 0 || sessionId.length > 512) {
             json(res, 400, { ok: false, code: 'INVALID_SESSION', message: 'valid sessionId is required' })
             return
@@ -209,7 +216,7 @@ export function registerBridgeRoutes(webServer: {
           const onAborted = (): void => controller.abort()
           req.once('aborted', onAborted)
           try {
-            const result = await services.manualExec(sessionId, command, controller.signal, confirmed)
+            const result = await services.manualExec(sessionId, command, controller.signal, confirmed, confirmToken)
             json(res, result.ok === false ? 409 : 200, result)
           } finally {
             req.off('aborted', onAborted)
@@ -217,6 +224,35 @@ export function registerBridgeRoutes(webServer: {
         } catch (error) {
           json(res, 500, { ok: false, code: 'MANUAL_EXEC_FAILED', message: error instanceof Error ? error.message : String(error) })
         }
+      })()
+    },
+  }))
+
+  // V0.3.1 #16: command risk checker — PURE classification, never connects,
+  // never executes; lets the settings card show why a command is READ/UNKNOWN/
+  // MODIFY/DANGEROUS before anything is sent to a server.
+  disposers.push(webServer.register({
+    kind: 'exact',
+    path: '/api/jumpserver.classify',
+    handler: (req, res) => {
+      if (!requirePost(req, res)) return
+      void (async () => {
+        const body = await readJsonBody(req)
+        const command = typeof body.command === 'string' ? body.command : ''
+        if (command.trim().length === 0 || command.length > MAX_MANUAL_COMMAND_CHARS) {
+          json(res, 400, { ok: false, code: 'INVALID_COMMAND', message: 'command must be one non-empty line' })
+          return
+        }
+        const c = classifyCommand(command)
+        json(res, 200, {
+          ok: true,
+          risk: c.risk,
+          reason: c.reason,
+          ruleId: c.ruleId,
+          confidence: c.confidence,
+          classifierVersion: c.classifierVersion,
+          normalizedCommand: c.normalizedCommand,
+        })
       })()
     },
   }))
@@ -326,13 +362,39 @@ export async function runConnectionTest(
   draft: { host?: unknown; port?: unknown; username?: unknown; password?: unknown; passwordEnv?: unknown } = {},
 ): Promise<Record<string, unknown>> {
   const cfg = services.getConfig()
-  const host = typeof draft.host === 'string' && draft.host.trim().length > 0 ? draft.host.trim() : cfg.host
-  const port = typeof draft.port === 'number' && Number.isFinite(draft.port) ? Math.trunc(draft.port) : cfg.port
-  const username = typeof draft.username === 'string' && draft.username.trim().length > 0 ? draft.username.trim() : cfg.username
+  const draftHost = typeof draft.host === 'string' && draft.host.trim().length > 0 ? draft.host.trim() : undefined
+  const draftPort = typeof draft.port === 'number' && Number.isFinite(draft.port) ? Math.trunc(draft.port) : undefined
+  const draftUser = typeof draft.username === 'string' && draft.username.trim().length > 0 ? draft.username.trim() : undefined
+  const host = draftHost ?? cfg.host
+  const port = draftPort ?? cfg.port
+  const username = draftUser ?? cfg.username
   const enabled = cfg.enabled
   if (enabled === false) return { ok: false, code: 'DISABLED', message: 'JumpServer is disabled in settings' }
   if (!host || !username || port < 1) {
     return { ok: false, code: 'NOT_CONFIGURED', message: 'JumpServer host/username are not configured' }
+  }
+  // V0.3.1 P0: the SAVED JumpServer credential may only ever be reused for the
+  // EXACT saved gateway identity. Any draft change to host/port/username forces
+  // an explicit transient password — otherwise a crafted request could forward
+  // the real bastion credential to an attacker-chosen host.
+  const identityChanged =
+    (draftHost !== undefined && draftHost !== cfg.host) ||
+    (draftPort !== undefined && draftPort !== cfg.port) ||
+    (draftUser !== undefined && draftUser !== cfg.username)
+  const hasLiteralPassword = typeof draft.password === 'string' && draft.password.length > 0
+  // V0.3.1: draft is true whenever ANY draft field was sent (connection or credential).
+  const draftUsed =
+    draftHost !== undefined || draftPort !== undefined || draftUser !== undefined ||
+    draft.password !== undefined || draft.passwordEnv !== undefined
+  if (identityChanged && !hasLiteralPassword) {
+    return {
+      ok: false,
+      code: 'CREDENTIAL_MISMATCH',
+      message: 'draft host/port/username differs from the saved gateway; the saved JumpServer password is never used against a different target — provide a temporary password for this test',
+      gateway: host + ':' + port,
+      user: username,
+      draft: true,
+    }
   }
   const source = draftPasswordSource(draft, cfg)
   let password: string | undefined
@@ -340,11 +402,12 @@ export async function runConnectionTest(
     password = String(draft.password) // transient draft password (same-origin bridge)
   } else {
     // V0.3.1: resolve against the DRAFT credential ref when one was provided,
-    // never silently against the saved passwordEnv.
+    // never silently against the saved passwordEnv. (identityChanged is already
+    // refused above, so this path only runs for the exact saved identity.)
     password = await services.resolvePassword(source.env)
   }
   if (password === undefined || password.length === 0) {
-    return { ok: false, code: 'NOT_CONFIGURED', message: 'JumpServer password is not configured (set ' + source.env + ' or the password setting)' }
+    return { ok: false, code: 'NOT_CONFIGURED', message: 'JumpServer password is not configured (set ' + source.env + ' or the password setting)', draft: draftUsed, gateway: host + ':' + port, user: username }
   }
   const runtime: SessionRuntimeConfig = {
     ...toRuntimeConfig({ ...cfg, host, port, username }, password, undefined),

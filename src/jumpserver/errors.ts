@@ -24,6 +24,8 @@ export const JUMP_ERROR_CODES = [
   'UNKNOWN_STATE',
   'TARGET_VERIFICATION_FAILED',
   'INVALID_GROUP',
+  // V0.3.1: an ops profile command the classifier does not confirm as READ.
+  'PROFILE_RISK_MISMATCH',
 ] as const
 
 export type JumpServerErrorCode = (typeof JUMP_ERROR_CODES)[number]

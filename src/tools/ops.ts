@@ -18,6 +18,7 @@ import { AbortRequestedError, JumpServerError } from '../jumpserver/errors.js'
 import type { SessionRegistry } from '../jumpserver/session-registry.js'
 import { JUMPSERVER_NOT_ARMED, NOT_ARMED_MESSAGE, type SessionGrant } from '../security/grant.js'
 import { classifyCommand } from '../security/command-classifier.js'
+import { trustedRead } from '../ops/collect.js'
 import type { OpsCaseRegistry } from '../ops/evidence.js'
 import { compareCommands, deriveFindings, metricsOf, runProfileSweep, type CollectedCommand } from '../ops/collect.js'
 import { bundleFor, guardValue, sessionIdOf, type ResultValue } from './common.js'
@@ -239,7 +240,7 @@ export function registerOpsTools(
               const plan = compareCommands(since ?? '30m')
               const batch = await bundle.manager.runTargetBatch({
                 target,
-                commands: plan.map((cmd) => ({ command: cmd.command, risk: 'READ' })),
+                commands: plan.map((cmd) => trustedRead(cmd.command)),
                 signal: exec.signal,
               })
               if (batch.error !== null) {
@@ -451,7 +452,15 @@ export function registerOpsTools(
             const evidence: string[] = []
 
             const runBatch = async (commands: Array<{ command: string; risk: string }>): Promise<{ collected: CollectedCommand[]; hostname: string | null } | null> => {
-              const batch = await bundle.manager.runTargetBatch({ target, commands, signal: exec.signal })
+              const classified = commands.map((item) => {
+                const c = classifyCommand(item.command)
+                return {
+                  command: item.command,
+                  risk: c.risk,
+                  classification: { risk: c.risk, reason: c.reason, ruleId: c.ruleId, confidence: c.confidence, classifierVersion: c.classifierVersion, normalizedCommand: c.normalizedCommand },
+                }
+              })
+              const batch = await bundle.manager.runTargetBatch({ target, commands: classified, signal: exec.signal })
               if (batch.error !== null) return null
               return {
                 hostname: batch.hostname,

@@ -9,9 +9,18 @@ export const auditRecordSchema = z.object({
   target: z.string().nullable(),
   hostname: z.string().nullable(),
   command: z.string().nullable(),
-  /** V0.3.1: AGENT | HUMAN; default AGENT keeps records written pre-0.3.1 readable. */
+  /** V0.3.1: AGENT | HUMAN | SYSTEM_PROFILE; default AGENT keeps records written pre-0.3.1 readable. */
   actor: z.string().default('AGENT'),
   risk: z.string(),
+  /** V0.3.1: classifier explainability — why this risk, which semantic rule. */
+  riskReason: z.string().optional(),
+  riskRuleId: z.string().optional(),
+  riskConfidence: z.string().optional(),
+  classifierVersion: z.number().optional(),
+  normalizedCommand: z.string().optional(),
+  /** V0.3.1: approval gate outcomes. */
+  approvalRequired: z.boolean().default(false),
+  approvalResult: z.string().default('none'),
   permissionMode: z.string(),
   result: z.string(),
   exitCode: z.number().nullable(),

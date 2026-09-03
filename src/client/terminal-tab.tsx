@@ -17,6 +17,10 @@ import { CLIENT_BUILD, CLIENT_VERSION } from './version.js'
 
 const h = React.createElement
 
+/** Isomorphic layout effect: calibrate before paint in the browser, no-op
+ *  (plain effect) under SSR so the sidebar-tab render tests stay clean. */
+const useIsoLayoutEffect = typeof (globalThis as { window?: unknown }).window !== 'undefined' ? React.useLayoutEffect : React.useEffect
+
 const ROW_H = 20
 const OVERSCAN = 20
 
@@ -127,12 +131,16 @@ export function JumpServerSidebarTab(props: JumpServerSidebarTabProps): React.Re
   const [manualCommand, setManualCommand] = React.useState('')
   const [manualBusy, setManualBusy] = React.useState(false)
   const [manualError, setManualError] = React.useState<string | null>(null)
-  const [confirmReq, setConfirmReq] = React.useState<{ command: string; risk?: string } | null>(null)
+  const [confirmReq, setConfirmReq] = React.useState<{ command: string; risk?: string; confirmToken?: string; commandHash?: string; expiresAt?: number } | null>(null)
   const [windowStart, setWindowStart] = React.useState(0)
   const [viewportH, setViewportH] = React.useState(400)
+  // V0.3.1: follow keeps the viewport at the newest row ONLY while the user is
+  // at the bottom — scrolling up exits follow; new output is counted, never
+  // scrolled away.
+  const [newOutput, setNewOutput] = React.useState(0)
 
-  const [assets, setAssets] = React.useState<{ rows: AssetRow[]; groups: string[]; group: string; filter: string; count: number; loading: boolean; error: string | null }>({
-    rows: [], groups: [], group: '', filter: '', count: 0, loading: false, error: null,
+  const [assets, setAssets] = React.useState<{ rows: AssetRow[]; groups: string[]; group: string; filter: string; count: number; loading: boolean; error: string | null; fetchedAt: number | null }>({
+    rows: [], groups: [], group: '', filter: '', count: 0, loading: false, error: null, fetchedAt: null,
   })
   const [audit, setAudit] = React.useState<{ records: Array<Record<string, unknown>>; showFailed: boolean; showModify: boolean; loading: boolean }>({
     records: [], showFailed: false, showModify: false, loading: false,
@@ -143,6 +151,12 @@ export function JumpServerSidebarTab(props: JumpServerSidebarTabProps): React.Re
   const bufferSessionRef = React.useRef<string>('')
   const bodyRef = React.useRef<HTMLDivElement | null>(null)
   const [, forceRender] = React.useReducer((x: number) => x + 1, 0)
+  // V0.3.1: follow state must be readable from the snapshot loop and scroll
+  // handlers (they close over the mount-time value otherwise).
+  const followRef = React.useRef(true)
+  const savedScrollTopRef = React.useRef(0)
+  const lastRowsRef = React.useRef(0)
+  const assetsGroupRef = React.useRef('')
 
   const subscribed = React.useSyncExternalStore(
     React.useCallback((cb: () => void) => settingsScope.subscribe(cb), [settingsScope]),
@@ -166,7 +180,14 @@ export function JumpServerSidebarTab(props: JumpServerSidebarTabProps): React.Re
     return () => { manualAbortRef.current?.abort(); manualAbortRef.current = null }
   }, [sessionId])
 
-  const clear = React.useCallback(() => { clearBuffer(buffer); forceRender() }, [buffer])
+  const clear = React.useCallback(() => {
+    clearBuffer(buffer)
+    setNewOutput(0)
+    setWindowStart(0)
+    savedScrollTopRef.current = 0
+    lastRowsRef.current = 0
+    forceRender()
+  }, [buffer])
 
   React.useEffect(() => {
     if (!visible || sessionId.length === 0) return
@@ -177,6 +198,7 @@ export function JumpServerSidebarTab(props: JumpServerSidebarTabProps): React.Re
     fetchStatus(sessionId, statusController.signal).then((data: StatusResponse) => {
       if (!stopped) setStatus(data as unknown as StatusInfo)
     }).catch(() => undefined)
+    lastRowsRef.current = buffer.rows.length
     const loop = async (): Promise<void> => {
       while (!stopped) {
         try {
@@ -188,6 +210,11 @@ export function JumpServerSidebarTab(props: JumpServerSidebarTabProps): React.Re
           cursor = applySnapshot(buffer, data, cursor)
           setStatus(data as unknown as StatusInfo)
           forceRender()
+          // V0.3.1: while the user is scrolled up, count new rows instead of
+          // stealing the scrollbar; the badge offers one-click re-follow.
+          const grown = buffer.rows.length - lastRowsRef.current
+          lastRowsRef.current = buffer.rows.length
+          if (grown > 0 && !followRef.current) setNewOutput((n) => n + grown)
         } catch (error) {
           if (stopped || (error instanceof Error && error.name === 'AbortError')) return
           setNetworkError(error instanceof Error ? error.message : String(error))
@@ -199,9 +226,14 @@ export function JumpServerSidebarTab(props: JumpServerSidebarTabProps): React.Re
     return () => { stopped = true; statusController.abort(); inflight?.abort() }
   }, [visible, buffer, sessionId])
 
-  // follow: keep the viewport pinned at the newest rows
+  // V0.3.1: follow keeps the viewport pinned at the newest rows. A user who
+  // scrolls up (distance from bottom > 24px) leaves follow; new output is then
+  // counted in newOutput, and follow is only re-entered by scrolling back to
+  // the bottom or clicking the badge — never automatically.
   React.useEffect(() => {
+    followRef.current = follow
     if (!follow) return
+    setNewOutput(0)
     const el = bodyRef.current as unknown as { scrollTop: number; scrollHeight: number; clientHeight: number } | null
     if (el !== null) {
       el.scrollTop = el.scrollHeight
@@ -209,14 +241,45 @@ export function JumpServerSidebarTab(props: JumpServerSidebarTabProps): React.Re
     }
   }, [follow, buffer.rows.length, viewportH])
 
-  const scrollHandler = (event: { target?: { scrollTop?: number; clientHeight?: number } | null }): void => {
+  const scrollHandler = (event: { target?: { scrollTop?: number; scrollHeight?: number; clientHeight?: number } | null }): void => {
     const el = event.target
     if (el === null || el === undefined) return
     const st = Math.max(0, Math.floor((el.scrollTop ?? 0) / ROW_H) - OVERSCAN)
     const ch = Math.max(120, el.clientHeight ?? 0)
     setViewportH(ch)
     setWindowStart(st)
+    savedScrollTopRef.current = el.scrollTop ?? 0
+    const distanceToBottom = (el.scrollHeight ?? 0) - (el.scrollTop ?? 0) - (el.clientHeight ?? 0)
+    if (distanceToBottom <= 24 && !followRef.current) {
+      // user scrolled back to the bottom -> resume follow, clear the badge
+      setFollow(true)
+      setNewOutput(0)
+    } else if (distanceToBottom > 24 && followRef.current) {
+      // user moved away from the bottom -> never jump again until re-followed
+      setFollow(false)
+    }
   }
+
+  // V0.3.1 P1: the terminal body unmounts when the user switches to 资产/审计.
+  // windowStart is React state that survives the unmount, so after remount the
+  // rows used to be translated out of view (blank screen). Recalibrate on
+  // actual DOM mount: follow -> bottom, otherwise restore the saved scrollTop.
+  const termActive = tab === 'term' && visible
+  useIsoLayoutEffect(() => {
+    if (!termActive) return
+    const el = bodyRef.current as unknown as { scrollTop: number; scrollHeight: number; clientHeight: number } | null
+    if (el === null) return
+    if (followRef.current) {
+      el.scrollTop = el.scrollHeight
+      const ch = Math.max(120, el.clientHeight || viewportH)
+      if (ch !== viewportH) setViewportH(ch)
+      setWindowStart(Math.max(0, buffer.rows.length - Math.ceil(ch / ROW_H)))
+    } else {
+      const restore = Math.min(Math.max(0, savedScrollTopRef.current), (el.scrollHeight || 0) - (el.clientHeight || 0))
+      el.scrollTop = restore
+      setWindowStart(Math.max(0, Math.floor(restore / ROW_H) - OVERSCAN))
+    }
+  }, [termActive, buffer, follow])
 
   const tone = STATUS_TONE[status.state ?? ''] ?? 'connected'
   const statusLabel = status.enabled === false
@@ -237,7 +300,7 @@ export function JumpServerSidebarTab(props: JumpServerSidebarTabProps): React.Re
       : status.hostname !== null && status.hostname !== undefined ? '[' + String(status.hostname) + ' ~]# '
       : '[root@host ~]# '
 
-  const submitManual = React.useCallback(async (commandInput?: string, confirmed = false): Promise<void> => {
+  const submitManual = React.useCallback(async (commandInput?: string, confirmed = false, confirmToken?: string): Promise<void> => {
     const command = (commandInput ?? manualCommand).trim()
     if (!manualAvailable && !confirmed) return
     if (!manualAvailable && confirmed) setManualBusy(true)
@@ -248,10 +311,12 @@ export function JumpServerSidebarTab(props: JumpServerSidebarTabProps): React.Re
     manualAbortRef.current?.abort()
     manualAbortRef.current = controller
     try {
-      const result = await sendManualCommand(sessionId, command, controller.signal, confirmed)
+      const result = await sendManualCommand(sessionId, command, controller.signal, confirmed, confirmToken ?? confirmReq?.confirmToken)
       if (result.ok !== true) {
-        if (result.code === 'MANUAL_CONFIRM_REQUIRED') {
-          setConfirmReq({ command, risk: result.risk })
+        if (result.code === 'MANUAL_CONFIRM_REQUIRED' && !confirmed) {
+          // V0.3.1: keep the one-time challenge so the second call can prove it
+          // saw THIS prompt (host validates hash + risk + single use + TTL).
+          setConfirmReq({ command, risk: result.risk, confirmToken: result.confirmToken, commandHash: result.commandHash, expiresAt: result.expiresAt })
           setManualCommand('')
           return
         }
@@ -259,9 +324,9 @@ export function JumpServerSidebarTab(props: JumpServerSidebarTabProps): React.Re
         return
       }
       setManualCommand('')
-      if (result.kind === 'assets') { setNotice('资产列表：' + String(result.count ?? 0) + ' 台'); setTab('assets'); setAssets((prev) => ({ ...prev, rows: (result.rows ?? []) as AssetRow[], count: result.count ?? prev.count })) }
+      if (result.kind === 'assets') { setNotice('资产列表：' + String(result.count ?? 0) + ' 台'); setTab('assets'); setAssets((prev) => ({ ...prev, rows: (result.rows ?? []) as AssetRow[], count: result.count ?? prev.count, fetchedAt: Date.now() })) }
       else if (result.kind === 'enter') { setTab('term'); setNotice('已进入服务器 ' + String(result.target ?? '')) }
-      else if (result.kind === 'leave') { setNotice('已返回 JumpServer 菜单'); setTab('term'); void refreshAssets() }
+      else if (result.kind === 'leave') { setNotice('已返回 JumpServer 菜单'); setTab('term'); void loadAssets(false, assetsGroupRef.current) }
       else if (result.kind === 'close') { setNotice('JumpServer 会话已关闭') }
       if (result.state !== undefined) setStatus((prev) => ({ ...prev, state: result.state }))
     } catch (error) {
@@ -274,32 +339,54 @@ export function JumpServerSidebarTab(props: JumpServerSidebarTabProps): React.Re
     }
   }, [manualAvailable, manualCommand, sessionId, t])
 
-  const refreshAssets = React.useCallback(async (): Promise<void> => {
+  // V0.3.1 P1: assets are cache-first. Only the explicit ↻ button passes
+  // force=true (a new 'p' to KoKo); opening the tab, switching groups and
+  // re-entering reuse the per-conversation cache (assetCacheTtlSeconds). A
+  // failed refresh keeps the last-known-good rows instead of blanking them.
+  const loadAssets = React.useCallback(async (force: boolean, group?: string): Promise<void> => {
     if (sessionId.length === 0) return
-    setAssets((prev) => ({ ...prev, loading: true, error: null }))
+    if (group !== undefined) assetsGroupRef.current = group
+    setAssets((prev) => ({ ...prev, loading: true }))
     try {
-      const data = await fetchAssets(sessionId, { filter: undefined, group: undefined, refresh: true })
+      const data = await fetchAssets(sessionId, { filter: undefined, group: (assetsGroupRef.current.length > 0 ? assetsGroupRef.current : undefined), refresh: force })
       if (data.ok !== true) {
-        setAssets((prev) => ({ ...prev, loading: false, error: data.message ?? data.code ?? '无法获取资产列表' }))
+        setAssets((prev) => ({
+          ...prev,
+          loading: false,
+          error: (data.message ?? data.code ?? '无法获取资产列表') + (prev.fetchedAt !== null && prev.rows.length > 0 ? '；仍显示上次成功获取的结果' : ''),
+        }))
         return
       }
       setAssets((prev) => ({
         ...prev,
         loading: false,
         rows: data.rows ?? [],
-        groups: data.groups ?? [],
+        groups: data.groups ?? prev.groups,
+        group: assetsGroupRef.current,
+        filter: '',
         count: data.count ?? 0,
+        fetchedAt: Date.now(),
         error: data.health === 'ok' || data.health === undefined ? null : '资产健康度: ' + String(data.health ?? '?'),
       }))
     } catch (error) {
-      setAssets((prev) => ({ ...prev, loading: false, error: error instanceof Error ? error.message : String(error) }))
+      setAssets((prev) => ({
+        ...prev,
+        loading: false,
+        error: (error instanceof Error ? error.message : String(error)) + (prev.fetchedAt !== null && prev.rows.length > 0 ? '；仍显示上次成功获取的结果' : ''),
+      }))
     }
   }, [sessionId])
 
+  /** Explicit refresh: the ONLY path that forces a new KoKo 'p'. */
+  const refreshAssets = React.useCallback((): void => {
+    void loadAssets(true)
+  }, [loadAssets])
+
   const openAssetsTab = React.useCallback((): void => {
     setTab('assets')
-    void refreshAssets()
-  }, [refreshAssets])
+    // reuse the cache; only fetch when the tab has nothing to show yet
+    if (assets.rows.length === 0) void loadAssets(false)
+  }, [assets.rows.length, loadAssets])
 
   const openAuditTab = React.useCallback((): void => {
     setTab('audit')
@@ -321,20 +408,9 @@ export function JumpServerSidebarTab(props: JumpServerSidebarTabProps): React.Re
     setAssets((prev) => ({ ...prev, filter: term }))
   }
   const pickGroup = (group: string): void => {
+    // 切换资产组：复用缓存（不重新向 KoKo 发 p），仅本地过滤/分组
     setAssets((prev) => ({ ...prev, group, filter: '' }))
-    setAssets((prev) => ({ ...prev, loading: true }))
-    void (async () => {
-      try {
-        const data = await fetchAssets(sessionId, { group: group.length > 0 ? group : undefined, refresh: true })
-        if (data.ok === true) {
-          setAssets((prev) => ({ ...prev, loading: false, rows: data.rows ?? [], count: data.count ?? 0, error: null, groups: data.groups ?? prev.groups }))
-        } else {
-          setAssets((prev) => ({ ...prev, loading: false, error: data.message ?? data.code ?? '分组查询失败' }))
-        }
-      } catch (error) {
-        setAssets((prev) => ({ ...prev, loading: false, error: error instanceof Error ? error.message : String(error) }))
-      }
-    })()
+    void loadAssets(false, group)
   }
 
   const filteredAssets = assets.rows.filter((a) => {
@@ -352,7 +428,10 @@ export function JumpServerSidebarTab(props: JumpServerSidebarTabProps): React.Re
     void (async () => {
       try {
         const result = await sendManualCommand(sessionId, target, undefined)
-        if (result.ok === true) { setTab('term'); setManualCommand(''); void refreshAssets() }
+        // V0.3.1 P1: entering an asset does NOT refresh the asset list — the
+        // claim happens at the menu; re-fetching after entering would fail
+        // (listAssets requires JUMPSERVER_MENU) and waste a 'p'.
+        if (result.ok === true) { setTab('term'); setManualCommand('') }
         else setManualError(result.message ?? result.code ?? t('manualFailed'))
       } catch (error) {
         setManualError(error instanceof Error ? error.message : String(error))
@@ -384,20 +463,55 @@ export function JumpServerSidebarTab(props: JumpServerSidebarTabProps): React.Re
     return s.length > 19 ? s.slice(11, 19) : s
   }
 
-  const auditRows = auditFiltered.slice(0, 150).map((r, i) =>
-    h('div', { className: 'js-term-auditRow', key: i },
+  // V0.3.1: audit rows render the FULL ring (no slice(0,150)) and expose the
+  // classifier's rule + reason on click — "why was this MODIFY" is one tap away.
+  const [expandedAudit, setExpandedAudit] = React.useState<string | null>(null)
+  const auditRows = auditFiltered.map((r, i) => {
+    const riskStr = String(r['risk'] ?? '')
+    const warn = riskStr === 'MODIFY' || riskStr === 'DANGEROUS' || riskStr === 'UNKNOWN'
+    const key = String(r['timestamp'] ?? i) + ':' + String(i)
+    const expanded = expandedAudit === key
+    const rule = String(r['riskRuleId'] ?? '')
+    const reason = String(r['riskReason'] ?? '')
+    const conf = String(r['riskConfidence'] ?? '')
+    const v = Number(r['classifierVersion'] ?? 0)
+    const approval = String(r['approvalResult'] ?? 'none')
+    return h('div', { className: 'js-term-auditRow', key, onClick: () => setExpandedAudit(expanded ? null : key), title: expanded ? undefined : (rule.length > 0 ? rule + ' · ' + reason : '点击查看风险规则') },
       h('span', { className: 'js-term-auditTime' }, fmtTime(r['timestamp'])),
       h('span', { className: 'js-term-auditWho' }, [String(r['actor'] ?? ''), String(r['operation'] ?? 'exec')].filter(Boolean).join(' ')),
-      h('span', { className: 'js-term-auditRisk' + (String(r['risk'] ?? '') === 'MODIFY' || String(r['risk'] ?? '') === 'DANGEROUS' ? ' js-term-warn' : '') }, String(r['risk'] ?? '')),
+      h('span', { className: 'js-term-auditRisk' + (warn ? ' js-term-warn' : '') }, riskStr),
       h('span', { className: 'js-term-auditTarget' }, String(r['target'] ?? '?')),
       h('span', { className: 'js-term-auditCmd' }, String(r['command'] ?? '')),
       h('span', { className: 'js-term-auditMeta' }, 'rc=' + String(r['exitCode'] ?? '?') + ' ' + String(r['durationMs'] ?? '?') + 'ms'),
-    ),
-  )
+      expanded
+        ? h('div', { className: 'js-term-auditDetail' },
+            h('div', null, 'Rule: ' + (rule.length > 0 ? rule : '—') + ' · confidence ' + (conf.length > 0 ? conf : '—') + (v > 0 ? ' · classifier v' + String(v) : '')),
+            h('div', null, 'Reason: ' + (reason.length > 0 ? reason : '—')),
+            h('div', null, 'Approval: ' + approval + (r['approvalRequired'] === true ? ' (required)' : '') + ' · normalized: ' + String(r['normalizedCommand'] ?? '')),
+          )
+        : null,
+    )
+  })
 
-  const assetRows = filteredAssets.slice(0, 150).map((a, i) =>
+  // V0.3.1 P2: the asset list is a true virtual list (no slice(0,150)) — the
+  // full cached row set is scrollable even beyond 150 entries, and search still
+  // runs over ALL cached rows.
+  const ASSET_ROW_H = 32
+  const [assetWinStart, setAssetWinStart] = React.useState(0)
+  const [assetWinH, setAssetWinH] = React.useState(360)
+  const assetWinEnd = Math.min(filteredAssets.length, assetWinStart + Math.ceil(assetWinH / ASSET_ROW_H) + OVERSCAN * 2)
+  const assetScroll = (event: { target?: { scrollTop?: number; clientHeight?: number } | null }): void => {
+    const el = event.target
+    if (el === null || el === undefined) return
+    const ch = Math.max(120, el.clientHeight ?? 0)
+    const st = Math.max(0, Math.floor((el.scrollTop ?? 0) / ASSET_ROW_H) - OVERSCAN)
+    setAssetWinH(ch)
+    setAssetWinStart(st)
+  }
+  const assetRows = filteredAssets.slice(assetWinStart, assetWinEnd).map((a, i) =>
     h('button', {
-      type: 'button', className: 'js-term-assetItem', key: i,
+      type: 'button', className: 'js-term-assetItem', key: assetWinStart + i,
+      style: { height: ASSET_ROW_H + 'px' },
       title: '点击进入 ' + String(a.name ?? a.ip ?? ''),
       onClick: () => enterAsset(a),
     },
@@ -463,9 +577,11 @@ export function JumpServerSidebarTab(props: JumpServerSidebarTabProps): React.Re
           assets.loading ? h('div', { className: 'js-term-empty' }, '加载中…') : (
             filteredAssets.length === 0
               ? h('div', { className: 'js-term-empty' }, '无匹配资产（在堡垒机菜单态可用）')
-              : h('div', { className: 'js-term-assetList' },
-                  h('div', { className: 'js-term-assetMeta' }, '显示 ' + filteredAssets.length + ' / ' + String(assets.count)),
-                  assetRows,
+              : h('div', { className: 'js-term-assetList', onScroll: assetScroll },
+                  h('div', { className: 'js-term-assetMeta' }, '显示 ' + filteredAssets.length + ' 台（缓存 ' + String(assets.count) + ' 台）' + (assets.fetchedAt !== null ? ' · 获取于 ' + fmtTime(new Date(assets.fetchedAt).toISOString()) : '')),
+                  h('div', { className: 'js-term-assetWindow', style: { height: filteredAssets.length * ASSET_ROW_H + 'px', position: 'relative' } },
+                    h('div', { style: { transform: 'translateY(' + assetWinStart * ASSET_ROW_H + 'px)' } }, assetRows),
+                  ),
                 )
           ),
         )
@@ -483,6 +599,9 @@ export function JumpServerSidebarTab(props: JumpServerSidebarTabProps): React.Re
             ),
           )
         : h('div', { className: 'js-term-body', ref: bodyRef, onScroll: scrollHandler },
+            newOutput > 0 && !follow
+              ? h('button', { type: 'button', className: 'js-term-newOutput', onClick: () => { setFollow(true); setNewOutput(0) } }, '↓ ' + newOutput + ' 条新输出')
+              : null,
             buffer.rows.length === 0
               ? h('div', { className: 'js-term-empty' }, t('emptyTerminal'))
               : h('div', { className: 'js-term-window', style: { height: visibleTotal * ROW_H + 'px' } },
@@ -503,10 +622,17 @@ export function JumpServerSidebarTab(props: JumpServerSidebarTabProps): React.Re
     ),
     confirmReq !== null
       ? h('div', { className: 'js-term-confirm', role: 'alertdialog' },
-          h('div', { className: 'js-term-confirmText' }, '修改命令需要二次确认 (' + String(confirmReq.risk ?? 'MODIFY') + ')：' + confirmReq.command),
+          h('div', { className: 'js-term-confirmText' },
+            (String(confirmReq.risk ?? '') === 'UNKNOWN'
+              ? '风险：无法确认该命令是否为只读（分类器无对应语义规则）；这不代表它一定会修改服务器。'
+              : '风险：' + String(confirmReq.risk ?? 'MODIFY') + '（该命令会修改服务器运行状态）。') + '是否允许执行？'),
+          h('div', { className: 'js-term-confirmCmd' }, confirmReq.command),
+          confirmReq.expiresAt !== undefined
+            ? h('div', { className: 'js-term-confirmHint' }, '确认链接 ' + Math.max(0, Math.round((confirmReq.expiresAt - Date.now()) / 1000)) + ' 秒内有效，仅限本次命令')
+            : null,
           h('div', { className: 'js-term-confirmActions' },
             h('button', { type: 'button', className: 'js-term-btn js-term-btnDanger', onClick: () => { manualAbortRef.current?.abort(); setConfirmReq(null); setManualError(null) } }, '取消'),
-            h('button', { type: 'button', className: 'js-term-btn js-term-btnPrimary', onClick: () => { const cmd = confirmReq.command; setConfirmReq(null); void submitManual(cmd, true) } }, '确认执行'),
+            h('button', { type: 'button', className: 'js-term-btn js-term-btnPrimary', onClick: () => { const cmd = confirmReq.command; setConfirmReq(null); void submitManual(cmd, true, confirmReq.confirmToken) } }, '确认执行'),
           ),
         )
       : null,
