@@ -1,0 +1,47 @@
+# V0.3.1 unknown corpus — the classifier has NO semantic rule; these MUST be
+# UNKNOWN (never READ, never "claimed modifying").
+vendor-cli inspect
+my-company-diagnose --status
+fooctl bar
+abcctl status
+heartbeat-client status
+fusion-cluster check
+hbase-cli status
+kafka-topics --list
+zookeeper-cli status
+solrctl status
+es-cli health
+mc admin info
+az vm list -o table
+aws s3 ls
+gcloud compute instances list
+terraform plan
+ansible --version
+puppet agent --version
+salt --version
+tmux list-sessions
+screen -ls
+systemctl frobnicate nginx
+docker mystery-verb
+kubectl mystery-verb
+chkconfig --list
+alternatives --list
+update-alternatives --query java
+groovy -v
+gradle -v
+mvn -v
+go version
+rustc --version
+perl -v
+ruby -v
+php -v
+cnpm -v
+pm2 -v
+bun -v
+deno -v
+curl-test-suite verify
+nmon -f
+dstat -af
+iotop -bn1
+htop -d 1
+iftop -t

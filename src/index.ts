@@ -1,5 +1,6 @@
 import { Context } from '@deepseek-ai/cordis'
 import '@deepseek-ai/cordis-plugin-timer'
+import { createHash, randomUUID } from 'node:crypto'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { defineDomain, domainTable } from '@deepseek-ai/dsh-storage-domain'
 import { Config } from './config/schema.js'
@@ -74,6 +75,13 @@ export function apply(ctx: Context, config: JumpServerConfig): void {
   const cases = new OpsCaseRegistry()
   // V0.2.7 P1: per-conversation recent-audit ring (last 200) for the sidebar audit tab.
   const recentAudits = new Map<string, Array<Record<string, unknown>>>()
+  // V0.3.1 P1: one-time manual-confirmation challenges (single use, TTL).
+  // A second request must present the SAME token + command hash — the host can
+  // then prove the user actually saw the first confirm prompt.
+  const confirmTokens = new Map<string, { token: string; commandHash: string; risk: string; expiresAt: number }>()
+  const CONFIRM_TOKEN_TTL_MS = 120 * 1000
+
+  const commandHashOf = (command: string): string => createHash('sha256').update(command).digest('hex').slice(0, 16)
 
   const registry = new SessionRegistry({
     create: (sessionId: string) => {
@@ -96,6 +104,13 @@ export function apply(ctx: Context, config: JumpServerConfig): void {
       })
       observer.recordState(SessionState.DISCONNECTED, null)
       return { manager, observer, lastUsedAt: Date.now() }
+    },
+    // V0.3.1 P2: a detached conversation must not leak session-attached Maps.
+    onDetach: (sessionId) => {
+      recentAudits.delete(sessionId)
+      cases.deleteConversation(sessionId)
+      confirmTokens.delete(sessionId)
+      grants.revoke(sessionId)
     },
   })
 
@@ -279,7 +294,7 @@ export function apply(ctx: Context, config: JumpServerConfig): void {
         groupMatched: result.groupMatched,
       }
     },
-    manualExec: async (sessionId: string, command: string, signal?: AbortSignal, confirmed = false) => {
+    manualExec: async (sessionId: string, command: string, signal?: AbortSignal, confirmed = false, confirmToken?: string) => {
       // Do not create a bundle from an arbitrary browser-provided id. Manual
       // input is available only after this conversation already owns a live
       // JumpServer session established through a model-facing tool call.
@@ -334,10 +349,45 @@ export function apply(ctx: Context, config: JumpServerConfig): void {
           }
         }
         // V0.2.7 P0: manual terminal permission policy.
-        const risk = classifyManual(command).risk
+        const classification = classifyManual(command)
+        const risk = classification.risk
         const gate = manualGate(risk, manualPolicyOf(getConfig()), getConfig().permissionMode, confirmed)
-        if (gate.kind === 'confirm') {
-          return { ok: false, code: 'MANUAL_CONFIRM_REQUIRED', risk, command, state: st.state, message: '该命令会修改远程服务器，请再次确认执行', sessionId }
+        if (gate.kind === 'confirm' && !confirmed) {
+          // V0.3.1 P1: one-time confirmation challenge — the second request must
+          // prove it saw THIS prompt by echoing the issued token + command hash.
+          const token = randomUUID()
+          confirmTokens.set(sessionId, {
+            token,
+            commandHash: commandHashOf(command),
+            risk,
+            expiresAt: Date.now() + CONFIRM_TOKEN_TTL_MS,
+          })
+          return {
+            ok: false,
+            code: 'MANUAL_CONFIRM_REQUIRED',
+            risk,
+            command,
+            confirmToken: token,
+            commandHash: commandHashOf(command),
+            expiresAt: Date.now() + CONFIRM_TOKEN_TTL_MS,
+            state: st.state,
+            message: '该命令需要二次确认，请核对后再次确认执行',
+            sessionId,
+          }
+        }
+        if (gate.kind === 'confirm' && confirmed) {
+          // validate the challenge: same session, same command hash, same risk,
+          // unexpired, single use — otherwise refuse (no execution).
+          const challenge = confirmTokens.get(sessionId)
+          if (challenge === undefined || challenge.expiresAt < Date.now()) {
+            confirmTokens.delete(sessionId)
+            return { ok: false, code: 'CONFIRMATION_EXPIRED', message: '确认已过期，请重新发起该命令', state: st.state, sessionId }
+          }
+          if (challenge.commandHash !== commandHashOf(command) || challenge.risk !== risk) {
+            confirmTokens.delete(sessionId)
+            return { ok: false, code: 'CONFIRMATION_MISMATCH', message: '确认内容与原始命令不一致，已拒绝执行', state: st.state, sessionId }
+          }
+          confirmTokens.delete(sessionId) // single use
         }
         if (gate.kind === 'block') {
           return { ok: false, code: 'MANUAL_BLOCKED', message: gate.reason, state: st.state, sessionId }
@@ -346,7 +396,20 @@ export function apply(ctx: Context, config: JumpServerConfig): void {
         // the sidebar "只看修改" filter catches human modifications too; actor
         // is HUMAN to separate who ran it from what risk it carried.
         try {
-          const { status, outcome } = await bundle.manager.exec({ command, risk, actor: 'HUMAN', signal })
+          const { status, outcome } = await bundle.manager.exec({
+            command,
+            risk,
+            actor: 'HUMAN',
+            classification: {
+              risk: classification.risk,
+              reason: classification.reason,
+              ruleId: classification.ruleId,
+              confidence: classification.confidence,
+              classifierVersion: classification.classifierVersion,
+              normalizedCommand: classification.normalizedCommand,
+            },
+            signal,
+          })
           if (outcome.kind === 'completed') {
             return {
               ok: true,

@@ -6,21 +6,39 @@ export type GateDecision =
   | { kind: 'allow' }
   | { kind: 'deny'; code: 'COMMAND_BLOCKED' | 'COMMAND_APPROVAL_REQUIRED'; reason: string }
 
-/** Permission matrix (V0.1). */
-export function gateDecision(risk: CommandRisk, mode: PermissionMode): GateDecision {
+/**
+ * V0.3.1 permission matrix (single fact source for Agent tools AND the manual
+ * FOLLOW_AGENT policy):
+ *
+ *   risk             | READ_ONLY          | AUTO                | FULL_ACCESS
+ *   -----------------|--------------------|---------------------|---------------
+ *   READ             | allow              | allow               | allow
+ *   PRIVILEGED_READ  | allow if configured| allow               | allow
+ *   UNKNOWN          | deny (block)       | approval            | approval
+ *   MODIFY           | deny (block)       | approval            | allow
+ *   DANGEROUS        | deny (block)       | approval            | approval
+ *
+ * UNKNOWN is NEVER presented as MODIFY: it is blocked/approval-gated with the
+ * honest copy "read-only cannot be confirmed".
+ */
+export function gateDecision(
+  risk: CommandRisk,
+  mode: PermissionMode,
+  options: { privilegedReadInReadOnly?: boolean } = {},
+): GateDecision {
   switch (mode) {
     case 'READ_ONLY':
-      return risk === 'READ'
-        ? { kind: 'allow' }
-        : { kind: 'deny', code: 'COMMAND_BLOCKED', reason: 'blocked by READ_ONLY permission mode' }
+      if (risk === 'READ') return { kind: 'allow' }
+      if (risk === 'PRIVILEGED_READ' && options.privilegedReadInReadOnly === true) return { kind: 'allow' }
+      return { kind: 'deny', code: 'COMMAND_BLOCKED', reason: 'blocked by READ_ONLY permission mode' }
     case 'AUTO':
-      return risk === 'READ' || risk === 'LOW'
-        ? { kind: 'allow' }
-        : { kind: 'deny', code: 'COMMAND_APPROVAL_REQUIRED', reason: 'approval required in AUTO mode' }
+      if (risk === 'READ' || risk === 'PRIVILEGED_READ') return { kind: 'allow' }
+      return { kind: 'deny', code: 'COMMAND_APPROVAL_REQUIRED', reason: 'approval required in AUTO mode' }
     case 'FULL_ACCESS':
-      return risk === 'DANGEROUS'
-        ? { kind: 'deny', code: 'COMMAND_APPROVAL_REQUIRED', reason: 'approval required even in FULL_ACCESS' }
-        : { kind: 'allow' }
+      if (risk === 'UNKNOWN' || risk === 'DANGEROUS') {
+        return { kind: 'deny', code: 'COMMAND_APPROVAL_REQUIRED', reason: 'approval required even in FULL_ACCESS' }
+      }
+      return { kind: 'allow' }
   }
 }
 
@@ -34,9 +52,9 @@ export interface TargetVerification {
 }
 
 /**
- * Mandatory safety rule (requirement 21): before any MODIFY/DANGEROUS command
- * reaches the wire, the current target must be verified. Unverified target =
- * refuse, no approval prompt.
+ * Mandatory safety rule (requirement 21): before any MODIFY/DANGEROUS/UNKNOWN
+ * command reaches the wire, the current target must be verified. Unverified
+ * target = refuse, no approval prompt.
  */
 export function requireTargetVerified(verification: TargetVerification): void {
   if (verification.state !== 'ASSET_SHELL' || verification.currentTarget === null || verification.currentHostname === null) {

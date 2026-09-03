@@ -6,6 +6,10 @@
  * SessionManager action. At the JumpServer menu only menu verbs are legal
  * (p / IP-or-name / q); inside an asset shell 'exit' maps to leave() and
  * every other command is gated by manualPermissionMode.
+ *
+ * V0.3.1: risk classes are READ / PRIVILEGED_READ / UNKNOWN / MODIFY /
+ * DANGEROUS. CONFIRM_MODIFY lets confirmed reads pass; UNKNOWN is NOT a read
+ * and asks the user with honest copy (never "该命令会修改服务器").
  */
 import { classifyCommand, type Classification } from './command-classifier.js'
 import { gateDecision } from './permission.js'
@@ -26,17 +30,14 @@ export function manualGate(
   policy: ManualPolicy,
   agentMode: PermissionMode,
   confirmed: boolean,
+  options: { privilegedReadInReadOnly?: boolean } = {},
 ): ManualGate {
   switch (policy) {
     case 'FULL_ACCESS':
       return { kind: 'allow' }
     case 'FOLLOW_AGENT': {
-      const decision = gateDecision(risk as 'READ' | 'LOW' | 'MODIFY' | 'DANGEROUS', agentMode)
+      const decision = gateDecision(risk as 'READ' | 'PRIVILEGED_READ' | 'UNKNOWN' | 'MODIFY' | 'DANGEROUS', agentMode, options)
       if (decision.kind === 'allow') return { kind: 'allow' }
-      // V0.3.1: an APPROVAL-REQUIRED decision becomes the same human confirm
-      // dialog CONFIRM_MODIFY uses (the Agent tool path prompts the model via
-      // the approval channel; the human path prompts the user here). Only a
-      // hard READ_ONLY block stays final.
       if (decision.code === 'COMMAND_APPROVAL_REQUIRED') {
         if (!confirmed) return { kind: 'confirm', risk }
         return { kind: 'allow' }
@@ -45,7 +46,9 @@ export function manualGate(
     }
     case 'CONFIRM_MODIFY':
     default:
-      if (risk === 'READ' || risk === 'LOW') return { kind: 'allow' }
+      // confirmed reads pass; everything else (PRIVILEGED_READ is a confirmed
+      // read — it just needs elevated rights) asks for one confirmation.
+      if (risk === 'READ' || risk === 'PRIVILEGED_READ') return { kind: 'allow' }
       if (!confirmed) return { kind: 'confirm', risk }
       return { kind: 'allow' }
   }

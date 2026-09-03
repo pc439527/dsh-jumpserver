@@ -4,7 +4,8 @@ import { manualGate, menuManualKind, classifyManual } from '../src/security/manu
 describe('V0.2.7 manual terminal policy', () => {
   it('CONFIRM_MODIFY (default): reads pass, modifies ask once, confirmed executes', () => {
     expect(manualGate('READ', 'CONFIRM_MODIFY', 'READ_ONLY', false)).toEqual({ kind: 'allow' })
-    expect(manualGate('LOW', 'CONFIRM_MODIFY', 'AUTO', false)).toEqual({ kind: 'allow' })
+    expect(manualGate('PRIVILEGED_READ', 'CONFIRM_MODIFY', 'AUTO', false)).toEqual({ kind: 'allow' })
+    expect(manualGate('UNKNOWN', 'CONFIRM_MODIFY', 'AUTO', false)).toEqual({ kind: 'confirm', risk: 'UNKNOWN' })
     expect(manualGate('MODIFY', 'CONFIRM_MODIFY', 'READ_ONLY', false)).toEqual({ kind: 'confirm', risk: 'MODIFY' })
     expect(manualGate('DANGEROUS', 'CONFIRM_MODIFY', 'FULL_ACCESS', false)).toEqual({ kind: 'confirm', risk: 'DANGEROUS' })
     expect(manualGate('MODIFY', 'CONFIRM_MODIFY', 'READ_ONLY', true).kind).toBe('allow')
@@ -21,7 +22,8 @@ describe('V0.2.7 manual terminal policy', () => {
 
   it('FOLLOW_AGENT + AUTO: reads pass, MODIFY/DANGEROUS ask once, confirmed executes', () => {
     expect(manualGate('READ', 'FOLLOW_AGENT', 'AUTO', false).kind).toBe('allow')
-    expect(manualGate('LOW', 'FOLLOW_AGENT', 'AUTO', false).kind).toBe('allow')
+    expect(manualGate('PRIVILEGED_READ', 'FOLLOW_AGENT', 'AUTO', false).kind).toBe('allow')
+    expect(manualGate('UNKNOWN', 'FOLLOW_AGENT', 'AUTO', false)).toEqual({ kind: 'confirm', risk: 'UNKNOWN' })
     expect(manualGate('MODIFY', 'FOLLOW_AGENT', 'AUTO', false)).toEqual({ kind: 'confirm', risk: 'MODIFY' })
     expect(manualGate('DANGEROUS', 'FOLLOW_AGENT', 'AUTO', false)).toEqual({ kind: 'confirm', risk: 'DANGEROUS' })
     expect(manualGate('MODIFY', 'FOLLOW_AGENT', 'AUTO', true).kind).toBe('allow')

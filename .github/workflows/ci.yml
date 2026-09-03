@@ -27,5 +27,7 @@ jobs:
         run: npm test
       - name: Build (host + version meta + client bundle)
         run: npm run build
+      - name: Classifier corpus gate + snapshot report (built artifact)
+        run: node scripts/classifier-report.mjs classifier-report.json
       - name: Client bundle smoke
         run: npm run smoke:client

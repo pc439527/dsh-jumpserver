@@ -15,3 +15,4 @@ acceptance-snapshot.md
 
 # Local credentials (never commit)
 .credentials.yaml
+classifier-report.json

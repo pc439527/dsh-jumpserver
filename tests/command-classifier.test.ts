@@ -106,6 +106,9 @@ describe('V0.2.7 classifier hardening (P0)', () => {
     expect(isReadOnlyAllowed('wget https://example.com/file').allowed).toBe(false)
     expect(classifyCommand('wget https://example.com/file').risk).toBe('MODIFY')
     expect(isReadOnlyAllowed('wget -qO- https://example.com/x | head').allowed).toBe(false)
+    // scp/rsync write remote state by default -> MODIFY, never UNKNOWN
+    expect(classifyCommand('scp a.txt 203.0.113.20:/tmp/').risk).toBe('MODIFY')
+    expect(classifyCommand('rsync -av /var/log/ 203.0.113.20:/backup/').risk).toBe('MODIFY')
   })
 
   it('curl download/upload forms are MODIFY; GET/HEAD to stdout stay READ', () => {
@@ -141,7 +144,7 @@ describe('V0.2.7 classifier hardening (P0)', () => {
     expect(isReadOnlyAllowed('timeout 5 hostname').allowed).toBe(true)
     expect(isReadOnlyAllowed('nice -n 10 hostname').allowed).toBe(true)
     expect(isReadOnlyAllowed('timeout 5 env hostname').allowed).toBe(true)
-    expect(classifyCommand("env python3 -c \"import os; os.system('id')\" ").risk).toBe('MODIFY')
+    expect(classifyCommand("env python3 -c \"import os; os.system('id')\" ").risk).toBe('UNKNOWN')
     // 'reboot' trips the whole-command DANGEROUS check before the wrapper path
     expect(classifyCommand('env sh -c "reboot"').risk).toBe('DANGEROUS')
     expect(classifyCommand('nice -n -5 systemctl restart nginx').risk).toBe('MODIFY')
@@ -186,7 +189,9 @@ describe('P0 regression: no stateful regex in classification', () => {
 
   it('dangerous syntax is caught on every repeated call for several shapes', () => {
     for (let i = 0; i < 100; i++) {
-      expect(classifyCommand('echo $(rm -rf /)').risk).toBe('MODIFY')
+      // $(...) / backticks are opaque — UNKNOWN (never claimed read-only),
+      // never MODIFY; READ_ONLY still blocks and AUTO/FULL still prompt.
+      expect(classifyCommand('echo $(rm -rf /)').risk).toBe('UNKNOWN')
       expect(isReadOnlyAllowed('echo \`rm -rf /\`').allowed).toBe(false)
       expect(isReadOnlyAllowed('bash -c "rm -rf /"').allowed).toBe(false)
       expect(isReadOnlyAllowed('cat a >> /etc/x').allowed).toBe(false)
@@ -215,5 +220,121 @@ describe('separator handling (regression: trailing ; must not hang)', () => {
   it('a modifier after a trailing separator is still caught', () => {
     expect(classifyCommand('hostname; rm -rf /tmp/x').risk).toBe('MODIFY')
     expect(isReadOnlyAllowed('hostname; rm -rf /tmp/x').allowed).toBe(false)
+  })
+})
+
+describe('V0.3.1 semantic registry + UNKNOWN (P0)', () => {
+  it('newly recognised read-only diagnostics are READ (was MODIFY)', () => {
+    const reads = [
+      "sed -n '1,20p' /etc/hosts",
+      "sed -n '/error/p' /var/log/app.log",
+      'findmnt', 'findmnt -T /data',
+      'pstree -ap', 'pmap -x 1234', 'lsns',
+      'file /opt/app/app.jar', 'strings /opt/app/app.jar',
+      'sha1sum /opt/app/app.jar', 'sha256sum /opt/app/app.jar', 'md5sum /opt/file', 'cksum /opt/file',
+      'namei -l /opt/app/config', 'getfacl /data', 'lsattr /etc/hosts',
+      'lspci', 'lsusb', 'numactl --hardware', 'numactl --show',
+      'ulimit -a', 'locale -a', 'localectl status', 'localectl list-locales',
+      'mount', 'mount -l', 'findmnt -o SOURCE,TARGET,FSTYPE',
+      'watch -n 2 free -m', 'strace -c true'
+    ]
+    for (const cmd of reads) {
+      expect(classifyCommand(cmd).risk, cmd).toBe('READ')
+    }
+  })
+
+  it('systemctl/docker/kubectl read verbs are READ; docker compose read forms are READ', () => {
+    for (const cmd of [
+      'systemctl status nginx', 'systemctl show nginx', 'systemctl cat nginx',
+      'systemctl list-units', 'systemctl list-unit-files', 'systemctl list-dependencies nginx',
+      'systemctl is-active nginx', 'systemctl is-enabled nginx', 'systemctl is-failed nginx',
+      'docker ps', 'docker top nginx', 'docker inspect nginx', 'docker stats --no-stream',
+      'docker compose ps', 'docker compose logs -f --tail 50', 'docker compose config',
+      'kubectl top nodes', 'kubectl events -n dev', 'kubectl explain pods',
+      'kubectl cluster-info', 'kubectl api-resources', 'kubectl auth can-i create pods',
+      'kubectl config view',
+    ]) {
+      expect(classifyCommand(cmd).risk, cmd).toBe('READ')
+    }
+  })
+
+  it('mutating forms are still MODIFY / DANGEROUS (never downgraded)', () => {
+    for (const cmd of [
+      'systemctl restart nginx', 'systemctl stop nginx', 'systemctl reload nginx',
+      'systemctl daemon-reload', 'systemctl edit nginx',
+      'docker compose up -d', 'docker compose down', 'docker compose build',
+      'docker start nginx', 'docker run -d nginx', 'docker network create app-net',
+      'docker system prune -a', 'docker volume rm v1',
+      'kubectl apply -f depl.yaml', 'kubectl delete pod x', 'kubectl rollout restart deploy/x',
+      'kubectl taint node x key=value:NoSchedule', 'kubectl auth reconcile -f role.yaml',
+      'kubectl config set-context prod',
+      "sed -i 's/a/b/g' /etc/nginx/nginx.conf", 'sed -in s/x/y/ file', 'sed -i.bak s/a/b/ f',
+      'mount /dev/sdb1 /data', 'mount -o remount,rw /',
+      'tar -xzf app.tgz', 'tar -czf /tmp/backup.tgz /etc',
+      'yum install httpd', 'dnf remove nginx', 'apt update', 'apt-get install -y vim',
+      'setfacl -m u:root:rwx /data', 'chattr +i /etc/hosts', 'fuser -k 80/tcp',
+    ]) {
+      expect(classifyCommand(cmd).risk, cmd).toBe('MODIFY')
+    }
+    for (const cmd of ['mkfs.ext4 /dev/sdb1', 'wipefs -a /dev/sdb', 'rm -rf /*', 'shutdown -h now', 'reboot']) {
+      expect(classifyCommand(cmd).risk, cmd).toBe('DANGEROUS')
+    }
+  })
+
+  it('UNKNOWN is the honest class for unrecognised commands — never MODIFY', () => {
+    expect(classifyCommand('vendor-cli inspect').risk).toBe('UNKNOWN')
+    expect(classifyCommand('my-company-diagnose --status').risk).toBe('UNKNOWN')
+    expect(classifyCommand('systemctl frobnicate nginx').risk).toBe('UNKNOWN')
+    expect(classifyCommand('docker mystery-verb').risk).toBe('UNKNOWN')
+    // READ_ONLY blocks UNKNOWN; AUTO and FULL_ACCESS both require approval
+    expect(gateDecision('UNKNOWN', 'READ_ONLY').kind).toBe('deny')
+    expect(gateDecision('UNKNOWN', 'AUTO')).toMatchObject({ kind: 'deny', code: 'COMMAND_APPROVAL_REQUIRED' })
+    expect(gateDecision('UNKNOWN', 'FULL_ACCESS')).toMatchObject({ kind: 'deny', code: 'COMMAND_APPROVAL_REQUIRED' })
+    // isReadOnlyAllowed stays closed for UNKNOWN
+    expect(isReadOnlyAllowed('vendor-cli inspect').allowed).toBe(false)
+  })
+
+  it('wrapper regression: any wrapper depth never downgrades the inner command', () => {
+    // V0.3.1 P0: these all used to sneak through the weakened readClassify path
+    expect(classifyCommand('env curl -d a=1 http://server/api').risk).toBe('MODIFY')
+    expect(classifyCommand('env curl -o /tmp/x http://server/f').risk).toBe('MODIFY')
+    expect(classifyCommand('timeout 5 find /tmp -delete').risk).toBe('MODIFY')
+    expect(classifyCommand('nice -n 5 find / -exec rm {} \\;').risk).toBe('MODIFY')
+    expect(classifyCommand('nice sysctl -w vm.drop_caches=3').risk).toBe('MODIFY')
+    expect(classifyCommand('timeout 5 env nice curl -d x=1 http://host/').risk).toBe('MODIFY')
+    expect(classifyCommand('env timeout 3 sed -i s/a/b/ f').risk).toBe('MODIFY')
+    expect(classifyCommand('env wget http://x/f').risk).toBe('MODIFY')
+    expect(classifyCommand('timeout 3 env find / -delete').risk).toBe('MODIFY')
+    // and never downgrade a DANGEROUS either
+    expect(classifyCommand('env timeout 5 rm -rf /tmp').risk).toBe('MODIFY')
+    // reads wrapped stay READ
+    expect(classifyCommand('timeout 5 env nice hostname').risk).toBe('READ')
+  })
+
+  it('PRIVILEGED_READ: sudo + confirmed reader (matrix row)', () => {
+    for (const cmd of ['sudo cat /etc/shadow', 'sudo ss -lntp', 'sudo journalctl -u nginx', 'sudo lsof -i', 'sudo findmnt']) {
+      expect(classifyCommand(cmd).risk, cmd).toBe('PRIVILEGED_READ')
+    }
+    expect(gateDecision('PRIVILEGED_READ', 'READ_ONLY').kind).toBe('deny')
+    expect(gateDecision('PRIVILEGED_READ', 'READ_ONLY', { privilegedReadInReadOnly: true }).kind).toBe('allow')
+    expect(gateDecision('PRIVILEGED_READ', 'AUTO').kind).toBe('allow')
+    expect(gateDecision('PRIVILEGED_READ', 'FULL_ACCESS').kind).toBe('allow')
+    // sudo never hides a real mutation
+    expect(classifyCommand('sudo systemctl restart nginx').risk).toBe('MODIFY')
+    expect(classifyCommand('sudo rm -rf /tmp/x').risk).toBe('MODIFY')
+  })
+
+  it('classification carries ruleId / reason / confidence / classifierVersion', () => {
+    const c = classifyCommand('systemctl status nginx')
+    expect(c.risk).toBe('READ')
+    expect(c.ruleId).toBe('systemctl.rule')
+    expect(c.reason.length).toBeGreaterThan(0)
+    expect(c.classifierVersion).toBe(2)
+    expect(c.normalizedCommand).toBe('systemctl status nginx')
+    const u = classifyCommand('fooctl bar')
+    expect(u.ruleId).toBe('unknown.command')
+    expect(u.confidence).toBe('LOW')
+    const m = classifyCommand('systemctl restart nginx')
+    expect(m.ruleId).toBe('mutation.verb')
   })
 })

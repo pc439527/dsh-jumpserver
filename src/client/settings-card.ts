@@ -2,17 +2,25 @@
  * JumpServer settings card (settings.plugin.item, keyed 'jumpserver').
  *
  * Reads the resolved namespace through the client settings scope; stages edits
- * locally; a single 保存 validates every draft up front, writes the password to
- * the CREDENTIALS domain first, then commits the settings patch field by field
- * and — if any later write fails — best-effort ROLLS BACK the fields already
- * landed before reporting the failing field (V0.3.1 P1: no partial saves).
+ * locally; one 保存 validates every draft up front, then commits with
+ * V0.3.1 credential/settings ordering:
+ *   - passwordEnv UNCHANGED : password (credentials domain) first, then the
+ *     settings patch with best-effort rollback of fields that landed.
+ *   - passwordEnv CHANGED   : settings commit first (including the new ref),
+ *     password written LAST — so settings never pair an old host/username with
+ *     a fresh password under a ref they do not reference.
+ * This is NOT a full transaction (a mid-write crash can still interleave); the
+ * failing field is reported exactly, and the form keeps its drafts so the user
+ * can retry.
  * 测试连接 is draft-aware: it tests what the form currently contains, never
  * silently the saved config. V0.2.7 UI: Connection / Security / Session /
  * Terminal sections, permission modes as radio cards, manual-terminal policy
- * radios, an assetGroups JSON editor and the asset-cache TTL field.
+ * radios, an assetGroups JSON editor and the asset-cache TTL field. V0.3.1
+ * adds a command risk checker (pure classification via the bridge — never
+ * connects, never executes).
  */
 import * as React from 'react'
-import { fetchTestConnection, type TestResponse } from './api.js'
+import { fetchClassify, fetchTestConnection, type ClassifyResponse, type TestResponse } from './api.js'
 import type { LocaleMap } from './locales.js'
 
 const h = React.createElement
@@ -91,6 +99,9 @@ export function JumpServerSettingsCard({ t, scope, api }: SettingsCardProps): Re
   const [fieldErrors, setFieldErrors] = React.useState<string[]>([])
   const [testing, setTesting] = React.useState(false)
   const [testResult, setTestResult] = React.useState<TestResponse | null>(null)
+  const [classifyCmd, setClassifyCmd] = React.useState('')
+  const [classifyBusy, setClassifyBusy] = React.useState(false)
+  const [classifyResult, setClassifyResult] = React.useState<ClassifyResponse | null>(null)
   const [passwordConfigured, setPasswordConfigured] = React.useState<boolean | null>(null)
   const [passwordWritable, setPasswordWritable] = React.useState(true)
 
@@ -212,58 +223,89 @@ export function JumpServerSettingsCard({ t, scope, api }: SettingsCardProps): Re
       landed = landed && ok
     }
 
-    // 3) password FIRST (credentials domain) so a failed settings write never
-    //    leaves passwordEnv pointing at an unstored credential
     const password = drafts['password'] ?? ''
-    if (password !== '') {
-      try { await api.credentials.set({ ref: passwordRef, value: password }); written.push('password') } catch { landed = false }
+    // V0.3.1: when the credential REF changes, the settings patch (including
+    // passwordEnv) must commit FIRST and the password LAST — otherwise a failed
+    // settings write could pair an old host/username with a fresh password
+    // stored under a ref the settings no longer reference.
+    const refChanging = 'passwordEnv' in drafts && (drafts['passwordEnv'] ?? '').trim() !== String(resolved['passwordEnv'] ?? '')
+
+    const writePassword = async (): Promise<boolean> => {
+      try {
+        await api.credentials.set({ ref: passwordRef, value: password })
+        written.push('password')
+        return true
+      } catch {
+        return false
+      }
     }
-    // 4) settings patch (per-field); failures report the exact field
+
+    // 3) settings patch (per-field); failures report the exact field
     const textFields: Array<[string, 'string' | 'number']> = [
       ['host', 'string'], ['port', 'number'], ['username', 'string'], ['passwordEnv', 'string'],
       ['connectTimeout', 'number'], ['commandTimeout', 'number'], ['idleTimeout', 'number'],
       ['terminalScrollback', 'number'], ['assetCacheTtlSeconds', 'number'],
     ]
-    for (const [name, kind] of textFields) {
-      if (!(name in drafts)) continue
-      snapshotField(name)
-      const text = (drafts[name] ?? '').trim()
-      if (text === '') {
-        if (overridden(name)) { const ok = await scope.unset(name); mark(name, ok); if (!ok) errors.push(name + ': 重置失败') }
-        continue
+    const commitSettings = async (): Promise<void> => {
+      for (const [name, kind] of textFields) {
+        if (!(name in drafts)) continue
+        snapshotField(name)
+        const text = (drafts[name] ?? '').trim()
+        if (text === '') {
+          if (overridden(name)) { const ok = await scope.unset(name); mark(name, ok); if (!ok) errors.push(name + ': 重置失败') }
+          continue
+        }
+        const ok = kind === 'number' ? await scope.set(name, numberOrNull(text)) : await scope.set(name, text)
+        mark(name, ok)
+        if (!ok) errors.push(name + ': 保存失败')
       }
-      const ok = kind === 'number' ? await scope.set(name, numberOrNull(text)) : await scope.set(name, text)
-      mark(name, ok)
-      if (!ok) errors.push(name + ': 保存失败')
-    }
-    if ('assetGroups' in drafts) {
-      snapshotField('assetGroups')
-      const parsed = parseAssetGroups(drafts['assetGroups'] ?? '')
-      if (parsed.ok) {
-        const ok = await scope.set('assetGroups', parsed.value)
-        mark('assetGroups', ok)
-        if (!ok) errors.push('assetGroups: 保存失败')
+      if ('assetGroups' in drafts) {
+        snapshotField('assetGroups')
+        const parsed = parseAssetGroups(drafts['assetGroups'] ?? '')
+        if (parsed.ok) {
+          const ok = await scope.set('assetGroups', parsed.value)
+          mark('assetGroups', ok)
+          if (!ok) errors.push('assetGroups: 保存失败')
+        }
       }
-    }
-    for (const name of ['enabled', 'autoReconnect', 'enableAudit', 'autoOpenTerminal']) {
-      if (!(name in bools)) continue
-      snapshotField(name)
-      const ok = await scope.set(name, bools[name]!)
-      mark(name, ok)
-      if (!ok) errors.push(name + ': 保存失败')
-    }
-    for (const name of ['permissionMode', 'manualPermissionMode']) {
-      if (!(name in drafts)) continue
-      snapshotField(name)
-      const ok = await scope.set(name, drafts[name]!)
-      mark(name, ok)
-      if (!ok) errors.push(name + ': 保存失败')
+      for (const name of ['enabled', 'autoReconnect', 'enableAudit', 'autoOpenTerminal']) {
+        if (!(name in bools)) continue
+        snapshotField(name)
+        const ok = await scope.set(name, bools[name]!)
+        mark(name, ok)
+        if (!ok) errors.push(name + ': 保存失败')
+      }
+      for (const name of ['permissionMode', 'manualPermissionMode']) {
+        if (!(name in drafts)) continue
+        snapshotField(name)
+        const ok = await scope.set(name, drafts[name]!)
+        mark(name, ok)
+        if (!ok) errors.push(name + ': 保存失败')
+      }
     }
 
-    // 5) any failure -> best-effort rollback of exactly the fields that landed
-    //    (newest first). Note: a stored draft password is not rolled back — the
-    //    credentials API has no delete — but it is only written under the ref
-    //    the form currently shows, so it is never orphaned by a settings miss.
+    if (refChanging && password !== '') {
+      // ref changed + new password: settings first, password last
+      await commitSettings()
+      if (landed) {
+        if (!(await writePassword())) {
+          errors.push('password: 设置已保存，但密码写入新引用 ' + passwordRef + ' 失败 — 请重新输入密码后再次保存')
+        }
+      }
+    } else {
+      // password first (same ref) so a failed settings write never leaves the
+      // ref pointing at an unstored credential
+      if (password !== '') {
+        if (!(await writePassword())) landed = false
+      }
+      await commitSettings()
+    }
+
+    // 5) any failure -> best-effort rollback of exactly the settings fields
+    //    that landed (newest first). A stored password is not rolled back (the
+    //    credentials API has no delete); in the ref-change path the password is
+    //    written last, so a settings failure never strands a fresh password
+    //    under a ref the settings do not reference.
     if (!landed) {
       const rollbackFailed: string[] = []
       for (const name of [...written].reverse()) {
@@ -309,6 +351,20 @@ export function JumpServerSettingsCard({ t, scope, api }: SettingsCardProps): Re
       setTestResult({ ok: false, code: 'BRIDGE_ERROR', message: error instanceof Error ? error.message : String(error) })
     } finally {
       setTesting(false)
+    }
+  }
+
+  const runClassify = async (): Promise<void> => {
+    const cmd = classifyCmd.trim()
+    if (cmd.length === 0) return
+    setClassifyBusy(true)
+    setClassifyResult(null)
+    try {
+      setClassifyResult(await fetchClassify(cmd))
+    } catch (error) {
+      setClassifyResult({ ok: false, code: 'BRIDGE_ERROR', message: error instanceof Error ? error.message : String(error) })
+    } finally {
+      setClassifyBusy(false)
     }
   }
 
@@ -415,6 +471,30 @@ export function JumpServerSettingsCard({ t, scope, api }: SettingsCardProps): Re
           sectionTitle('终端'),
           switchField('autoOpenTerminal', t.autoOpenTerminal, t.autoOpenTerminalHint),
           input('terminalScrollback', t.terminalScrollback, t.terminalScrollbackHint, true),
+
+          sectionTitle('命令风险检查（V0.3.1）'),
+          h('div', { className: 'js-term-cardField', key: 'classify' },
+            h('div', { className: 'js-term-cardRow' },
+              h('input', {
+                type: 'text', value: classifyCmd, placeholder: '例如: sed -n \'1,20p\' /etc/hosts', spellCheck: false,
+                onChange: (event: React.ChangeEvent<HTMLInputElement>) => { setClassifyCmd(event.target.value); setClassifyResult(null) },
+                onKeyDown: (event: React.KeyboardEvent<HTMLInputElement>) => { if (event.key === 'Enter') void runClassify() },
+              }),
+              h('button', { type: 'button', className: 'js-term-btn js-term-btnPrimary', disabled: classifyBusy || classifyCmd.trim().length === 0, onClick: () => void runClassify() }, classifyBusy ? '检查中…' : '检查'),
+            ),
+            h('p', { className: 'js-term-cardHint' }, '纯本地分类（不连接、不执行任何服务器命令）：确认只读 / 特权只读 / 无法确认 / 修改 / 高危。'),
+            classifyResult !== null
+              ? h('div', { className: 'js-term-classifyResult ' + (classifyResult.ok !== false ? 'js-term-testOk' : 'js-term-testErr'), role: 'status' },
+                  classifyResult.ok !== false
+                    ? [
+                        '风险: ' + String(classifyResult.risk ?? '?'),
+                        '规则: ' + String(classifyResult.ruleId ?? '—'),
+                        '原因: ' + String(classifyResult.reason ?? '—'),
+                        '置信度: ' + String(classifyResult.confidence ?? '—') + ' · 分类器 v' + String(classifyResult.classifierVersion ?? '?'),
+                      ].join(LF)
+                    : String(classifyResult.message ?? classifyResult.code ?? '检查失败'))
+              : null,
+          ),
           h('div', { className: 'js-term-cardField', key: 'assetGroups' },
             h('div', { className: 'js-term-cardHead' },
               h('label', { className: 'js-term-cardLabel', htmlFor: 'js-card-assetGroups' }, '资产分组（assetGroups）'),

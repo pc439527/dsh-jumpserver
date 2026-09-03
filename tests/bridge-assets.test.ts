@@ -141,13 +141,13 @@ describe('V0.3.1 #2 draft connection test passwordEnv', () => {
     expect(draftPasswordSource({ password: 'x', passwordEnv: 'JS_PROD_PASSWORD' }, cfg)).toEqual({ env: null })
   })
 
-  it('runConnectionTest resolves against the DRAFT passwordEnv and flags draft', async () => {
+  it('V0.3.1 P0: changed identity NEVER reuses the saved credential; literal password required', async () => {
     let resolvedEnv: string | undefined = 'NOT_CALLED'
     const services = {
       getConfig: () => baseConfig(),
       resolvePassword: async (env?: string) => {
         resolvedEnv = env
-        return 'draft-ref-secret'
+        return 'saved-secret'
       },
       statusFor: () => ({ state: 'DISCONNECTED', gateway: 'h:2222', target: null, hostname: null, user: null, connected: false, configured: true, permissionMode: 'READ_ONLY', granted: false }),
       grantedFor: () => false,
@@ -158,18 +158,67 @@ describe('V0.3.1 #2 draft connection test passwordEnv', () => {
       manualExec: async () => ({ ok: false }),
     } as unknown as BridgeServices
 
-    // 127.0.0.1:1 is refused instantly, so connect() fails fast — the point of
-    // the test is the password resolution that happens BEFORE the connect.
-    const result = await runConnectionTest(services, {
+    // A crafted draft that points at a DIFFERENT host must NOT be able to
+    // reuse the saved bastion credential — with or without a draft passwordEnv.
+    const changedHost = await runConnectionTest(services, {
       host: '127.0.0.1', port: 1, username: 'ops', passwordEnv: 'JS_PROD_PASSWORD',
     })
-    expect(resolvedEnv).toBe('JS_PROD_PASSWORD')
-    expect(result.draft).toBe(true)
-    expect(result.ok).toBe(false) // refused — proves we got past password resolution
+    expect(changedHost.code).toBe('CREDENTIAL_MISMATCH')
+    expect(changedHost.ok).toBe(false)
+    expect(changedHost.draft).toBe(true)
+    expect(resolvedEnv).toBe('NOT_CALLED') // saved credential never resolved
 
-    // passwordEnv-only edit still counts as a draft (localhost:1 keeps it offline)
-    const envOnly = await runConnectionTest(services, { host: '127.0.0.1', port: 1, username: 'ops', passwordEnv: 'JS_ANOTHER' })
+    const changedUser = await runConnectionTest(services, { username: 'root', passwordEnv: 'JS_ANOTHER' })
+    expect(changedUser.code).toBe('CREDENTIAL_MISMATCH')
+    expect(resolvedEnv).toBe('NOT_CALLED')
+
+    // A literal transient password is the ONLY accepted credential for a
+    // changed identity: resolution is bypassed, connect is attempted (127.0.0.1:1
+    // refuses instantly -> ok=false proves we got past the guard).
+    const withLiteral = await runConnectionTest(services, {
+      host: '127.0.0.1', port: 1, username: 'ops', password: 'transient-secret', passwordEnv: 'WHATEVER',
+    })
+    expect(withLiteral.code).not.toBe('CREDENTIAL_MISMATCH')
+    expect(withLiteral.ok).toBe(false)
+    expect(withLiteral.draft).toBe(true)
+    expect(resolvedEnv).toBe('NOT_CALLED')
+  })
+
+  it('exact identity: the DRAFT passwordEnv is resolved (only the credential edited)', async () => {
+    let resolvedEnv: string | undefined = 'NOT_CALLED'
+    const services = {
+      getConfig: () => baseConfig(),
+      // returning undefined -> the test stops at NOT_CONFIGURED (no wire),
+      // which proves the DRAFT env was the one consulted.
+      resolvePassword: async (env?: string) => {
+        resolvedEnv = env
+        return undefined
+      },
+      statusFor: () => ({ state: 'DISCONNECTED', gateway: 'h:2222', target: null, hostname: null, user: null, connected: false, configured: true, permissionMode: 'READ_ONLY', granted: false }),
+      grantedFor: () => false,
+      observerFor: () => null,
+      auditFor: () => [],
+      assetGroupNames: () => [],
+      assetList: async () => null,
+      manualExec: async () => ({ ok: false }),
+    } as unknown as BridgeServices
+
+    // identity untouched -> only the credential changed -> the DRAFT ref is
+    // resolved (never silently the saved ref). Undefined secret -> fast
+    // NOT_CONFIGURED, no network contact.
+    const envOnly = await runConnectionTest(services, { passwordEnv: 'JS_PROD_PASSWORD' })
+    expect(resolvedEnv).toBe('JS_PROD_PASSWORD')
+    expect(envOnly.code).toBe('NOT_CONFIGURED')
     expect(envOnly.draft).toBe(true)
-    expect(resolvedEnv).toBe('JS_ANOTHER')
+    expect(envOnly.ok).toBe(false)
+
+    // A literal password wins over the ref (no credential resolution at all),
+    // and is the only accepted credential for a changed identity (127.0.0.1:1
+    // refuses instantly, proving we got past the guard without a real gateway).
+    resolvedEnv = 'NOT_CALLED'
+    const literal = await runConnectionTest(services, { host: '127.0.0.1', port: 1, password: 'explicit', passwordEnv: 'JS_PROD_PASSWORD' })
+    expect(resolvedEnv).toBe('NOT_CALLED')
+    expect(literal.draft).toBe(true)
+    expect(literal.ok).toBe(false)
   })
 })

@@ -1,0 +1,174 @@
+# V0.3.1 modify corpus — confirmed state changes that MUST NEVER classify READ.
+rm -rf /tmp/cache
+rm /tmp/old.tar
+mv /tmp/a /tmp/b
+cp /tmp/a /tmp/b
+cp -rp /etc /tmp/backup
+touch /tmp/newfile
+mkdir /tmp/newdir
+rmdir /tmp/emptydir
+ln -s /tmp/a /tmp/alink
+chmod 755 /tmp/app.sh
+chmod -R 644 /opt/app
+chown app:app /tmp/app.log
+chgrp dev /tmp/shared
+chattr +i /etc/hosts
+setfacl -m u:root:rwx /data
+useradd bob
+userdel bob
+usermod -s /bin/bash bob
+passwd bob
+groupadd dev
+groupdel dev
+kill 1234
+kill -9 1234
+pkill -f java
+killall nginx
+tee /tmp/out
+tee -a /var/log/app.log
+truncate -s 0 /var/log/app.log
+mount /dev/sdb1 /data
+mount -o remount,rw /
+umount /data
+sed -i 's/old/new/g' /etc/nginx/nginx.conf
+sed --in-place s/a/b/ /etc/hosts
+sed -i.bak s/a/b/ f
+systemctl start nginx
+systemctl stop nginx
+systemctl restart nginx
+systemctl reload nginx
+systemctl enable nginx
+systemctl disable nginx
+systemctl mask nginx
+systemctl unmask nginx
+systemctl daemon-reload
+systemctl reset-failed nginx
+systemctl set-default multi-user.target
+systemctl edit nginx
+systemctl isolate emergency.target
+service nginx start
+service nginx restart
+service sshd stop
+docker start c1
+docker stop c1
+docker restart c1
+docker kill c1
+docker rm c1
+docker rmi nginx
+docker exec -it c1 bash
+docker run -d --name web nginx
+docker build -t app:v1 .
+docker push registry/app:v1
+docker pull nginx:latest
+docker tag nginx myreg/nginx:v1
+docker commit c1 snap1
+docker save -o /tmp/img.tar nginx
+docker load -i /tmp/img.tar
+docker network create app-net
+docker network rm app-net
+docker volume create vol1
+docker volume rm vol1
+docker system prune -a
+docker compose up -d
+docker compose down
+docker compose build
+docker compose restart
+docker compose exec web bash
+kubectl apply -f deploy.yaml
+kubectl create deployment web --image=nginx
+kubectl delete pod web-abc
+kubectl delete ns old-ns
+kubectl edit deploy web
+kubectl scale deploy web --replicas=5
+kubectl patch deploy web -p '{"spec":{"replicas":3}}'
+kubectl rollout restart deploy/web
+kubectl rollout undo deploy/web
+kubectl exec -it pod/web -- bash
+kubectl drain node-1
+kubectl cordon node-1
+kubectl uncordon node-1
+kubectl taint node-1 key=value:NoSchedule
+kubectl label pod p env=prod
+kubectl annotate pod p note=test
+kubectl autoscale deploy web --min=1 --max=5
+kubectl set image deploy/web app=nginx:v2
+kubectl replace -f deploy.yaml
+kubectl run tmp --image=nginx
+kubectl expose deploy web --port=80
+kubectl config set-context prod --cluster=prod
+kubectl auth reconcile -f rbac.yaml
+tar -xzf /tmp/app.tgz
+tar -xvf /tmp/app.tgz
+tar -czf /tmp/backup.tgz /etc
+tar -cjf /tmp/backup.tbz /etc
+yum install httpd
+yum remove nginx
+yum update -y
+yum clean all
+yum history undo 5
+dnf install vim
+dnf erase nginx
+dnf update --security
+apt install vim
+apt remove nginx
+apt update
+apt purge curl
+apt-get install -y vim
+apt-get upgrade -y
+apt-get autoremove
+apt-get full-upgrade -y
+pip install requests
+pip3 install --upgrade pip
+npm install
+npm run build
+pnpm add lodash
+yarn add lodash
+make
+make install
+cmake ..
+git add .
+git commit -m "wip"
+git push origin main
+git reset --hard HEAD~1
+git checkout -b feature/x
+svn commit -m "wip"
+echo hello > /tmp/out
+cat /etc/hosts > /tmp/hosts.bak
+grep root /etc/passwd > /tmp/rootusers
+ls > /tmp/list.txt
+echo x >> /var/log/app.log
+wget https://example.com/file
+wget -O /tmp/x https://example.com/file
+wget --output-document=/tmp/x https://example.com/f
+scp /tmp/a.txt host:/tmp/
+rsync -av /opt/app/ host:/backup/
+curl -o /tmp/x https://example.com/file
+curl -d a=1 http://server/api
+curl -X POST http://server/api
+curl -F file=@/etc/passwd http://server/upload
+curl --data-binary @/tmp/x http://server/
+sysctl -w vm.drop_caches=3
+find /tmp -delete
+find / -exec rm {} ;
+find /tmp -name '*.tmp' -ok rm {} ;
+awk 'BEGIN{system("reboot")}' /etc/hosts
+fuser -k 80/tcp
+sudo rm -rf /tmp/x
+sudo systemctl restart nginx
+sudo pkill java
+sudo useradd bob
+sudo mkdir /data/new
+sudo chown root:root /etc/nginx/nginx.conf
+sudo yum install httpd
+sudo apt update
+sudo mount /dev/sda1 /mnt
+sudo sed -i s/a/b/ /etc/hosts
+sudo tee /etc/hosts
+sudo kill -9 1234
+env curl -d a=1 http://server/api
+timeout 5 find /tmp -delete
+nice sysctl -w vm.drop_caches=3
+env timeout 3 sed -i s/a/b/ f
+watch -n 2 'rm -rf /tmp/x'
+strace -o /tmp/trace.log true
+tcpdump -w /tmp/cap.pcap -i eth0

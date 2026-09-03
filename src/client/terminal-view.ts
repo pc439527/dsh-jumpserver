@@ -113,6 +113,12 @@ const STATE_LABELS: Record<string, string> = {
 
 /** Fold one snapshot batch into the buffer. Returns the last applied seq. */
 export function applySnapshot(buffer: TerminalBuffer, snapshot: SnapshotResponse, maxSeq: number): number {
+  // V0.3.1 P2: when the Host ring dropped events the browser never saw, insert
+  // an explicit warning row — never fake a continuous log.
+  const oldest = snapshot.oldestSeq ?? 0
+  if (oldest > maxSeq + 1) {
+    pushRow(buffer, { id: buffer.nextId++, kind: 'meta', kind2: 'error', text: '· ⚠ 部分终端输出已超出缓冲区并被丢弃（seq ' + (maxSeq + 1) + '..' + (oldest - 1) + ' 缺失）' })
+  }
   for (const event of snapshot.events ?? []) {
     switch (event.type) {
       case 'output':

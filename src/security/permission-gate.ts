@@ -1,23 +1,59 @@
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { ApprovalService } from '@deepseek-ai/dsh-user-approval'
-import type { CommandRisk } from '../config/types.js'
+import type { CommandRisk, PermissionMode } from '../config/types.js'
 import { JumpServerError } from '../jumpserver/errors.js'
 import type { SessionManager } from '../jumpserver/session-manager.js'
-import { classifyCommand, gateDecision, requireTargetVerified } from './permission.js'
+import { classifyCommand, gateDecision, requireTargetVerified, type Classification } from './permission.js'
 
 export interface GateServices {
-  getConfig: () => { permissionMode: 'READ_ONLY' | 'AUTO' | 'FULL_ACCESS' }
+  getConfig: () => { permissionMode: PermissionMode; privilegedReadInReadOnly?: boolean }
   manager: SessionManager
   approval?: ApprovalService
 }
 
 export interface GatedCommand {
   risk: CommandRisk
+  /** Full V0.3.1 classification (ruleId/reason/confidence) — audit + approval copy. */
+  classification: Classification
+  /** True when this gated command required a human approval (for the audit). */
+  approvalRequired: boolean
   /** Runs right after navigation (run tool): verify target, then ask. */
   beforeExec?: () => Promise<void>
 }
 
-async function askApproval(services: GateServices, exec: ToolRunContext, command: string, risk: CommandRisk): Promise<void> {
+/** V0.3.1: approval copy is risk-honest — UNKNOWN is never presented as MODIFY. */
+function approvalReason(status: { target: string | null; hostname: string | null }, command: string, classification: Classification): string {
+  const target = '目标服务器：' + (status.target ?? '?') + ' / ' + (status.hostname ?? 'unknown host')
+  const lines: string[] = [target, '准备执行：' + command, '']
+  switch (classification.risk) {
+    case 'UNKNOWN':
+      lines.push('风险：无法确认该命令是否为只读（规则 ' + classification.ruleId + '）')
+      lines.push('原因：当前分类器没有该命令的语义规则，不能确认它是否修改服务器。')
+      lines.push('这不代表命令一定会修改服务器——是否允许本次执行？')
+      break
+    case 'MODIFY':
+      lines.push('风险：修改操作（规则 ' + classification.ruleId + '）')
+      lines.push('原因：' + (classification.reason || '识别为修改命令') + '。')
+      lines.push('该命令会改变服务器运行状态，是否执行？')
+      break
+    case 'DANGEROUS':
+      lines.push('风险：高危操作（规则 ' + classification.ruleId + '）')
+      lines.push('原因：该命令可能造成服务中断、数据破坏或系统不可用。')
+      lines.push('是否仍然执行？')
+      break
+    case 'PRIVILEGED_READ':
+      lines.push('风险：特权只读（需要 sudo/root，规则 ' + classification.ruleId + '）')
+      lines.push('原因：' + (classification.reason || 'privileged read') + '。')
+      lines.push('是否允许本次执行？')
+      break
+    default:
+      lines.push('风险：' + classification.risk + '（规则 ' + classification.ruleId + '）')
+      lines.push('原因：' + (classification.reason || '') + '。是否执行？')
+  }
+  return lines.join('\n')
+}
+
+async function askApproval(services: GateServices, exec: ToolRunContext, command: string, classification: Classification): Promise<void> {
   const approval = services.approval
   if (approval === undefined) {
     throw new JumpServerError('COMMAND_APPROVAL_REQUIRED', 'approval service unavailable; the command was not executed')
@@ -26,16 +62,7 @@ async function askApproval(services: GateServices, exec: ToolRunContext, command
     throw new JumpServerError('COMMAND_APPROVAL_REQUIRED', 'no agent to route approval through; the command was not executed')
   }
   const status = services.manager.status()
-  const reason =
-    '目标服务器：' +
-    (status.target ?? '?') +
-    ' / ' +
-    (status.hostname ?? 'unknown host') +
-    '\n准备执行：' +
-    command +
-    '\n风险等级：' +
-    risk +
-    '\n该操作会修改远程服务器运行状态。是否执行？'
+  const reason = approvalReason(status, command, classification)
   const outcome = await approval.request({
     agent: exec.agent,
     toolName: exec.name,
@@ -55,19 +82,23 @@ async function askApproval(services: GateServices, exec: ToolRunContext, command
   }
 }
 
+function verifyTarget(services: GateServices): void {
+  const status = services.manager.status()
+  requireTargetVerified({ state: status.state, currentTarget: status.target, currentHostname: status.hostname })
+}
+
 /** Gate for jumpserver_exec: session is already in ASSET_SHELL. */
 export async function gateCommand(services: GateServices, exec: ToolRunContext, command: string): Promise<GatedCommand> {
-  const mode = services.getConfig().permissionMode
-  const { risk } = classifyCommand(command)
-  const decision = gateDecision(risk, mode)
-  if (decision.kind === 'allow') return { risk }
-  if (risk === 'MODIFY' || risk === 'DANGEROUS') {
-    const status = services.manager.status()
-    requireTargetVerified({ state: status.state, currentTarget: status.target, currentHostname: status.hostname })
+  const cfg = services.getConfig()
+  const classification = classifyCommand(command)
+  const decision = gateDecision(classification.risk, cfg.permissionMode, { privilegedReadInReadOnly: cfg.privilegedReadInReadOnly })
+  if (decision.kind === 'allow') return { risk: classification.risk, classification, approvalRequired: false }
+  if (classification.risk === 'MODIFY' || classification.risk === 'DANGEROUS' || classification.risk === 'UNKNOWN') {
+    verifyTarget(services)
   }
   if (decision.code === 'COMMAND_APPROVAL_REQUIRED') {
-    await askApproval(services, exec, command, risk)
-    return { risk }
+    await askApproval(services, exec, command, classification)
+    return { risk: classification.risk, classification, approvalRequired: true }
   }
   throw new JumpServerError('COMMAND_BLOCKED', command + ' -- ' + decision.reason)
 }
@@ -78,20 +109,22 @@ export async function gateCommand(services: GateServices, exec: ToolRunContext, 
  * with the session already inside the requested asset.
  */
 export async function gateCommandForNavigation(services: GateServices, exec: ToolRunContext, command: string): Promise<GatedCommand> {
-  const mode = services.getConfig().permissionMode
-  const { risk } = classifyCommand(command)
-  const decision = gateDecision(risk, mode)
-  if (decision.kind === 'allow') return { risk }
+  const cfg = services.getConfig()
+  const classification = classifyCommand(command)
+  const decision = gateDecision(classification.risk, cfg.permissionMode, { privilegedReadInReadOnly: cfg.privilegedReadInReadOnly })
+  if (decision.kind === 'allow') return { risk: classification.risk, classification, approvalRequired: false }
   if (decision.code === 'COMMAND_BLOCKED') {
     throw new JumpServerError('COMMAND_BLOCKED', command + ' -- ' + decision.reason)
   }
-  // ASK path: verify + approve after the session reached the requested asset.
+  // ASK path (AUTO: UNKNOWN/MODIFY/DANGEROUS; FULL_ACCESS: UNKNOWN/DANGEROUS):
+  // verify + approve after the session reached the requested asset.
   return {
-    risk,
+    risk: classification.risk,
+    classification,
+    approvalRequired: true,
     beforeExec: async () => {
-      const status = services.manager.status()
-      requireTargetVerified({ state: status.state, currentTarget: status.target, currentHostname: status.hostname })
-      await askApproval(services, exec, command, risk)
+      verifyTarget(services)
+      await askApproval(services, exec, command, classification)
     },
   }
 }

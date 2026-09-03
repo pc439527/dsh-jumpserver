@@ -34,6 +34,10 @@ export const Config = z.object({
     .default('READ_ONLY')
     .description('Agent 自动执行权限：READ_ONLY 只读 / AUTO 修改需审批 / FULL_ACCESS 普通修改直接执行且高危仍审批')
     .role('select'),
+  privilegedReadInReadOnly: z
+    .boolean()
+    .default(false)
+    .description('V0.3.1 READ_ONLY 模式是否放行 PRIVILEGED_READ（sudo + 只读命令）；默认不放行（只自动执行纯 READ）'),
   manualPermissionMode: z
     .union([
       z.const('FOLLOW_AGENT'),
