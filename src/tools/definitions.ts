@@ -71,7 +71,7 @@ export const ASSETS_SCHEMA = {
  * exec.agent.session.id, so 对话 A and 对话 B never share a PTY/mutex/
  * terminal stream. V0.2.3 P1 adds jumpserver_assets (KoKo 'p' -> local filter).
  */
-export function registerJumpServerTools(ctx: Context, registry: SessionRegistry, getConfig: () => JumpServerConfig, grants: SessionGrant): Array<() => void> {
+export function registerJumpServerTools(ctx: Context, registry: SessionRegistry, getConfig: () => JumpServerConfig, grants: SessionGrant, terminateConversation?: (sessionId: string) => Promise<unknown>): Array<() => void> {
   const disposers: Array<() => void> = []
 
   disposers.push(
@@ -397,9 +397,11 @@ export function registerJumpServerTools(ctx: Context, registry: SessionRegistry,
           return guardValue(exec, async () => {
             const blocked = requireGrant(grants, exec)
             if (blocked !== null) return blocked
+            const sessionId = sessionIdOf(exec)
             const bundle = bundleFor(exec, registry)
-            const status = await bundle.manager.close()
-            return statusToValue(status)
+            if (terminateConversation !== undefined) await terminateConversation(sessionId)
+            else { grants.revoke(sessionId); await bundle.manager.close() }
+            return statusToValue(bundle.manager.status())
           })
         },
       }),

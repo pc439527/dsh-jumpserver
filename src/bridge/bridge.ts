@@ -40,6 +40,8 @@ export interface BridgeServices {
   }
   /** V0.2.4: whether the conversation holds a JumpServer Session Grant. */
   grantedFor: (sessionId: string | undefined) => boolean
+  /** Explicitly end SSH and revoke this conversation grant. */
+  terminateFor?: (sessionId: string) => Promise<unknown>
   observerFor: (sessionId: string | undefined) => TerminalObserver | null
   /** V0.2.7: recent audited commands of one conversation (ring, last 200). */
   auditFor: (sessionId: string | undefined) => Array<Record<string, unknown>>
@@ -185,6 +187,25 @@ export function registerBridgeRoutes(webServer: {
           json(res, 400, { ok: false, code: 'BRIDGE_ERROR', message: error instanceof Error ? error.message : String(error) })
         }
       })()
+    },
+  }))
+
+  disposers.push(webServer.register({
+    kind: 'exact',
+    path: '/api/jumpserver.close',
+    handler: (req, res) => {
+      if (!requirePost(req, res)) return
+      void (async () => {
+        const body = await readJsonBody(req)
+        const sessionId = typeof body.sessionId === 'string' ? body.sessionId.trim() : ''
+        if (sessionId.length === 0 || sessionId.length > 512) {
+          json(res, 400, { ok: false, code: 'INVALID_SESSION', message: 'valid sessionId is required' })
+          return
+        }
+        if (services.terminateFor === undefined) throw new Error('termination service unavailable')
+        await services.terminateFor(sessionId)
+        json(res, 200, { ok: true, state: SessionState.DISCONNECTED, connected: false, granted: false, sessionId })
+      })().catch((error) => json(res, 500, { ok: false, code: 'CLOSE_FAILED', message: error instanceof Error ? error.message : String(error) }))
     },
   }))
 

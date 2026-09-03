@@ -24,3 +24,7 @@ TRUNCATE TABLE audit_log;
 chmod -R 777 /
 sudo rm -rf /
 sudo dd if=/dev/zero of=/dev/sda
+redis-cli FLUSHALL
+redis-cli FLUSHDB
+redis-cli SHUTDOWN
+redis-cli DEBUG SEGFAULT

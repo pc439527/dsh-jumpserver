@@ -9,6 +9,8 @@ export const auditRecordSchema = z.object({
   target: z.string().nullable(),
   hostname: z.string().nullable(),
   command: z.string().nullable(),
+  redactedCommand: z.string().optional(),
+  normalizedRedactedCommand: z.string().optional(),
   /** V0.3.1: AGENT | HUMAN | SYSTEM_PROFILE; default AGENT keeps records written pre-0.3.1 readable. */
   actor: z.string().default('AGENT'),
   risk: z.string(),

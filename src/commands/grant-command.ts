@@ -72,6 +72,7 @@ export function registerJumpServerCommand(
   registry: SessionRegistry,
   getConfig: () => JumpServerConfig,
   grants: SessionGrant,
+  terminateConversation?: (sessionId: string) => Promise<unknown>,
 ): (() => void) | null {
   const services = jumpHostServices(ctx)
   if (services.commands === undefined) {
@@ -90,11 +91,8 @@ export function registerJumpServerCommand(
       const lower = rawTask.toLowerCase()
 
       if (lower === 'off' || lower === 'close') {
-        grants.revoke(sessionId)
-        const bundle = registry.get(sessionId)
-        if (bundle !== undefined) {
-          await bundle.manager.close().catch(() => undefined) // close also drops the asset cache
-        }
+        if (terminateConversation !== undefined) await terminateConversation(sessionId).catch(() => undefined)
+        else { grants.revoke(sessionId); const bundle = registry.get(sessionId); if (bundle !== undefined) await bundle.manager.close().catch(() => undefined) }
         return { kind: 'success', text: 'JumpServer 已撤销授权并关闭本对话的 SSH 会话（资产缓存已清空）。需要时再发 /jumpserver <任务> 单轮授权。' }
       }
 
