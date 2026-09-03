@@ -169,6 +169,11 @@ export function fetchStatus(sessionId: string, signal?: AbortSignal): Promise<St
   return postJson<StatusResponse>('/api/jumpserver.status', { sessionId }, { signal })
 }
 
+/** Explicit user action: close SSH and revoke this conversation grant. */
+export function terminateJumpServer(sessionId: string, signal?: AbortSignal): Promise<StatusResponse> {
+  return postJson<StatusResponse>('/api/jumpserver.close', { sessionId }, { signal, acceptErrorBody: true })
+}
+
 
 /** Explicit HUMAN command from the sidebar; see Host bridge for safety rules.
  *  V0.2.7: confirmed=true acknowledges the CONFIRM_MODIFY gate for one call.

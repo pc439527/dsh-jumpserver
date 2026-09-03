@@ -40,6 +40,47 @@ export const RESULT_SCHEMA = {
 
 export type ResultValue = Record<string, unknown> & { ok: boolean }
 
+/** Convert arbitrary runtime values into lossless JSON before tool completion. */
+export function sanitizeToolOutput(value: unknown, seen = new WeakSet<object>()): unknown {
+  if (value === undefined) return undefined
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return value
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null
+  if (typeof value === 'bigint') return value.toString()
+  if (typeof value === 'function' || typeof value === 'symbol') return undefined
+  if (value instanceof Date) return value.toISOString()
+  if (value instanceof Error) {
+    const code = (value as Error & { code?: unknown }).code
+    const out: Record<string, unknown> = { name: value.name, message: value.message }
+    if (code !== undefined) out['code'] = sanitizeToolOutput(code, seen)
+    return out
+  }
+  if (typeof value === 'object') {
+    if (seen.has(value)) return { name: 'SerializationError', message: 'circular tool output removed' }
+    seen.add(value)
+    if (value instanceof Map) {
+      const out: Record<string, unknown> = {}
+      for (const [key, item] of value.entries()) {
+        const clean = sanitizeToolOutput(item, seen)
+        if (clean !== undefined) out[String(key)] = clean
+      }
+      return out
+    }
+    if (value instanceof Set) return [...value].map((item) => sanitizeToolOutput(item, seen) ?? null)
+    if (Array.isArray(value)) return value.map((item) => sanitizeToolOutput(item, seen) ?? null)
+    const out: Record<string, unknown> = {}
+    for (const [key, item] of Object.entries(value)) {
+      const clean = sanitizeToolOutput(item, seen)
+      if (clean !== undefined) out[key] = clean
+    }
+    return out
+  }
+  return null
+}
+
+export function toLosslessJsonValue<T>(value: T): T {
+  return sanitizeToolOutput(value) as T
+}
+
 /**
  * Resolve the authoritative DSH conversation id for one tool call.
  * DSH stores the SessionId on `agent.session.header.id`. V0.2.3 accidentally
@@ -140,7 +181,7 @@ export function execOutcomeToValue(status: SessionStatus & { configured: boolean
 
 export async function guardValue(exec: ToolRunContext, fn: () => Promise<ResultValue>): Promise<ResultValue> {
   try {
-    return await fn()
+    return toLosslessJsonValue(await fn())
   } catch (error) {
     if (error instanceof AbortRequestedError || exec.signal.aborted === true) {
       throw new HarnessError('tool call aborted', TOOL_ABORTED)
