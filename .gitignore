@@ -6,13 +6,27 @@ dist/
 # Local scratch: npm cache routing, package extractions, probe scripts
 .tmp-*
 
-# Local diagnostics / acceptance artifacts (contain real internal network info)
+# Local diagnostics / acceptance artifacts (may contain real internal network info)
 *.log
 CONOUT$
 npm.log
 pnpm-check.log
 acceptance-snapshot.md
+*.har
+jumpserver-audit-*
+audit-export-*
 
-# Local credentials (never commit)
+# Local credentials / private keys (never commit)
 .credentials.yaml
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+id_ed25519*
+
+# Generated reports
 classifier-report.json
