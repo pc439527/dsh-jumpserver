@@ -154,7 +154,7 @@ function requireGrant(services: BridgeServices, sessionId: string, res: ServerRe
   json(res, 403, {
     ok: false,
     code: 'JUMPSERVER_NOT_ARMED',
-    message: 'JumpServer is locked for this conversation; authorize it again before sending commands or reading assets.',
+    message: 'JumpServer is locked for this conversation; authorize it again before sending commands or reading protected session data.',
     granted: false,
     sessionId,
   })
@@ -188,7 +188,14 @@ export function registerBridgeRoutes(webServer: {
         try {
           const body = await readJsonBody(req)
           const sinceSeq = typeof body.sinceSeq === 'number' && Number.isFinite(body.sinceSeq) ? body.sinceSeq : 0
-          const sessionId = typeof body.sessionId === 'string' ? body.sessionId : undefined
+          const sessionId = validSessionId(body.sessionId)
+          if (sessionId === null) {
+            json(res, 400, { ok: false, code: 'INVALID_SESSION', message: 'valid sessionId is required' })
+            return
+          }
+          // Terminal output can contain internal hostnames, paths and command
+          // results. A guessed/stale sessionId must never be enough to read it.
+          if (!requireGrant(services, sessionId, res)) return
           const observer = services.observerFor(sessionId)
           if (observer !== null) {
             const holdUntil = Date.now() + SNAPSHOT_HOLD_MS
@@ -202,7 +209,7 @@ export function registerBridgeRoutes(webServer: {
             lastSeq: observer?.cursorSeq ?? 0,
             oldestSeq: observer?.oldestSeq ?? 0,
             events,
-            sessionId: sessionId ?? null,
+            sessionId,
             ...statusPayload(services, sessionId),
           })
         } catch (error) {
@@ -372,8 +379,15 @@ export function registerBridgeRoutes(webServer: {
       if (!requirePost(req, res)) return
       void (async () => {
         const body = await readJsonBody(req)
-        const sessionId = typeof body.sessionId === 'string' ? body.sessionId : undefined
-        json(res, 200, { ok: true, records: services.auditFor(sessionId), sessionId: sessionId ?? null })
+        const sessionId = validSessionId(body.sessionId)
+        if (sessionId === null) {
+          json(res, 400, { ok: false, code: 'INVALID_SESSION', message: 'valid sessionId is required' })
+          return
+        }
+        // Audit rows disclose command history, internal hosts and decisions;
+        // protect them with the same per-conversation grant as terminal data.
+        if (!requireGrant(services, sessionId, res)) return
+        json(res, 200, { ok: true, records: services.auditFor(sessionId), sessionId })
       })()
     },
   }))
