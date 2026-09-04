@@ -48,19 +48,32 @@ export function serializeAudit(records: Array<Record<string, unknown>>, format: 
   return '\ufeff' + lines.join('\r\n') + '\r\n'
 }
 
+interface AuditDownloadAnchor {
+  href: string
+  download: string
+  style: { display: string }
+  click(): void
+  remove(): void
+}
+interface AuditDownloadDocument {
+  createElement(tag: 'a'): AuditDownloadAnchor
+  body: { appendChild(node: AuditDownloadAnchor): unknown }
+}
+
 export function downloadAudit(records: Array<Record<string, unknown>>, format: AuditExportFormat): void {
-  if (typeof document === 'undefined' || typeof URL === 'undefined' || typeof Blob === 'undefined') return
+  const doc = (globalThis as unknown as { document?: AuditDownloadDocument }).document
+  if (doc === undefined || typeof URL === 'undefined' || typeof Blob === 'undefined') return
   const content = serializeAudit(records, format)
   const mime = format === 'json' ? 'application/json;charset=utf-8' : format === 'markdown' ? 'text/markdown;charset=utf-8' : 'text/csv;charset=utf-8'
   const ext = format === 'markdown' ? 'md' : format
   const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
   const blob = new Blob([content], { type: mime })
   const url = URL.createObjectURL(blob)
-  const anchor = document.createElement('a')
+  const anchor = doc.createElement('a')
   anchor.href = url
   anchor.download = 'jumpserver-audit-' + stamp + '.' + ext
   anchor.style.display = 'none'
-  document.body.appendChild(anchor)
+  doc.body.appendChild(anchor)
   anchor.click()
   anchor.remove()
   URL.revokeObjectURL(url)
