@@ -13,22 +13,21 @@ export type TerminalRow =
 
 /** Internal completion/probe markers must never be visible. */
 const CONNECTOR_MARKERS = /__DSH_JS_(?:DONE|PROBE|PROBE_END)_|__dsh_rc/
-
-/**
- * Probe scripts are not recorded as input events, so shell echo suppression
- * cannot rely on echoQueue for them. KoKo/remote shells echo them with a real
- * prompt prefix, e.g. `[root@host ~]# printf 'H=%s\n' ...`; the old regex only
- * matched a line beginning with `printf` and leaked all three H/U/P helpers.
- */
 const PROBE_HELPER_LINE = /(?:^|[#$>]\s+)printf\s+['"]?[HUP]=%s\\n/i
 const PROBE_RESULT_LINE = /^\s*[HUP]=/
 const PROBE_PS2_ARTIFACT = /^\s*>\s*'?\s*$/
+/** Wrapped PTYs can split the internal completion printf before the marker. */
+const DONE_HELPER_RC_LINE = /(?:^|[#$>]\s+)__dsh_rc=\$\?\s*$/
+const DONE_HELPER_PRINTF_PREFIX = /(?:^|[#$>]\s+)printf\s+['"]?\s*$/
+const TRANSIENT_STATES = new Set(['COMMAND_RUNNING', 'ASSET_SHELL'])
 
 function isConnectorNoise(line: string): boolean {
   if (CONNECTOR_MARKERS.test(line)) return true
   if (PROBE_HELPER_LINE.test(line)) return true
   if (PROBE_RESULT_LINE.test(line)) return true
   if (PROBE_PS2_ARTIFACT.test(line)) return true
+  if (DONE_HELPER_RC_LINE.test(line)) return true
+  if (DONE_HELPER_PRINTF_PREFIX.test(line)) return true
   return false
 }
 
@@ -113,8 +112,6 @@ const STATE_LABELS: Record<string, string> = {
 
 /** Fold one snapshot batch into the buffer. Returns the last applied seq. */
 export function applySnapshot(buffer: TerminalBuffer, snapshot: SnapshotResponse, maxSeq: number): number {
-  // V0.3.1 P2: when the Host ring dropped events the browser never saw, insert
-  // an explicit warning row — never fake a continuous log.
   const oldest = snapshot.oldestSeq ?? 0
   if (oldest > maxSeq + 1) {
     pushRow(buffer, { id: buffer.nextId++, kind: 'meta', kind2: 'error', text: '· ⚠ 部分终端输出已超出缓冲区并被丢弃（seq ' + (maxSeq + 1) + '..' + (oldest - 1) + ' 缺失）' })
@@ -136,9 +133,15 @@ export function applySnapshot(buffer: TerminalBuffer, snapshot: SnapshotResponse
           .slice(0, 8)
         break
       }
-      case 'state':
-        appendMeta(buffer, 'state', '· ' + (STATE_LABELS[event.state ?? ''] ?? event.state ?? 'state'))
+      case 'state': {
+        const state = event.state ?? ''
+        // COMMAND_RUNNING -> ASSET_SHELL happens around every command and made
+        // the terminal unreadable. Target/state still remain available in the
+        // header; only durable/navigation/error state changes are shown here.
+        if (TRANSIENT_STATES.has(state)) break
+        appendMeta(buffer, 'state', '· ' + (STATE_LABELS[state] ?? state || 'state'))
         break
+      }
       case 'target':
         appendMeta(
           buffer,
