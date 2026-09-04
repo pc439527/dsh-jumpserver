@@ -11,8 +11,7 @@
  * DANGEROUS. CONFIRM_MODIFY lets confirmed reads pass; UNKNOWN is NOT a read
  * and asks the user with honest copy (never "该命令会修改服务器").
  */
-import { classifyCommand, type Classification } from './command-classifier.js'
-import { gateDecision } from './permission.js'
+import { classifyCommand, gateDecision, type Classification } from './permission.js'
 import type { ManualPolicy, PermissionMode } from '../config/types.js'
 
 export type ManualGate =
