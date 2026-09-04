@@ -21,7 +21,7 @@ import { SessionState } from '../jumpserver/state-machine.js'
 import type { TerminalObserver } from '../jumpserver/terminal-observer.js'
 import { PROTOCOL_VERSION, PLUGIN_VERSION, hostBuild } from '../version.js'
 import { manualPolicyOf, type ManualPolicy } from '../config/types.js'
-import { classifyCommand } from '../security/command-classifier.js'
+import { classifyCommand } from '../security/permission.js'
 
 export interface BridgeServices {
   getConfig: () => JumpServerConfig
@@ -120,8 +120,6 @@ function statusPayload(services: BridgeServices, sessionId: string | undefined):
     manualPolicy: manualPolicyOf(cfg),
     granted: services.grantedFor(sessionId),
     lastSeq: observer?.cursorSeq ?? 0,
-    // V0.2.6 P0 version handshake: the sidebar compares these against the
-    // client's own bundled identity and warns when a restart is required.
     pluginVersion: PLUGIN_VERSION,
     hostBuild: hostBuild(),
     protocolVersion: PROTOCOL_VERSION,
@@ -140,8 +138,6 @@ export function registerBridgeRoutes(webServer: {
 }, services: BridgeServices): () => void {
   const disposers: Array<() => void> = []
 
-  // V0.2.7 P1: side-effect-capable routes are POST-only (no GET around) —
-  // writes happen in manual, stateful reads in snapshot/status/test/assets/audit.
   disposers.push(webServer.register({
     kind: 'exact',
     path: '/api/jumpserver.status',
@@ -176,8 +172,6 @@ export function registerBridgeRoutes(webServer: {
           json(res, 200, {
             ok: true,
             lastSeq: observer?.cursorSeq ?? 0,
-            // V0.3.1 P2: the oldest retained event seq lets the browser insert
-            // a "output dropped" notice instead of a silently-faked continuous log.
             oldestSeq: observer?.oldestSeq ?? 0,
             events,
             sessionId: sessionId ?? null,
@@ -249,9 +243,6 @@ export function registerBridgeRoutes(webServer: {
     },
   }))
 
-  // V0.3.1 #16: command risk checker — PURE classification, never connects,
-  // never executes; lets the settings card show why a command is READ/UNKNOWN/
-  // MODIFY/DANGEROUS before anything is sent to a server.
   disposers.push(webServer.register({
     kind: 'exact',
     path: '/api/jumpserver.classify',
@@ -291,7 +282,6 @@ export function registerBridgeRoutes(webServer: {
     },
   }))
 
-  // V0.2.7 P1: asset picker data for the sidebar (menu state required).
   disposers.push(webServer.register({
     kind: 'exact',
     path: '/api/jumpserver.assets',
@@ -335,7 +325,6 @@ export function registerBridgeRoutes(webServer: {
     },
   }))
 
-  // V0.2.7 P1: per-conversation recent audit ring for the sidebar audit tab.
   disposers.push(webServer.register({
     kind: 'exact',
     path: '/api/jumpserver.audit',
@@ -360,20 +349,11 @@ export function registerBridgeRoutes(webServer: {
   }
 }
 
-/**
- * Throwaway connection test; never touches a conversation-owned session.
- * V0.2.7 P1: an optional DRAFT ({host,port,username,password}) overrides the
- * saved config, so "test connection" after editing the form tests what the
- * user actually typed — not the previously saved values.
- * V0.3.1 P1: the draft also carries passwordEnv, so changing the credential
- * ref (without retyping the password) is tested against the DRAFT ref, and
- * `draft` is true whenever ANY draft credential/connection field was used.
- */
 export function draftPasswordSource(
   draft: { password?: unknown; passwordEnv?: unknown },
   cfg: JumpServerConfig,
 ): { env: string | null } {
-  if (typeof draft.password === 'string' && draft.password.length > 0) return { env: null } // literal draft password wins
+  if (typeof draft.password === 'string' && draft.password.length > 0) return { env: null }
   const env = typeof draft.passwordEnv === 'string' && draft.passwordEnv.trim().length > 0 ? draft.passwordEnv.trim() : cfg.passwordEnv
   return { env }
 }
@@ -394,16 +374,11 @@ export async function runConnectionTest(
   if (!host || !username || port < 1) {
     return { ok: false, code: 'NOT_CONFIGURED', message: 'JumpServer host/username are not configured' }
   }
-  // V0.3.1 P0: the SAVED JumpServer credential may only ever be reused for the
-  // EXACT saved gateway identity. Any draft change to host/port/username forces
-  // an explicit transient password — otherwise a crafted request could forward
-  // the real bastion credential to an attacker-chosen host.
   const identityChanged =
     (draftHost !== undefined && draftHost !== cfg.host) ||
     (draftPort !== undefined && draftPort !== cfg.port) ||
     (draftUser !== undefined && draftUser !== cfg.username)
   const hasLiteralPassword = typeof draft.password === 'string' && draft.password.length > 0
-  // V0.3.1: draft is true whenever ANY draft field was sent (connection or credential).
   const draftUsed =
     draftHost !== undefined || draftPort !== undefined || draftUser !== undefined ||
     draft.password !== undefined || draft.passwordEnv !== undefined
@@ -420,11 +395,8 @@ export async function runConnectionTest(
   const source = draftPasswordSource(draft, cfg)
   let password: string | undefined
   if (source.env === null) {
-    password = String(draft.password) // transient draft password (same-origin bridge)
+    password = String(draft.password)
   } else {
-    // V0.3.1: resolve against the DRAFT credential ref when one was provided,
-    // never silently against the saved passwordEnv. (identityChanged is already
-    // refused above, so this path only runs for the exact saved identity.)
     password = await services.resolvePassword(source.env)
   }
   if (password === undefined || password.length === 0) {
@@ -449,8 +421,6 @@ export async function runConnectionTest(
       user: username,
       latencyMs,
       state,
-      // V0.3.1: password / passwordEnv are draft fields too — editing ONLY the
-      // credential (without touching host/port/username) must still flag draft.
       draft: draft.host !== undefined || draft.port !== undefined || draft.username !== undefined
         || draft.password !== undefined || draft.passwordEnv !== undefined,
     }
