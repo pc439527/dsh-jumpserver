@@ -34,6 +34,12 @@ function baseConfig(overrides: Partial<JumpServerConfig> = {}): JumpServerConfig
   }
 }
 
+function fakeObserver(): TerminalObserver {
+  return {
+    beginInternalCapture: () => () => undefined,
+  } as unknown as TerminalObserver
+}
+
 interface FakeRes {
   status: number
   writableEnded: boolean
@@ -76,7 +82,7 @@ describe('V0.3.1 #1 asset-picker group chips', () => {
       resolvePassword: async () => undefined,
       statusFor: () => ({ state: 'JUMPSERVER_MENU', gateway: 'h:2222', target: null, hostname: null, user: null, connected: true, configured: true, permissionMode: 'READ_ONLY', granted: false }),
       grantedFor: () => true,
-      observerFor: () => ({}) as unknown as TerminalObserver,
+      observerFor: () => fakeObserver(),
       auditFor: () => [],
       assetGroupNames: () => ['OA', 'ESB', 'SAP'],
       assetList: async () => ({ assets: [], count: 0, reportedTotal: 2, complete: true, health: 'ok', filter: null, group: null, groupMatched: 0 }),
@@ -106,7 +112,7 @@ describe('V0.3.1 #1 asset-picker group chips', () => {
       resolvePassword: async () => undefined,
       statusFor: () => ({ state: 'JUMPSERVER_MENU', gateway: 'h:2222', target: null, hostname: null, user: null, connected: true, configured: true, permissionMode: 'READ_ONLY', granted: false }),
       grantedFor: () => true,
-      observerFor: () => ({}) as unknown as TerminalObserver,
+      observerFor: () => fakeObserver(),
       auditFor: () => [],
       assetGroupNames: () => ['OA', 'ESB'],
       assetList: async (_sessionId: string, opts: { group?: string }) => {
