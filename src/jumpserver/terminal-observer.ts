@@ -1,15 +1,13 @@
 /**
- * TerminalObserver V0.2: capture everything the JumpServer PTY session shows —
- * every input the connector writes, every raw output chunk, every state and
- * target change — as a monotonic seq-ordered event stream backed by a bounded
- * ring buffer. The browser half consumes snapshots via `sinceSeq`, so a
- * reconnect rehydrates exactly the events that arrived while it was away.
+ * TerminalObserver: capture everything the JumpServer PTY session shows as a
+ * monotonic seq-ordered event stream backed by a bounded ring buffer.
  *
- * Events are intentionally lossy-safe: output chunks are raw PTY bytes (ANSI
- * included) so the browser mirror is faithful, and caps are enforced on event
- * count AND output byte budget so the buffer cannot grow without bound.
+ * SECURITY: browser-visible input/output is redacted BEFORE it enters this
+ * buffer. The real PTY still receives the original command; the observer is a
+ * display/audit surface and must never retain command-line credentials.
  */
 import { MAX_TERMINAL_BYTES } from '../config/types.js'
+import { redactCommandSecrets } from '../security/command-redaction.js'
 import { SessionState } from './state-machine.js'
 
 export type TerminalEventType = 'input' | 'output' | 'state' | 'target' | 'error'
@@ -21,13 +19,13 @@ export interface TerminalEventBase {
 
 export interface TerminalInputEvent extends TerminalEventBase {
   type: 'input'
-  /** What the connector actually wrote to the PTY (target line, script, exit…). */
+  /** Redacted form of what the connector wrote to the PTY. */
   data: string
 }
 
 export interface TerminalOutputEvent extends TerminalEventBase {
   type: 'output'
-  /** Raw PTY chunk (may contain ANSI escapes; UTF-8 decoded). */
+  /** Redacted PTY chunk (ANSI retained; UTF-8 decoded). */
   data: string
 }
 
@@ -57,7 +55,6 @@ export type TerminalEvent =
   | TerminalTargetEvent
   | TerminalErrorEvent
 
-/** Event fingerprint without the serialized seq/timestamp (what the observer records). */
 export type TerminalNewEvent =
   | { type: 'input'; data: string }
   | { type: 'output'; data: string }
@@ -79,18 +76,14 @@ export class TerminalRingBuffer {
     this.maxEvents = maxEvents
   }
 
-  /**
-   * V0.3.1 P2: re-budget on live settings change — terminalScrollback now sets
-   * the HOST retention too, not just the browser row cap. Trims oldest events
-   * when the new budget is smaller.
-   */
+  /** Re-budget on live settings change; trims oldest events when smaller. */
   setScrollbackRows(rows: number): void {
     const next = Math.max(1000, Math.min(200000, Math.round(rows) * 4))
     if (next === this.maxEvents) return
     this.maxEvents = next
     while (this.events.length > this.maxEvents) {
       const head = this.events[0]!
-      if (head.type === 'output') this.outputBytes -= head.data.length
+      if (head.type === 'output') this.outputBytes -= Buffer.byteLength(head.data, 'utf8')
       this.events.shift()
     }
   }
@@ -101,29 +94,27 @@ export class TerminalRingBuffer {
     const full = { ...event, seq, timestamp: Date.now() } as TerminalEvent
     this.events.push(full)
     if (event.type === 'output') {
-      this.outputBytes += event.data.length
+      this.outputBytes += Buffer.byteLength(event.data, 'utf8')
     }
     while (this.outputBytes > this.maxOutputBytes && this.events.length > 0) {
       const head = this.events[0]!
-      if (head.type === 'output') this.outputBytes -= head.data.length
+      if (head.type === 'output') this.outputBytes -= Buffer.byteLength(head.data, 'utf8')
       this.events.shift()
     }
     while (this.events.length > this.maxEvents) {
       const head = this.events[0]!
-      if (head.type === 'output') this.outputBytes -= head.data.length
+      if (head.type === 'output') this.outputBytes -= Buffer.byteLength(head.data, 'utf8')
       this.events.shift()
     }
     return full
   }
 
-  /** Events with seq strictly greater than sinceSeq ([] when sinceSeq >= cursor). */
   snapshotSince(sinceSeq: number): TerminalEvent[] {
     if (sinceSeq < 0) sinceSeq = 0
     if (this.events.length === 0 || sinceSeq >= this.cursor) return []
     return this.events.filter((e) => e.seq > sinceSeq)
   }
 
-  /** Every retained event (for first open / full rehydration). */
   snapshot(): TerminalEvent[] {
     return [...this.events]
   }
@@ -136,7 +127,6 @@ export class TerminalRingBuffer {
     return this.events.length
   }
 
-  /** Oldest retained seq, or 0 while empty. */
   get oldestSeq(): number {
     return this.events.length > 0 ? this.events[0]!.seq : 0
   }
@@ -154,12 +144,16 @@ export class TerminalObserver {
   constructor(private scrollbackRows = 5000) {}
 
   recordInput(data: string): void {
-    this.buffer.push({ type: 'input', data })
+    const safe = redactCommandSecrets(data)
+    this.buffer.push({ type: 'input', data: safe })
   }
 
   recordOutput(data: string): void {
     if (data.length === 0) return
-    this.buffer.push({ type: 'output', data })
+    // PTYs normally echo the command. Redacting raw output as well prevents a
+    // secret from reappearing through that echo or through diagnostic logs.
+    const safe = redactCommandSecrets(data)
+    this.buffer.push({ type: 'output', data: safe })
   }
 
   recordState(state: SessionState, prev: SessionState | null): void {
@@ -171,7 +165,7 @@ export class TerminalObserver {
   }
 
   recordError(message: string): void {
-    this.buffer.push({ type: 'error', message })
+    this.buffer.push({ type: 'error', message: redactCommandSecrets(message) })
   }
 
   snapshotSince(sinceSeq: number): TerminalEvent[] {
@@ -186,7 +180,6 @@ export class TerminalObserver {
     return this.buffer.cursorSeq
   }
 
-  /** Oldest retained event seq (0 while empty); lets readers detect ring drops. */
   get oldestSeq(): number {
     return this.buffer.oldestSeq
   }
@@ -195,14 +188,10 @@ export class TerminalObserver {
     this.buffer.clear()
   }
 
-  /** Mirrors the configured scrollback budget (rows). */
   get scrollback(): number {
     return this.scrollbackRows
   }
 
-  /** V0.3.1 P2: terminalScrollback now controls the ObservER retention too
-   *  (event budget = rows*4, floored at 1000) — the host ring shrinks with the
-   *  browser cap instead of silently keeping 20k events. */
   setScrollbackRows(rows: number): void {
     const effective = Math.max(200, rows)
     this.scrollbackRows = effective
@@ -210,7 +199,6 @@ export class TerminalObserver {
   }
 }
 
-/** Human-readable snapshot meta for the bridge. */
 export interface TerminalSnapshotMeta {
   lastSeq: number
   state: string
@@ -223,4 +211,3 @@ export interface TerminalSnapshotMeta {
   enabled: boolean
   configured: boolean
 }
-
