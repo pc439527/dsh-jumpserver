@@ -20,7 +20,7 @@ import { toRuntimeConfig } from '../jumpserver/session-manager.js'
 import { SessionState } from '../jumpserver/state-machine.js'
 import type { TerminalObserver } from '../jumpserver/terminal-observer.js'
 import { PROTOCOL_VERSION, PLUGIN_VERSION, hostBuild } from '../version.js'
-import { manualPolicyOf, type ManualPolicy } from '../config/types.js'
+import { manualPolicyOf } from '../config/types.js'
 import { classifyCommand } from '../security/permission.js'
 
 export interface BridgeServices {
@@ -38,16 +38,16 @@ export interface BridgeServices {
     permissionMode: string
     granted: boolean
   }
-  /** V0.2.4: whether the conversation holds a JumpServer Session Grant. */
+  /** Whether the conversation currently holds a JumpServer Session Grant. */
   grantedFor: (sessionId: string | undefined) => boolean
   /** Explicitly end SSH and revoke this conversation grant. */
   terminateFor?: (sessionId: string) => Promise<unknown>
   observerFor: (sessionId: string | undefined) => TerminalObserver | null
-  /** V0.2.7: recent audited commands of one conversation (ring, last 200). */
+  /** Recent audited commands of one conversation (ring, last 200). */
   auditFor: (sessionId: string | undefined) => Array<Record<string, unknown>>
-  /** V0.2.7: configured asset group names (for the picker chips). */
+  /** Configured asset group names (for the picker chips). */
   assetGroupNames: () => string[]
-  /** V0.2.7: asset picker data (listAssets with filter/group/refresh). */
+  /** Asset picker data (listAssets with filter/group/refresh). */
   assetList: (
     sessionId: string,
     opts: { filter?: string; group?: string; refresh?: boolean },
@@ -63,10 +63,7 @@ export interface BridgeServices {
   } | null>
   /**
    * Execute an explicit user-entered command in one existing conversation.
-   * V0.2.7: the handler is state-aware (menu verbs / exit / policy gate) and
-   * receives the client's confirm flag for CONFIRM_MODIFY.
-   * V0.3.1: the confirmed path must additionally present the one-time
-   * confirmToken issued by the first MANUAL_CONFIRM_REQUIRED response.
+   * The route enforces a live conversation grant before reaching this service.
    */
   manualExec: (sessionId: string, command: string, signal?: AbortSignal, confirmed?: boolean, confirmToken?: string) => Promise<Record<string, unknown>>
 }
@@ -126,10 +123,41 @@ function statusPayload(services: BridgeServices, sessionId: string | undefined):
   }
 }
 
+/**
+ * Browser mutation routes are same-site only. Modern browsers send
+ * Sec-Fetch-Site; rejecting `cross-site` blocks CSRF without making reverse
+ * proxy Host/Origin assumptions. Non-browser/tests that omit the header remain
+ * supported. Every bridge endpoint is POST-only as a second boundary.
+ */
 function requirePost(req: IncomingMessage, res: ServerResponse): boolean {
-  if (req.method === 'POST') return true
-  res.writeHead(405)
-  res.end()
+  if (req.method !== 'POST') {
+    json(res, 405, { ok: false, code: 'METHOD_NOT_ALLOWED', message: 'POST required' })
+    return false
+  }
+  const fetchSite = req.headers?.['sec-fetch-site']
+  const site = Array.isArray(fetchSite) ? fetchSite[0] : fetchSite
+  if (typeof site === 'string' && site.toLowerCase() === 'cross-site') {
+    json(res, 403, { ok: false, code: 'CROSS_SITE_BLOCKED', message: 'cross-site browser request rejected' })
+    return false
+  }
+  return true
+}
+
+function validSessionId(value: unknown): string | null {
+  if (typeof value !== 'string') return null
+  const sessionId = value.trim()
+  return sessionId.length > 0 && sessionId.length <= 512 ? sessionId : null
+}
+
+function requireGrant(services: BridgeServices, sessionId: string, res: ServerResponse): boolean {
+  if (services.grantedFor(sessionId)) return true
+  json(res, 403, {
+    ok: false,
+    code: 'JUMPSERVER_NOT_ARMED',
+    message: 'JumpServer is locked for this conversation; authorize it again before sending commands or reading assets.',
+    granted: false,
+    sessionId,
+  })
   return false
 }
 
@@ -191,11 +219,13 @@ export function registerBridgeRoutes(webServer: {
       if (!requirePost(req, res)) return
       void (async () => {
         const body = await readJsonBody(req)
-        const sessionId = typeof body.sessionId === 'string' ? body.sessionId.trim() : ''
-        if (sessionId.length === 0 || sessionId.length > 512) {
+        const sessionId = validSessionId(body.sessionId)
+        if (sessionId === null) {
           json(res, 400, { ok: false, code: 'INVALID_SESSION', message: 'valid sessionId is required' })
           return
         }
+        // Close deliberately remains available even after a grant is revoked:
+        // a locked conversation must always be able to tear down stale SSH.
         if (services.terminateFor === undefined) throw new Error('termination service unavailable')
         await services.terminateFor(sessionId)
         json(res, 200, { ok: true, state: SessionState.DISCONNECTED, connected: false, granted: false, sessionId })
@@ -211,14 +241,17 @@ export function registerBridgeRoutes(webServer: {
       void (async () => {
         try {
           const body = await readJsonBody(req)
-          const sessionId = typeof body.sessionId === 'string' ? body.sessionId.trim() : ''
+          const sessionId = validSessionId(body.sessionId)
           const command = typeof body.command === 'string' ? body.command : ''
           const confirmed = body.confirmed === true
           const confirmToken = typeof body.confirmToken === 'string' && body.confirmToken.length > 0 ? body.confirmToken : undefined
-          if (sessionId.length === 0 || sessionId.length > 512) {
+          if (sessionId === null) {
             json(res, 400, { ok: false, code: 'INVALID_SESSION', message: 'valid sessionId is required' })
             return
           }
+          // P0: a live PTY alone is not authorization. Once the turn/persistent
+          // grant is revoked, the browser cannot keep driving that SSH session.
+          if (!requireGrant(services, sessionId, res)) return
           if (command.trim().length === 0 || command.length > MAX_MANUAL_COMMAND_CHARS || /[\r\n\x00]/.test(command)) {
             json(res, 400, {
               ok: false,
@@ -276,7 +309,7 @@ export function registerBridgeRoutes(webServer: {
       if (!requirePost(req, res)) return
       void (async () => {
         const body = await readJsonBody(req)
-        const result = await runConnectionTest(services, body as { host?: unknown; port?: unknown; username?: unknown; password?: unknown })
+        const result = await runConnectionTest(services, body as { host?: unknown; port?: unknown; username?: unknown; password?: unknown; passwordEnv?: unknown })
         json(res, 200, result)
       })()
     },
@@ -290,13 +323,20 @@ export function registerBridgeRoutes(webServer: {
       void (async () => {
         try {
           const body = await readJsonBody(req)
-          const sessionId = typeof body.sessionId === 'string' ? body.sessionId : undefined
+          const sessionId = validSessionId(body.sessionId)
+          if (sessionId === null) {
+            json(res, 400, { ok: false, code: 'INVALID_SESSION', message: 'valid sessionId is required' })
+            return
+          }
+          // Asset discovery exposes internal host inventory and actively sends
+          // KoKo's `p`; it follows the same conversation grant boundary.
+          if (!requireGrant(services, sessionId, res)) return
           const observer = services.observerFor(sessionId)
           if (observer === null) {
             json(res, 409, { ok: false, code: 'NO_SESSION', message: 'no JumpServer session for this conversation' })
             return
           }
-          const bundle = await services.assetList(sessionId ?? '', {
+          const bundle = await services.assetList(sessionId, {
             filter: typeof body.filter === 'string' ? body.filter : undefined,
             group: typeof body.group === 'string' ? body.group : undefined,
             refresh: body.refresh === true,
@@ -316,7 +356,7 @@ export function registerBridgeRoutes(webServer: {
             groupMatched: bundle.groupMatched,
             groups: services.assetGroupNames(),
             rows: bundle.assets,
-            sessionId: sessionId ?? null,
+            sessionId,
           })
         } catch (error) {
           json(res, 400, { ok: false, code: 'BRIDGE_ERROR', message: error instanceof Error ? error.message : String(error) })
