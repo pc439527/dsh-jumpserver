@@ -26,20 +26,29 @@ export const TERMINAL_CSS = [
   '.js-term-assets{flex:1;min-height:0;display:flex;flex-direction:column;padding:8px 12px;gap:8px;overflow-y:auto}',
   '.js-term-searchRow{display:flex;gap:6px;align-items:center;flex-wrap:wrap}',
   '.js-term-search{flex:1;min-width:0;height:30px;padding:0 10px;border-radius:8px;border:1px solid var(--dsw-alias-border-l2,#2d333b);background:var(--dsw-alias-bg-module-platform,#161b22);color:var(--dsw-alias-label-primary,#e6edf3);font-size:13px}',
-  '.js-term-groups{display:flex;gap:6px;flex-wrap:wrap}',
+  '.js-term-groups,.js-term-nodeGroups{display:flex;gap:6px;flex-wrap:wrap;align-items:center}',
+  '.js-term-nodeGroups{padding-top:2px}',
+  '.js-term-groupLabel{font-size:11px;color:var(--dsw-alias-label-tertiary,#8b949e);margin-right:2px}',
   '.js-term-groupChip{cursor:pointer}',
   '.js-term-chipActive{background:var(--dsw-alias-state-business-primary,rgba(83,155,245,.18));border-color:rgba(83,155,245,.5);color:var(--dsw-alias-label-primary,#e6edf3)}',
   '.js-term-assetList{flex:1;min-height:0;overflow-y:auto;position:relative}',
-  '.js-term-assetItem{appearance:none;display:flex;align-items:center;gap:8px;width:100%;text-align:left;padding:7px 10px;border-radius:8px;border:1px solid transparent;background:transparent;color:var(--dsw-alias-label-primary,#e6edf3);cursor:pointer;font-size:13px}',
+  '.js-term-assetItem{appearance:none;display:flex;align-items:center;gap:8px;width:100%;text-align:left;padding:5px 9px;border-radius:8px;border:1px solid transparent;background:transparent;color:var(--dsw-alias-label-primary,#e6edf3);cursor:pointer;font-size:13px;box-sizing:border-box}',
   '.js-term-assetItem:hover{background:rgba(177,186,196,.08);border-color:var(--dsw-alias-border-l2,#2d333b)}',
-  '.js-term-assetIp{font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-accent,#58a6ff);min-width:120px}',
-  '.js-term-assetName{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+  '.js-term-assetIdentity{display:flex;flex:1;min-width:0;flex-direction:column;gap:2px}',
+  '.js-term-assetTop,.js-term-assetBottom{display:flex;align-items:center;gap:8px;min-width:0}',
+  '.js-term-assetIp{font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-accent,#58a6ff);min-width:0;white-space:nowrap}',
+  '.js-term-assetPlatform{margin-left:auto;color:var(--dsw-alias-label-tertiary,#8b949e);font-size:11px;white-space:nowrap}',
+  '.js-term-assetName{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px}',
+  '.js-term-assetNode{max-width:45%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dsw-alias-label-tertiary,#8b949e);font-size:11px}',
   '.js-term-assetMeta{color:var(--dsw-alias-label-tertiary,#8b949e);font-size:12px}',
-  '.js-term-assetGo{color:var(--dsw-alias-label-tertiary,#8b949e)}',
+  '.js-term-assetGo{color:var(--dsw-alias-label-tertiary,#8b949e);flex:none;font-size:12px}',
   '.js-term-audit{flex:1;min-height:0;display:flex;flex-direction:column;padding:8px 12px;gap:8px;overflow-y:auto}',
   '.js-term-auditFilter{display:inline-flex;align-items:center;gap:4px;font-size:12px;color:var(--dsw-alias-label-secondary,#8b949e);cursor:pointer}',
   '.js-term-auditSummary{display:flex;align-items:center;gap:6px;flex-wrap:wrap;padding:2px 0}',
-  '.js-term-auditSummaryChip{font-size:11px;line-height:18px;padding:0 7px;border-radius:999px;border:1px solid var(--dsw-alias-border-l2,#2d333b);color:var(--dsw-alias-label-secondary,#8b949e);background:var(--dsw-alias-bg-module-platform,#161b22)}',
+  '.js-term-auditSummaryChip{appearance:none;font:inherit;font-size:11px;line-height:18px;padding:0 7px;border-radius:999px;border:1px solid var(--dsw-alias-border-l2,#2d333b);color:var(--dsw-alias-label-secondary,#8b949e);background:var(--dsw-alias-bg-module-platform,#161b22);cursor:pointer}',
+  '.js-term-auditSummaryChip:hover{border-color:var(--dsw-alias-label-dimmed,#6e7681);color:var(--dsw-alias-label-primary,#e6edf3)}',
+  '.js-term-auditSummaryChipActive{border-color:rgba(83,155,245,.6);background:rgba(83,155,245,.13);color:var(--dsw-alias-label-primary,#e6edf3)}',
+  '.js-term-auditTimezone{cursor:default;opacity:.8}',
   '.js-term-auditList{display:flex;flex-direction:column;gap:5px;overflow-y:auto}',
   '.js-term-auditRow{display:grid;grid-template-columns:68px 96px 84px 116px minmax(120px,1fr) auto;gap:8px;align-items:center;font-size:12px;color:var(--dsw-alias-label-secondary,#8b949e);padding:7px 8px;border:1px solid transparent;border-radius:8px;cursor:pointer}',
   '.js-term-auditRow:hover{background:rgba(177,186,196,.06);border-color:var(--dsw-alias-border-l2,#2d333b)}',
@@ -47,7 +56,8 @@ export const TERMINAL_CSS = [
   '.js-term-auditMeta{color:var(--dsw-alias-label-tertiary,#8b949e);font-variant-numeric:tabular-nums;white-space:nowrap}',
   '.js-term-auditTime{font-variant-numeric:tabular-nums;white-space:nowrap}',
   '.js-term-auditWho,.js-term-auditTarget{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
-  '.js-term-auditRisk{justify-self:start;font-size:11px;font-weight:650;line-height:18px;padding:0 7px;border-radius:999px;border:1px solid var(--dsw-alias-border-l2,#2d333b);white-space:nowrap}',
+  '.js-term-auditRisk,.js-term-auditEventBadge{justify-self:start;font-size:11px;font-weight:650;line-height:18px;padding:0 7px;border-radius:999px;border:1px solid var(--dsw-alias-border-l2,#2d333b);white-space:nowrap}',
+  '.js-term-auditEventBadge{color:#8b949e;background:rgba(139,148,158,.08)}',
   '.js-term-auditRisk[data-risk=READ]{color:#3fb950;border-color:rgba(63,185,80,.45);background:rgba(63,185,80,.09)}',
   '.js-term-auditRisk[data-risk=PRIVILEGED_READ]{color:#58a6ff;border-color:rgba(88,166,255,.45);background:rgba(88,166,255,.09)}',
   '.js-term-auditRisk[data-risk=UNKNOWN]{color:#d29922;border-color:rgba(210,153,34,.5);background:rgba(210,153,34,.10)}',
@@ -64,7 +74,6 @@ export const TERMINAL_CSS = [
   '.js-term-confirmActions{display:flex;gap:8px}',
   '.js-term-newOutput{position:absolute;left:50%;bottom:10px;transform:translateX(-50%);z-index:10;border-radius:14px;padding:4px 12px;font-size:12px;cursor:pointer;border:1px solid rgba(83,155,245,.5);background:rgba(9,25,50,.92);color:#58a6ff}',
   '.js-term-assetWindow{position:relative}',
-  '.js-term-assetItem{box-sizing:border-box}',
   '.js-term-classifyResult{margin-top:4px;padding:6px 10px;border-radius:8px;font-size:12px;white-space:pre-wrap;word-break:break-all}',
   '.js-term-cardSection{margin-top:14px;padding-top:10px;border-top:1px solid var(--dsw-alias-border-l2,#2d333b)}',
   '.js-term-cardSectionTitle{font-size:12px;font-weight:600;color:var(--dsw-alias-label-tertiary,#8b949e);margin:0 0 8px;letter-spacing:.04em}',
@@ -89,8 +98,6 @@ export const TERMINAL_CSS = [
   '.js-term-chip b{color:var(--dsw-alias-label-primary,#e6edf3);font-weight:500}',
 
   '.js-term-body{flex:1;min-height:0;overflow:auto;padding:8px 0;background:var(--dsw-alias-bg-layer-0,#010409);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;line-height:1.55}',
-  // V0.3.1 P1: rows are fixed 20px — no wrapping, no vertical padding — so the
-  // virtual-window translateY keeps exact alignment; long lines scroll horizontally.
   '.js-term-output{white-space:pre;padding:0 14px;line-height:20px;height:20px}',
   '.js-term-meta{white-space:pre;padding:0 14px;font-size:11px;line-height:20px;height:20px;color:var(--dsw-alias-label-tertiary,#8b949e)}',
   '.js-term-meta[data-kind=state]{color:#58a6ff}',
@@ -117,7 +124,6 @@ export const TERMINAL_CSS = [
   '.js-term-dim{opacity:.65}',
   '.js-term-empty{padding:20px 14px;color:var(--dsw-alias-label-tertiary,#8b949e);font-size:12px}',
 
-  /* Human terminal input lives below the output, never in Better Sidebar's top chrome. */
   '.js-term-manual{flex:none;display:flex;align-items:center;gap:7px;padding:7px 10px 7px 12px;border-top:1px solid var(--dsw-alias-border-l2,#2d333b);background:var(--dsw-alias-bg-layer-1,#0d1117)}',
   '.js-term-manualPrompt{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-weight:700;color:#58a6ff;flex:none}',
   '.js-term-manualInput{flex:1!important;min-width:0!important;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace!important;background:var(--dsw-alias-bg-layer-0,#010409)!important}',
@@ -164,11 +170,6 @@ export const TERMINAL_CSS = [
 
 const TAG = 'dsh-jumpserver/terminal.css'
 
-/**
- * HMR/reload safe: update an existing style tag instead of leaving stale
- * V0.2.2/V0.2.3 CSS in the page. This directly prevents old top-toolbar styles
- * from surviving when the plugin client bundle is refreshed in-place.
- */
 interface StyleElement {
   textContent: string | null
   dataset: Record<string, string>
