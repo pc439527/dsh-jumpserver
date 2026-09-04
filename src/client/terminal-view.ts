@@ -139,7 +139,7 @@ export function applySnapshot(buffer: TerminalBuffer, snapshot: SnapshotResponse
         // the terminal unreadable. Target/state still remain available in the
         // header; only durable/navigation/error state changes are shown here.
         if (TRANSIENT_STATES.has(state)) break
-        appendMeta(buffer, 'state', '· ' + (STATE_LABELS[state] ?? state || 'state'))
+        appendMeta(buffer, 'state', '· ' + ((STATE_LABELS[state] ?? state) || 'state'))
         break
       }
       case 'target':
