@@ -26,6 +26,8 @@ const ROW_H = 20
 const OVERSCAN = 20
 const AUDIT_TIME_ZONE = 'Asia/Shanghai'
 
+type AuditFilter = 'ALL' | 'READ' | 'UNKNOWN' | 'MODIFY' | 'DANGEROUS' | 'FAILED'
+
 function followIcon(size = 14): React.ReactNode {
   return h('svg', { width: size, height: size, viewBox: '0 0 16 16', fill: 'none', stroke: 'currentColor', strokeWidth: 1.4, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true },
     h('path', { d: 'M8 2v8' }), h('path', { d: 'M5 7l3 3 3-3' }), h('path', { d: 'M2 14h12' }))
@@ -61,6 +63,39 @@ export function formatAuditTime(value: unknown): string {
     }
   }
   return raw.length > 19 ? raw.slice(11, 19) : raw
+}
+
+function auditEventType(record: Record<string, unknown>): string {
+  const explicit = String(record['eventType'] ?? '').trim()
+  if (explicit.length > 0) return explicit
+  switch (String(record['operation'] ?? '')) {
+    case 'exec':
+    case 'run':
+    case 'run-batch-cmd': return 'COMMAND'
+    case 'list-assets': return 'ASSET_LIST'
+    case 'enter': return 'ASSET_ENTER'
+    case 'leave': return 'ASSET_LEAVE'
+    case 'close': return 'DISCONNECT'
+    case 'connect': return 'CONNECT'
+    default: return 'EVENT'
+  }
+}
+
+function auditEventLabel(record: Record<string, unknown>): string {
+  switch (auditEventType(record)) {
+    case 'ASSET_LIST': return '刷新资产列表'
+    case 'ASSET_ENTER': return '进入资产'
+    case 'ASSET_LEAVE': return '返回堡垒机'
+    case 'CONNECT': return '连接 JumpServer'
+    case 'DISCONNECT': return '关闭 JumpServer'
+    default: return String(record['operation'] ?? '系统事件')
+  }
+}
+
+function auditFailed(record: Record<string, unknown>): boolean {
+  const result = String(record['result'] ?? '')
+  const exit = record['exitCode']
+  return (result !== 'ok' && result !== 'COMPLETED' && result !== 'ASSET_LIST_EMPTY') || (typeof exit === 'number' && exit !== 0)
 }
 
 export const TAB_ID = 'dsh-jumpserver:terminal'
@@ -152,16 +187,13 @@ export function JumpServerSidebarTab(props: JumpServerSidebarTabProps): React.Re
   const [confirmReq, setConfirmReq] = React.useState<{ command: string; risk?: string; confirmToken?: string; commandHash?: string; expiresAt?: number } | null>(null)
   const [windowStart, setWindowStart] = React.useState(0)
   const [viewportH, setViewportH] = React.useState(400)
-  // V0.3.1: follow keeps the viewport at the newest row ONLY while the user is
-  // at the bottom — scrolling up exits follow; new output is counted, never
-  // scrolled away.
   const [newOutput, setNewOutput] = React.useState(0)
 
-  const [assets, setAssets] = React.useState<{ rows: AssetRow[]; groups: string[]; group: string; filter: string; count: number; loading: boolean; error: string | null; fetchedAt: number | null }>({
-    rows: [], groups: [], group: '', filter: '', count: 0, loading: false, error: null, fetchedAt: null,
+  const [assets, setAssets] = React.useState<{ rows: AssetRow[]; groups: string[]; group: string; node: string; filter: string; count: number; loading: boolean; error: string | null; fetchedAt: number | null }>({
+    rows: [], groups: [], group: '', node: '', filter: '', count: 0, loading: false, error: null, fetchedAt: null,
   })
-  const [audit, setAudit] = React.useState<{ records: Array<Record<string, unknown>>; showFailed: boolean; showModify: boolean; loading: boolean }>({
-    records: [], showFailed: false, showModify: false, loading: false,
+  const [audit, setAudit] = React.useState<{ records: Array<Record<string, unknown>>; filter: AuditFilter; search: string; loading: boolean }>({
+    records: [], filter: 'ALL', search: '', loading: false,
   })
 
   const manualAbortRef = React.useRef<AbortController | null>(null)
@@ -169,8 +201,6 @@ export function JumpServerSidebarTab(props: JumpServerSidebarTabProps): React.Re
   const bufferSessionRef = React.useRef<string>('')
   const bodyRef = React.useRef<HTMLDivElement | null>(null)
   const [, forceRender] = React.useReducer((x: number) => x + 1, 0)
-  // V0.3.1: follow state must be readable from the snapshot loop and scroll
-  // handlers (they close over the mount-time value otherwise).
   const followRef = React.useRef(true)
   const savedScrollTopRef = React.useRef(0)
   const lastRowsRef = React.useRef(0)
@@ -228,8 +258,6 @@ export function JumpServerSidebarTab(props: JumpServerSidebarTabProps): React.Re
           cursor = applySnapshot(buffer, data, cursor)
           setStatus(data as unknown as StatusInfo)
           forceRender()
-          // V0.3.1: while the user is scrolled up, count new rows instead of
-          // stealing the scrollbar; the badge offers one-click re-follow.
           const grown = buffer.rows.length - lastRowsRef.current
           lastRowsRef.current = buffer.rows.length
           if (grown > 0 && !followRef.current) setNewOutput((n) => n + grown)
@@ -244,10 +272,6 @@ export function JumpServerSidebarTab(props: JumpServerSidebarTabProps): React.Re
     return () => { stopped = true; statusController.abort(); inflight?.abort() }
   }, [visible, buffer, sessionId])
 
-  // V0.3.1: follow keeps the viewport pinned at the newest rows. A user who
-  // scrolls up (distance from bottom > 24px) leaves follow; new output is then
-  // counted in newOutput, and follow is only re-entered by scrolling back to
-  // the bottom or clicking the badge — never automatically.
   React.useEffect(() => {
     followRef.current = follow
     if (!follow) return
@@ -276,10 +300,6 @@ export function JumpServerSidebarTab(props: JumpServerSidebarTabProps): React.Re
     }
   }
 
-  // V0.3.1 P1: the terminal body unmounts when the user switches to 资产/审计.
-  // windowStart is React state that survives the unmount, so after remount the
-  // rows used to be translated out of view (blank screen). Recalibrate on
-  // actual DOM mount: follow -> bottom, otherwise restore the saved scrollTop.
   const termActive = tab === 'term' && visible
   useIsoLayoutEffect(() => {
     if (!termActive) return
@@ -312,7 +332,7 @@ export function JumpServerSidebarTab(props: JumpServerSidebarTabProps): React.Re
   const manualPlaceholder = !manualAvailable
     ? t('manualUnavailable')
     : atMenu
-      ? '[Host]> 输入 IP / 主机名 / p'
+      ? '输入 IP / 主机名（p 查看资产）'
       : status.hostname !== null && status.hostname !== undefined ? '[' + String(status.hostname) + ' ~]# '
       : '[root@host ~]# '
 
@@ -386,6 +406,7 @@ export function JumpServerSidebarTab(props: JumpServerSidebarTabProps): React.Re
         rows: data.rows ?? [],
         groups: data.groups ?? prev.groups,
         group: assetsGroupRef.current,
+        node: '',
         filter: '',
         count: data.count ?? 0,
         fetchedAt: Date.now(),
@@ -429,11 +450,26 @@ export function JumpServerSidebarTab(props: JumpServerSidebarTabProps): React.Re
     setAssets((prev) => ({ ...prev, filter: term }))
   }
   const pickGroup = (group: string): void => {
-    setAssets((prev) => ({ ...prev, group, filter: '' }))
+    setAssets((prev) => ({ ...prev, group, node: '', filter: '' }))
     void loadAssets(false, group)
   }
+  const pickNode = (node: string): void => {
+    setAssetWinStart(0)
+    setAssets((prev) => ({ ...prev, node }))
+  }
+
+  const nodeGroups = React.useMemo(() => {
+    const counts = new Map<string, number>()
+    for (const row of assets.rows) {
+      const node = String(row.node ?? '').trim()
+      if (node.length === 0) continue
+      counts.set(node, (counts.get(node) ?? 0) + 1)
+    }
+    return [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, 12)
+  }, [assets.rows])
 
   const filteredAssets = assets.rows.filter((a) => {
+    if (assets.node.length > 0 && String(a.node ?? '') !== assets.node) return false
     const term = assets.filter.trim().toLowerCase()
     if (term.length === 0) return true
     return [a.name ?? '', a.ip ?? '', a.node ?? '', a.platform ?? ''].join(' ').toLowerCase().includes(term)
@@ -465,22 +501,30 @@ export function JumpServerSidebarTab(props: JumpServerSidebarTabProps): React.Re
 
   const auditFiltered = audit.records.filter((r) => {
     const risk = String(r['risk'] ?? '')
-    const result = String(r['result'] ?? '')
-    const exit = r['exitCode']
-    if (audit.showFailed) {
-      const failed = result !== 'ok' && result !== 'COMPLETED' || (typeof exit === 'number' && exit !== 0)
-      if (!failed) return false
+    const eventType = auditEventType(r)
+    if (audit.filter === 'FAILED' && !auditFailed(r)) return false
+    if (audit.filter === 'MODIFY' && risk !== 'MODIFY' && risk !== 'DANGEROUS') return false
+    if (audit.filter !== 'ALL' && audit.filter !== 'FAILED' && audit.filter !== 'MODIFY' && risk !== audit.filter) return false
+    if (audit.filter !== 'ALL' && audit.filter !== 'FAILED' && eventType !== 'COMMAND') return false
+    const term = audit.search.trim().toLowerCase()
+    if (term.length > 0) {
+      const haystack = [
+        r['actor'], r['operation'], r['eventType'], r['risk'], r['target'], r['hostname'],
+        r['redactedCommand'] ?? r['command'], r['result'], r['riskRuleId'], r['riskReason'],
+      ].map((v) => String(v ?? '')).join(' ').toLowerCase()
+      if (!haystack.includes(term)) return false
     }
-    if (audit.showModify && risk !== 'MODIFY' && risk !== 'DANGEROUS') return false
     return true
   })
 
   const auditCounts = audit.records.reduce<Record<string, number>>((acc, record) => {
-    const risk = String(record['risk'] ?? 'UNKNOWN')
-    acc[risk] = (acc[risk] ?? 0) + 1
-    const result = String(record['result'] ?? '')
-    const exit = record['exitCode']
-    if ((result !== 'ok' && result !== 'COMPLETED') || (typeof exit === 'number' && exit !== 0)) acc['FAILED'] = (acc['FAILED'] ?? 0) + 1
+    if (auditEventType(record) === 'COMMAND') {
+      const risk = String(record['risk'] ?? 'UNKNOWN')
+      acc[risk] = (acc[risk] ?? 0) + 1
+    } else {
+      acc['EVENT'] = (acc['EVENT'] ?? 0) + 1
+    }
+    if (auditFailed(record)) acc['FAILED'] = (acc['FAILED'] ?? 0) + 1
     return acc
   }, {})
 
@@ -488,6 +532,8 @@ export function JumpServerSidebarTab(props: JumpServerSidebarTabProps): React.Re
 
   const [expandedAudit, setExpandedAudit] = React.useState<string | null>(null)
   const auditRows = auditFiltered.map((r, i) => {
+    const eventType = auditEventType(r)
+    const isCommand = eventType === 'COMMAND'
     const riskStr = String(r['risk'] ?? '')
     const warn = riskStr === 'MODIFY' || riskStr === 'DANGEROUS' || riskStr === 'UNKNOWN'
     const key = String(r['timestamp'] ?? i) + ':' + String(i)
@@ -497,27 +543,42 @@ export function JumpServerSidebarTab(props: JumpServerSidebarTabProps): React.Re
     const conf = String(r['riskConfidence'] ?? '')
     const v = Number(r['classifierVersion'] ?? 0)
     const approval = String(r['approvalResult'] ?? 'none')
-    const displayCommand = String(r['redactedCommand'] ?? r['command'] ?? '')
-    return h('div', { className: 'js-term-auditRow', key, onClick: () => setExpandedAudit(expanded ? null : key), title: expanded ? undefined : (rule.length > 0 ? rule + ' · ' + reason : '点击查看风险规则') },
+    const displayCommand = isCommand ? String(r['redactedCommand'] ?? r['command'] ?? '') : auditEventLabel(r)
+    const target = String(r['target'] ?? r['hostname'] ?? '—')
+    const result = String(r['result'] ?? '—')
+    return h('div', { className: 'js-term-auditRow', key, onClick: () => setExpandedAudit(expanded ? null : key), title: expanded ? undefined : (isCommand && rule.length > 0 ? rule + ' · ' + reason : '点击查看详情') },
       h('span', { className: 'js-term-auditTime', title: String(r['timestamp'] ?? '') }, fmtTime(r['timestamp'])),
-      h('span', { className: 'js-term-auditWho' }, [String(r['actor'] ?? ''), String(r['operation'] ?? 'exec')].filter(Boolean).join(' ')),
-      h('span', { className: 'js-term-auditRisk' + (warn ? ' js-term-warn' : ''), 'data-risk': riskStr }, riskStr),
-      h('span', { className: 'js-term-auditTarget', title: String(r['target'] ?? '?') }, String(r['target'] ?? '?')),
+      h('span', { className: 'js-term-auditWho' }, [String(r['actor'] ?? ''), isCommand ? String(r['operation'] ?? 'exec') : 'EVENT'].filter(Boolean).join(' ')),
+      isCommand
+        ? h('span', { className: 'js-term-auditRisk' + (warn ? ' js-term-warn' : ''), 'data-risk': riskStr }, riskStr)
+        : h('span', { className: 'js-term-auditEventBadge' }, 'EVENT'),
+      h('span', { className: 'js-term-auditTarget', title: target }, target),
       h('span', { className: 'js-term-auditCmd', title: displayCommand }, displayCommand),
-      h('span', { className: 'js-term-auditMeta' }, 'rc=' + String(r['exitCode'] ?? '?') + ' ' + String(r['durationMs'] ?? '?') + 'ms'),
+      h('span', { className: 'js-term-auditMeta' }, isCommand
+        ? 'rc=' + String(r['exitCode'] ?? '?') + ' ' + String(r['durationMs'] ?? '?') + 'ms'
+        : result + (r['durationMs'] !== null && r['durationMs'] !== undefined ? ' · ' + String(r['durationMs']) + 'ms' : '')),
       expanded
         ? h('div', { className: 'js-term-auditDetail' },
-            h('div', null, 'Rule: ' + (rule.length > 0 ? rule : '—') + ' · confidence ' + (conf.length > 0 ? conf : '—') + (v > 0 ? ' · classifier v' + String(v) : '')),
-            h('div', null, 'Reason: ' + (riskStr === 'UNKNOWN' ? '无法确认只读；' : riskStr === 'MODIFY' ? '已确认修改服务器状态；' : '') + (reason.length > 0 ? reason : '—')),
-            h('div', null, 'Target: ' + String(r['target'] ?? '?') + ' · Hostname: ' + String(r['hostname'] ?? '?') + ' · Permission: ' + String(r['permissionMode'] ?? '?')),
-            h('div', null, 'Approval: ' + approval + (r['approvalRequired'] === true ? ' (required)' : '') + ' · Result: ' + String(r['result'] ?? '?')),
-            h('div', null, 'Normalized: ' + String(r['normalizedRedactedCommand'] ?? r['normalizedCommand'] ?? displayCommand)),
+            isCommand
+              ? h(React.Fragment, null,
+                  h('div', null, 'Rule: ' + (rule.length > 0 ? rule : '—') + ' · confidence ' + (conf.length > 0 ? conf : '—') + (v > 0 ? ' · classifier v' + String(v) : '')),
+                  h('div', null, 'Reason: ' + (riskStr === 'UNKNOWN' ? '无法确认只读；' : riskStr === 'MODIFY' ? '已确认修改服务器状态；' : '') + (reason.length > 0 ? reason : '—')),
+                  h('div', null, 'Target: ' + String(r['target'] ?? '?') + ' · Hostname: ' + String(r['hostname'] ?? '?') + ' · Permission: ' + String(r['permissionMode'] ?? '?')),
+                  h('div', null, 'Approval: ' + approval + (r['approvalRequired'] === true ? ' (required)' : '') + ' · Result: ' + result),
+                  h('div', null, 'Normalized: ' + String(r['normalizedRedactedCommand'] ?? r['normalizedCommand'] ?? displayCommand)),
+                )
+              : h(React.Fragment, null,
+                  h('div', null, 'Event: ' + auditEventLabel(r) + ' · type ' + eventType),
+                  h('div', null, 'Result: ' + result + (r['durationMs'] !== null && r['durationMs'] !== undefined ? ' · Duration: ' + String(r['durationMs']) + 'ms' : '')),
+                  h('div', null, 'Target: ' + String(r['target'] ?? '—') + ' · Hostname: ' + String(r['hostname'] ?? '—') + ' · Permission: ' + String(r['permissionMode'] ?? '?')),
+                  r['redactedCommand'] !== undefined && r['redactedCommand'] !== null ? h('div', null, 'Detail: ' + String(r['redactedCommand'])) : null,
+                ),
           )
         : null,
     )
   })
 
-  const ASSET_ROW_H = 32
+  const ASSET_ROW_H = 48
   const [assetWinStart, setAssetWinStart] = React.useState(0)
   const [assetWinH, setAssetWinH] = React.useState(360)
   const assetWinEnd = Math.min(filteredAssets.length, assetWinStart + Math.ceil(assetWinH / ASSET_ROW_H) + OVERSCAN * 2)
@@ -537,16 +598,39 @@ export function JumpServerSidebarTab(props: JumpServerSidebarTabProps): React.Re
       title: unsupportedWindows ? '当前插件不支持该资产类型' : '点击进入 ' + String(a.name ?? a.ip ?? ''),
       onClick: unsupportedWindows ? undefined : () => enterAsset(a),
     },
-      h('span', { className: 'js-term-assetIp' }, a.ip ?? a.name ?? '?'),
-      h('span', { className: 'js-term-assetName' }, a.name ?? ''),
-      h('span', { className: 'js-term-assetMeta' }, [a.platform, a.node].filter((v) => v !== null && v !== undefined).join(' · ')),
-      h('span', { className: 'js-term-assetGo' }, unsupportedWindows ? '当前插件不支持该资产类型' : '›'),
+      h('span', { className: 'js-term-assetIdentity' },
+        h('span', { className: 'js-term-assetTop' },
+          h('span', { className: 'js-term-assetIp' }, a.ip ?? a.name ?? '?'),
+          h('span', { className: 'js-term-assetPlatform' }, a.platform ?? ''),
+        ),
+        h('span', { className: 'js-term-assetBottom' },
+          h('span', { className: 'js-term-assetName' }, a.name ?? ''),
+          a.node ? h('span', { className: 'js-term-assetNode' }, String(a.node)) : null,
+        ),
+      ),
+      h('span', { className: 'js-term-assetGo' }, unsupportedWindows ? '不支持' : '›'),
     )
   })
 
   const visibleTotal = buffer.rows.length
   const windowEnd = Math.min(visibleTotal, windowStart + Math.ceil(viewportH / ROW_H) + OVERSCAN * 2)
   const visibleRows = buffer.rows.slice(windowStart, windowEnd)
+
+  const auditChip = (filter: AuditFilter, label: string, count: number): React.ReactNode => h('button', {
+    type: 'button',
+    className: 'js-term-auditSummaryChip' + (audit.filter === filter ? ' js-term-auditSummaryChipActive' : ''),
+    onClick: () => setAudit((prev) => ({ ...prev, filter })),
+  }, label + ' ' + count)
+
+  const useAssetShortcut = (): boolean => atMenu && manualCommand.trim().toLowerCase() === 'p'
+  const runManualOrShortcut = (): void => {
+    if (useAssetShortcut()) {
+      setManualCommand('')
+      openAssetsTab()
+      return
+    }
+    void submitManual()
+  }
 
   return h('div', { className: 'js-term-pane', role: 'region', 'aria-label': t('tabTitle') },
     h('div', { className: 'js-term-header' },
@@ -586,15 +670,22 @@ export function JumpServerSidebarTab(props: JumpServerSidebarTabProps): React.Re
       ? h('div', { className: 'js-term-assets' },
           h('div', { className: 'js-term-searchRow' },
             h('input', {
-              type: 'text', className: 'js-term-search', value: assets.filter, placeholder: '搜索 IP / 主机名 / 系统',
+              type: 'text', className: 'js-term-search', value: assets.filter, placeholder: '搜索 IP / 主机名 / 系统 / 节点',
               onChange: (event: { target?: { value?: string } | null }) => searchAssets(event.target?.value ?? ''),
             }),
             h('button', { type: 'button', className: 'js-term-iconBtn', title: '刷新', onClick: () => void refreshAssets() }, '↻'),
           ),
           h('div', { className: 'js-term-groups' },
-            h('button', { type: 'button', className: 'js-term-chip js-term-groupChip' + (assets.group === '' ? ' js-term-chipActive' : ''), onClick: () => pickGroup('') }, '全部'),
+            h('button', { type: 'button', className: 'js-term-chip js-term-groupChip' + (assets.group === '' ? ' js-term-chipActive' : ''), onClick: () => pickGroup('') }, '全部 ' + String(assets.count)),
             assets.groups.map((g) => h('button', { type: 'button', key: g, className: 'js-term-chip js-term-groupChip' + (assets.group === g ? ' js-term-chipActive' : ''), onClick: () => pickGroup(g) }, g)),
           ),
+          nodeGroups.length > 1
+            ? h('div', { className: 'js-term-nodeGroups' },
+                h('span', { className: 'js-term-groupLabel' }, '节点'),
+                h('button', { type: 'button', className: 'js-term-chip js-term-groupChip' + (assets.node === '' ? ' js-term-chipActive' : ''), onClick: () => pickNode('') }, '全部'),
+                nodeGroups.map(([node, count]) => h('button', { type: 'button', key: node, className: 'js-term-chip js-term-groupChip' + (assets.node === node ? ' js-term-chipActive' : ''), onClick: () => pickNode(node) }, node + ' ' + String(count))),
+              )
+            : null,
           assets.error !== null ? h('div', { className: 'js-term-manualError', role: 'status' }, assets.error) : null,
           assets.loading ? h('div', { className: 'js-term-empty' }, '加载中…') : (
             filteredAssets.length === 0
@@ -610,17 +701,19 @@ export function JumpServerSidebarTab(props: JumpServerSidebarTabProps): React.Re
       : tab === 'audit'
         ? h('div', { className: 'js-term-audit' },
             h('div', { className: 'js-term-auditSummary' },
-              h('span', { className: 'js-term-auditSummaryChip' }, '全部 ' + audit.records.length),
-              h('span', { className: 'js-term-auditSummaryChip' }, 'READ ' + String(auditCounts['READ'] ?? 0)),
-              h('span', { className: 'js-term-auditSummaryChip' }, 'UNKNOWN ' + String(auditCounts['UNKNOWN'] ?? 0)),
-              h('span', { className: 'js-term-auditSummaryChip' }, 'MODIFY ' + String(auditCounts['MODIFY'] ?? 0)),
-              h('span', { className: 'js-term-auditSummaryChip' }, '高危 ' + String(auditCounts['DANGEROUS'] ?? 0)),
-              h('span', { className: 'js-term-auditSummaryChip' }, '失败 ' + String(auditCounts['FAILED'] ?? 0)),
-              h('span', { className: 'js-term-auditSummaryChip' }, 'UTC+8'),
+              auditChip('ALL', '全部', audit.records.length),
+              auditChip('READ', 'READ', auditCounts['READ'] ?? 0),
+              auditChip('UNKNOWN', 'UNKNOWN', auditCounts['UNKNOWN'] ?? 0),
+              auditChip('MODIFY', '修改', (auditCounts['MODIFY'] ?? 0) + (auditCounts['DANGEROUS'] ?? 0)),
+              auditChip('DANGEROUS', '高危', auditCounts['DANGEROUS'] ?? 0),
+              auditChip('FAILED', '失败', auditCounts['FAILED'] ?? 0),
+              h('span', { className: 'js-term-auditSummaryChip js-term-auditTimezone' }, 'UTC+8'),
             ),
             h('div', { className: 'js-term-searchRow' },
-              h('label', { className: 'js-term-auditFilter' }, h('input', { type: 'checkbox', checked: audit.showFailed, onChange: (e: { target?: { checked?: boolean } | null }) => setAudit({ ...audit, showFailed: e.target?.checked === true }) }), '只看失败'),
-              h('label', { className: 'js-term-auditFilter' }, h('input', { type: 'checkbox', checked: audit.showModify, onChange: (e: { target?: { checked?: boolean } | null }) => setAudit({ ...audit, showModify: e.target?.checked === true }) }), '只看修改'),
+              h('input', {
+                type: 'text', className: 'js-term-search', value: audit.search, placeholder: '搜索命令 / IP / 主机名 / Rule',
+                onChange: (event: { target?: { value?: string } | null }) => setAudit((prev) => ({ ...prev, search: event.target?.value ?? '' })),
+              }),
               h('button', { type: 'button', className: 'js-term-iconBtn', title: '复制过滤结果', onClick: () => copyToClipboard(auditFiltered.map((r) => [fmtTime(r['timestamp']), String(r['actor'] ?? ''), String(r['operation'] ?? ''), String(r['risk'] ?? ''), String(r['target'] ?? ''), String(r['redactedCommand'] ?? r['command'] ?? ''), 'rc=' + String(r['exitCode'] ?? '?')].join(' ')).join(String.fromCharCode(10))) }, '⧉'),
               h('button', { type: 'button', className: 'js-term-btn js-term-auditExport', title: '导出当前过滤结果 CSV', disabled: auditFiltered.length === 0, onClick: () => downloadAudit(auditFiltered, 'csv') }, 'CSV'),
               h('button', { type: 'button', className: 'js-term-btn js-term-auditExport', title: '导出当前过滤结果 JSON', disabled: auditFiltered.length === 0, onClick: () => downloadAudit(auditFiltered, 'json') }, 'JSON'),
@@ -628,12 +721,12 @@ export function JumpServerSidebarTab(props: JumpServerSidebarTabProps): React.Re
               h('button', { type: 'button', className: 'js-term-iconBtn', title: '刷新', onClick: () => void refreshAudit() }, '↻'),
             ),
             audit.loading ? h('div', { className: 'js-term-empty' }, '加载中…') : (
-              auditRows.length === 0 ? h('div', { className: 'js-term-empty' }, '暂无审计记录') : h('div', { className: 'js-term-auditList' }, auditRows)
+              auditRows.length === 0 ? h('div', { className: 'js-term-empty' }, '暂无匹配审计记录') : h('div', { className: 'js-term-auditList' }, auditRows)
             ),
           )
         : h('div', { className: 'js-term-body', ref: bodyRef, onScroll: scrollHandler },
             newOutput > 0 && !follow
-              ? h('button', { type: 'button', className: 'js-term-newOutput', onClick: () => { setFollow(true); setNewOutput(0) } }, '↓ ' + newOutput + ' 条新输出')
+              ? h('button', { className: 'js-term-newOutput', type: 'button', onClick: () => { setFollow(true); setNewOutput(0) } }, '↓ ' + newOutput + ' 条新输出')
               : null,
             buffer.rows.length === 0
               ? h('div', { className: 'js-term-empty' }, t('emptyTerminal'))
@@ -648,10 +741,10 @@ export function JumpServerSidebarTab(props: JumpServerSidebarTabProps): React.Re
         autoComplete: 'off', spellCheck: false, placeholder: manualPlaceholder, 'aria-label': manualPlaceholder,
         onChange: (event: { target?: { value?: string } | null }) => { setManualCommand(event.target?.value ?? ''); setManualError(null) },
         onKeyDown: (event: { key: string; shiftKey?: boolean; preventDefault(): void }) => {
-          if (event.key === 'Enter' && event.shiftKey !== true) { event.preventDefault(); void submitManual() }
+          if (event.key === 'Enter' && event.shiftKey !== true) { event.preventDefault(); runManualOrShortcut() }
         },
       }),
-      h('button', { type: 'button', className: 'js-term-iconBtn js-term-sendBtn', disabled: !manualAvailable || manualCommand.trim().length === 0, title: manualBusy ? t('manualSending') : t('manualSend'), 'aria-label': manualBusy ? t('manualSending') : t('manualSend'), onClick: () => void submitManual() }, sendIcon(14)),
+      h('button', { type: 'button', className: 'js-term-iconBtn js-term-sendBtn', disabled: !manualAvailable || manualCommand.trim().length === 0, title: manualBusy ? t('manualSending') : t('manualSend'), 'aria-label': manualBusy ? t('manualSending') : t('manualSend'), onClick: runManualOrShortcut }, sendIcon(14)),
     ),
     confirmReq !== null
       ? h('div', { className: 'js-term-confirm', role: 'alertdialog' },
@@ -672,8 +765,7 @@ export function JumpServerSidebarTab(props: JumpServerSidebarTabProps): React.Re
     manualError !== null ? h('div', { className: 'js-term-manualError', role: 'status' }, manualError) : null,
     h('div', { className: 'js-term-footer' },
       h('div', { className: 'js-term-footerMeta' },
-        h('span', { className: 'js-term-status', 'data-tone': tone }, statusLabel),
-        networkError !== null ? h('span', { className: 'js-term-testErr' }, networkError) : h('span', { className: 'js-term-hint' }, atMenu ? 'p=资产 · IP/名称=进入 · q=关闭' : t('manualHint')),
+        networkError !== null ? h('span', { className: 'js-term-testErr' }, networkError) : h('span', { className: 'js-term-hint' }, atMenu ? 'p 资产 · IP/名称 进入 · q 关闭' : t('manualHint')),
       ),
       h('div', { className: 'js-term-actions' },
         h('button', { type: 'button', className: 'js-term-iconBtn', 'data-active': follow || undefined, 'aria-pressed': follow, 'aria-label': t('followTooltip'), title: t('followTooltip'), onClick: () => setFollow(!follow) }, followIcon(14)),
