@@ -3,9 +3,9 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { JumpServerConfig } from '../config/types.js'
 import { AbortRequestedError, JumpServerError } from '../jumpserver/errors.js'
 import type { SessionRegistry } from '../jumpserver/session-registry.js'
-import { gateCommand, gateCommandForNavigation, type GateServices } from '../security/permission-gate.js'
+import { gateCommand, gateCommandForNavigation, gateCommandsForNavigation, type GateServices } from '../security/permission-gate.js'
 import { JUMPSERVER_NOT_ARMED, NOT_ARMED_MESSAGE, type SessionGrant } from '../security/grant.js'
-import type { TargetBatchResult } from '../jumpserver/session-manager.js'
+import type { BatchCommandRequest, TargetBatchResult } from '../jumpserver/session-manager.js'
 import { runtimeVersion } from '../version.js'
 import { assetsToValue, bundleFor, execOutcomeToValue, guardValue, renderAssetsResult, renderBatchResult, renderResult, RESULT_SCHEMA, sessionIdOf, statusToValue, type ResultValue } from './common.js'
 
@@ -87,9 +87,6 @@ export function registerJumpServerTools(ctx: Context, registry: SessionRegistry,
             const blocked = requireGrant(grants, exec)
             if (blocked !== null) return blocked
             const bundle = bundleFor(exec, registry)
-            // V0.2.6 P0 version handshake: the Agent sees exactly which Host
-            // build answered (pluginVersion/hostBuild/protocolVersion) so a
-            // stale deployed Host is diagnosable without guessing.
             return { ...statusToValue(bundle.manager.status()), ...runtimeVersion() }
           })
         },
@@ -298,8 +295,6 @@ export function registerJumpServerTools(ctx: Context, registry: SessionRegistry,
             if (blocked !== null) return blocked
             const bundle = bundleFor(exec, registry)
             const services: GateServices = { getConfig, manager: bundle.manager, approval: ctx.get('approval') }
-            // args arrives as a JSON value; normalize defensively (the schema
-            // already enforces shape before execute is reached).
             const rawTasks = Array.isArray(args.tasks) ? (args.tasks as unknown as Array<Record<string, unknown>>) : []
             const tasks = rawTasks.filter((t) => t !== null && typeof t === 'object')
             if (tasks.length === 0) {
@@ -319,31 +314,45 @@ export function registerJumpServerTools(ctx: Context, registry: SessionRegistry,
                 executed.push({ target, hostname: null, error: { code: 'INVALID_BATCH', message: 'task commands is empty' }, commands: [] })
                 continue
               }
-              // One task's failure (gating, navigation, execution) must not
-              // discard other tasks' already-collected results: record the
-              // error on that task and continue. Aborts still abort.
               try {
-                // Gate every command up front; navigation-approval hooks run inside the batch turn.
-                const gated = await Promise.all(
-                  commands.map((command: string) => gateCommandForNavigation(services, exec, command)),
-                )
+                // V0.3.2: classify the whole target batch together. Routine READ
+                // commands stay prompt-free; 2-10 approval-required commands can
+                // share one explicit prompt that lists every command.
+                const gated = await gateCommandsForNavigation(services, exec, commands)
                 const taskTimeout = task['timeout']
                 const timeoutMs = typeof taskTimeout === 'number' && Number.isFinite(taskTimeout) ? Math.max(1, taskTimeout) * 1000 : undefined
-                const result = await bundle.manager.runTargetBatch({
-                  target,
-                  commands: gated.map((g, i) => ({
+
+                // ApprovalResult must describe what actually happened. Deferred
+                // navigation approvals start as pending and mutate only after the
+                // beforeExec hook succeeds/fails; this prevents rejected batch
+                // commands from ever being audited as "approved".
+                const commandRequests: BatchCommandRequest[] = gated.map((g, i) => {
+                  const request: BatchCommandRequest = {
                     command: commands[i]!,
                     timeoutMs,
                     risk: g.risk,
                     classification: g.classification,
                     approvalRequired: g.approvalRequired,
-                    approvalResult: g.approvalRequired ? 'approved' : 'none',
-                    beforeExec: g.beforeExec,
-                  })),
-                  // P0: without the tool's abort signal the batch keeps
-                  // driving the session (enter/exec/leave) after 停止生成;
-                  // the manager checks request.signal on every step and
-                  // session operations abort on it.
+                    approvalResult: g.approvalRequired ? 'pending' : 'none',
+                  }
+                  if (g.beforeExec !== undefined) {
+                    const before = g.beforeExec
+                    request.beforeExec = async () => {
+                      try {
+                        await before()
+                        request.approvalResult = 'approved'
+                      } catch (error) {
+                        request.approvalResult = 'denied'
+                        throw error
+                      }
+                    }
+                  }
+                  return request
+                })
+
+                const result = await bundle.manager.runTargetBatch({
+                  target,
+                  commands: commandRequests,
                   signal: exec.signal,
                 })
                 executed.push(result)
