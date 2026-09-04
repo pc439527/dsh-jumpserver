@@ -33,8 +33,8 @@ describe('TerminalRingBuffer', () => {
 
   it('drops oldest output beyond the byte budget', () => {
     const ring = new TerminalRingBuffer(100, 10)
-    ring.push({ type: 'output', data: '1234567890' }) // exactly 10 bytes
-    ring.push({ type: 'output', data: 'ABCDE' })       // 5 more -> evicts all 10-byte head
+    ring.push({ type: 'output', data: '1234567890' })
+    ring.push({ type: 'output', data: 'ABCDE' })
     const snapshot = ring.snapshot()
     expect(snapshot.map((e) => (e as { data?: string }).data)).toEqual(['ABCDE'])
   })
@@ -64,6 +64,21 @@ describe('TerminalObserver', () => {
     const afterInput = observer.snapshotSince(all[1]!.seq)
     expect(afterInput.map((e) => e.type)).toEqual(['output', 'target', 'state', 'error'])
     expect(observer.cursorSeq).toBe(all[all.length - 1]!.seq)
+  })
+
+  it('marks structured PTY capture as internal without losing it to Host parsers', () => {
+    const observer = new TerminalObserver()
+    observer.recordOutput('visible-before\n')
+    const end = observer.beginInternalCapture()
+    observer.recordInput('p\r')
+    observer.recordOutput('1 | demo | 203.0.113.10 | Linux\n')
+    end()
+    observer.recordOutput('visible-after\n')
+
+    const events = observer.snapshot()
+    const io = events.filter((event) => event.type === 'input' || event.type === 'output') as Array<{ type: string; data: string; visibility?: string }>
+    expect(io.map((event) => event.visibility)).toEqual(['terminal', 'internal', 'internal', 'terminal'])
+    expect(io[2]!.data).toContain('203.0.113.10')
   })
 })
 
