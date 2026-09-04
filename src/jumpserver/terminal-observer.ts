@@ -5,12 +5,18 @@
  * SECURITY: browser-visible input/output is redacted BEFORE it enters this
  * buffer. The real PTY still receives the original command; the observer is a
  * display/audit surface and must never retain command-line credentials.
+ *
+ * Some Host operations (notably KoKo `p` asset discovery) must still consume
+ * the exact PTY bytes for parsing while keeping that implementation detail out
+ * of the human terminal. Those events are retained with visibility=internal;
+ * the browser bridge omits them while Host-side parsers can still read them.
  */
 import { MAX_TERMINAL_BYTES } from '../config/types.js'
 import { redactCommandSecrets } from '../security/command-redaction.js'
 import { SessionState } from './state-machine.js'
 
 export type TerminalEventType = 'input' | 'output' | 'state' | 'target' | 'error'
+export type TerminalVisibility = 'terminal' | 'internal'
 
 export interface TerminalEventBase {
   seq: number
@@ -21,12 +27,14 @@ export interface TerminalInputEvent extends TerminalEventBase {
   type: 'input'
   /** Redacted form of what the connector wrote to the PTY. */
   data: string
+  visibility?: TerminalVisibility
 }
 
 export interface TerminalOutputEvent extends TerminalEventBase {
   type: 'output'
   /** Redacted PTY chunk (ANSI retained; UTF-8 decoded). */
   data: string
+  visibility?: TerminalVisibility
 }
 
 export interface TerminalStateEvent extends TerminalEventBase {
@@ -56,8 +64,8 @@ export type TerminalEvent =
   | TerminalErrorEvent
 
 export type TerminalNewEvent =
-  | { type: 'input'; data: string }
-  | { type: 'output'; data: string }
+  | { type: 'input'; data: string; visibility?: TerminalVisibility }
+  | { type: 'output'; data: string; visibility?: TerminalVisibility }
   | { type: 'state'; state: SessionState; prev: SessionState | null }
   | { type: 'target'; target: string; hostname: string | null; user: string | null; pwd: string | null }
   | { type: 'error'; message: string }
@@ -140,12 +148,32 @@ export class TerminalRingBuffer {
 /** Emitting facade the session manager hands the bridge. */
 export class TerminalObserver {
   private buffer = new TerminalRingBuffer()
+  private internalCaptureDepth = 0
 
   constructor(private scrollbackRows = 5000) {}
 
+  /**
+   * Mark subsequently recorded PTY input/output as Host-internal while a
+   * structured operation consumes the same stream. Nested callers are safe.
+   * The returned disposer is idempotent and must be used in finally blocks.
+   */
+  beginInternalCapture(): () => void {
+    this.internalCaptureDepth += 1
+    let ended = false
+    return () => {
+      if (ended) return
+      ended = true
+      this.internalCaptureDepth = Math.max(0, this.internalCaptureDepth - 1)
+    }
+  }
+
+  private get visibility(): TerminalVisibility {
+    return this.internalCaptureDepth > 0 ? 'internal' : 'terminal'
+  }
+
   recordInput(data: string): void {
     const safe = redactCommandSecrets(data)
-    this.buffer.push({ type: 'input', data: safe })
+    this.buffer.push({ type: 'input', data: safe, visibility: this.visibility })
   }
 
   recordOutput(data: string): void {
@@ -153,7 +181,7 @@ export class TerminalObserver {
     // PTYs normally echo the command. Redacting raw output as well prevents a
     // secret from reappearing through that echo or through diagnostic logs.
     const safe = redactCommandSecrets(data)
-    this.buffer.push({ type: 'output', data: safe })
+    this.buffer.push({ type: 'output', data: safe, visibility: this.visibility })
   }
 
   recordState(state: SessionState, prev: SessionState | null): void {
