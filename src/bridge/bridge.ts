@@ -203,7 +203,9 @@ export function registerBridgeRoutes(webServer: {
               await new Promise((r) => setTimeout(r, 150))
             }
           }
-          const events = observer !== null ? observer.snapshotSince(sinceSeq) : []
+          const events = observer !== null
+            ? observer.snapshotSince(sinceSeq).filter((event) => !('visibility' in event) || event.visibility !== 'internal')
+            : []
           json(res, 200, {
             ok: true,
             lastSeq: observer?.cursorSeq ?? 0,
@@ -343,11 +345,21 @@ export function registerBridgeRoutes(webServer: {
             json(res, 409, { ok: false, code: 'NO_SESSION', message: 'no JumpServer session for this conversation' })
             return
           }
-          const bundle = await services.assetList(sessionId, {
-            filter: typeof body.filter === 'string' ? body.filter : undefined,
-            group: typeof body.group === 'string' ? body.group : undefined,
-            refresh: body.refresh === true,
-          })
+          // The structured asset picker consumes the same PTY bytes, but the
+          // raw 100+ row KoKo table is implementation detail and should not
+          // flood the human terminal. Keep it in the Host observer only while
+          // this structured request runs; /snapshot filters internal events.
+          const endInternalCapture = observer.beginInternalCapture()
+          let bundle: Awaited<ReturnType<BridgeServices['assetList']>>
+          try {
+            bundle = await services.assetList(sessionId, {
+              filter: typeof body.filter === 'string' ? body.filter : undefined,
+              group: typeof body.group === 'string' ? body.group : undefined,
+              refresh: body.refresh === true,
+            })
+          } finally {
+            endInternalCapture()
+          }
           if (bundle === null) {
             json(res, 409, { ok: false, code: 'NOT_AT_MENU', message: 'assets are available at the JumpServer menu; connect or return to the bastion menu first' })
             return
