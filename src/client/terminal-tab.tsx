@@ -13,6 +13,7 @@
 import * as React from 'react'
 import { fetchAssets, fetchAudit, fetchSnapshot, fetchStatus, sendManualCommand, terminateJumpServer, type StatusResponse } from './api.js'
 import { applySnapshot, clearBuffer, createTerminalBuffer, setScrollback, type TerminalBuffer, type TerminalRow } from './terminal-view.js'
+import { downloadAudit } from './audit-export.js'
 import { CLIENT_BUILD, CLIENT_VERSION } from './version.js'
 
 const h = React.createElement
@@ -23,6 +24,7 @@ const useIsoLayoutEffect = typeof (globalThis as { window?: unknown }).window !=
 
 const ROW_H = 20
 const OVERSCAN = 20
+const AUDIT_TIME_ZONE = 'Asia/Shanghai'
 
 function followIcon(size = 14): React.ReactNode {
   return h('svg', { width: size, height: size, viewBox: '0 0 16 16', fill: 'none', stroke: 'currentColor', strokeWidth: 1.4, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true },
@@ -43,6 +45,22 @@ function sendIcon(size = 14): React.ReactNode {
 function infoIcon(size = 14): React.ReactNode {
   return h('svg', { width: size, height: size, viewBox: '0 0 16 16', fill: 'none', stroke: 'currentColor', strokeWidth: 1.3, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true },
     h('circle', { cx: 8, cy: 8, r: 6 }), h('path', { d: 'M8 7.2v3.3' }), h('path', { d: 'M8 5.2v.1' }))
+}
+
+export function formatAuditTime(value: unknown): string {
+  const raw = String(value ?? '')
+  const date = new Date(raw)
+  if (!Number.isNaN(date.getTime())) {
+    try {
+      return new Intl.DateTimeFormat('zh-CN', {
+        timeZone: AUDIT_TIME_ZONE,
+        hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+      }).format(date)
+    } catch {
+      // Older browser/embedded runtimes: preserve the old readable fallback.
+    }
+  }
+  return raw.length > 19 ? raw.slice(11, 19) : raw
 }
 
 export const TAB_ID = 'dsh-jumpserver:terminal'
@@ -251,11 +269,9 @@ export function JumpServerSidebarTab(props: JumpServerSidebarTabProps): React.Re
     savedScrollTopRef.current = el.scrollTop ?? 0
     const distanceToBottom = (el.scrollHeight ?? 0) - (el.scrollTop ?? 0) - (el.clientHeight ?? 0)
     if (distanceToBottom <= 24 && !followRef.current) {
-      // user scrolled back to the bottom -> resume follow, clear the badge
       setFollow(true)
       setNewOutput(0)
     } else if (distanceToBottom > 24 && followRef.current) {
-      // user moved away from the bottom -> never jump again until re-followed
       setFollow(false)
     }
   }
@@ -314,8 +330,6 @@ export function JumpServerSidebarTab(props: JumpServerSidebarTabProps): React.Re
       const result = await sendManualCommand(sessionId, command, controller.signal, confirmed, confirmToken ?? confirmReq?.confirmToken)
       if (result.ok !== true) {
         if (result.code === 'MANUAL_CONFIRM_REQUIRED' && !confirmed) {
-          // V0.3.1: keep the one-time challenge so the second call can prove it
-          // saw THIS prompt (host validates hash + risk + single use + TTL).
           setConfirmReq({ command, risk: result.risk, confirmToken: result.confirmToken, commandHash: result.commandHash, expiresAt: result.expiresAt })
           setManualCommand('')
           return
@@ -352,10 +366,6 @@ export function JumpServerSidebarTab(props: JumpServerSidebarTabProps): React.Re
     }
   }, [sessionId])
 
-  // V0.3.1 P1: assets are cache-first. Only the explicit ↻ button passes
-  // force=true (a new 'p' to KoKo); opening the tab, switching groups and
-  // re-entering reuse the per-conversation cache (assetCacheTtlSeconds). A
-  // failed refresh keeps the last-known-good rows instead of blanking them.
   const loadAssets = React.useCallback(async (force: boolean, group?: string): Promise<void> => {
     if (sessionId.length === 0) return
     if (group !== undefined) assetsGroupRef.current = group
@@ -390,14 +400,12 @@ export function JumpServerSidebarTab(props: JumpServerSidebarTabProps): React.Re
     }
   }, [sessionId])
 
-  /** Explicit refresh: the ONLY path that forces a new KoKo 'p'. */
   const refreshAssets = React.useCallback((): void => {
     void loadAssets(true)
   }, [loadAssets])
 
   const openAssetsTab = React.useCallback((): void => {
     setTab('assets')
-    // reuse the cache; only fetch when the tab has nothing to show yet
     if (assets.rows.length === 0) void loadAssets(false)
   }, [assets.rows.length, loadAssets])
 
@@ -421,7 +429,6 @@ export function JumpServerSidebarTab(props: JumpServerSidebarTabProps): React.Re
     setAssets((prev) => ({ ...prev, filter: term }))
   }
   const pickGroup = (group: string): void => {
-    // 切换资产组：复用缓存（不重新向 KoKo 发 p），仅本地过滤/分组
     setAssets((prev) => ({ ...prev, group, filter: '' }))
     void loadAssets(false, group)
   }
@@ -441,9 +448,6 @@ export function JumpServerSidebarTab(props: JumpServerSidebarTabProps): React.Re
     void (async () => {
       try {
         const result = await sendManualCommand(sessionId, target, undefined)
-        // V0.3.1 P1: entering an asset does NOT refresh the asset list — the
-        // claim happens at the menu; re-fetching after entering would fail
-        // (listAssets requires JUMPSERVER_MENU) and waste a 'p'.
         if (result.ok === true) { setTab('term'); setManualCommand('') }
         else setManualError(result.message ?? result.code ?? t('manualFailed'))
       } catch (error) {
@@ -471,13 +475,17 @@ export function JumpServerSidebarTab(props: JumpServerSidebarTabProps): React.Re
     return true
   })
 
-  const fmtTime = (value: unknown): string => {
-    const s = String(value ?? '')
-    return s.length > 19 ? s.slice(11, 19) : s
-  }
+  const auditCounts = audit.records.reduce<Record<string, number>>((acc, record) => {
+    const risk = String(record['risk'] ?? 'UNKNOWN')
+    acc[risk] = (acc[risk] ?? 0) + 1
+    const result = String(record['result'] ?? '')
+    const exit = record['exitCode']
+    if ((result !== 'ok' && result !== 'COMPLETED') || (typeof exit === 'number' && exit !== 0)) acc['FAILED'] = (acc['FAILED'] ?? 0) + 1
+    return acc
+  }, {})
 
-  // V0.3.1: audit rows render the FULL ring (no slice(0,150)) and expose the
-  // classifier's rule + reason on click — "why was this MODIFY" is one tap away.
+  const fmtTime = formatAuditTime
+
   const [expandedAudit, setExpandedAudit] = React.useState<string | null>(null)
   const auditRows = auditFiltered.map((r, i) => {
     const riskStr = String(r['risk'] ?? '')
@@ -489,27 +497,26 @@ export function JumpServerSidebarTab(props: JumpServerSidebarTabProps): React.Re
     const conf = String(r['riskConfidence'] ?? '')
     const v = Number(r['classifierVersion'] ?? 0)
     const approval = String(r['approvalResult'] ?? 'none')
+    const displayCommand = String(r['redactedCommand'] ?? r['command'] ?? '')
     return h('div', { className: 'js-term-auditRow', key, onClick: () => setExpandedAudit(expanded ? null : key), title: expanded ? undefined : (rule.length > 0 ? rule + ' · ' + reason : '点击查看风险规则') },
-      h('span', { className: 'js-term-auditTime' }, fmtTime(r['timestamp'])),
+      h('span', { className: 'js-term-auditTime', title: String(r['timestamp'] ?? '') }, fmtTime(r['timestamp'])),
       h('span', { className: 'js-term-auditWho' }, [String(r['actor'] ?? ''), String(r['operation'] ?? 'exec')].filter(Boolean).join(' ')),
-      h('span', { className: 'js-term-auditRisk' + (warn ? ' js-term-warn' : '') }, riskStr),
-      h('span', { className: 'js-term-auditTarget' }, String(r['target'] ?? '?')),
-      h('span', { className: 'js-term-auditCmd' }, String(r['redactedCommand'] ?? r['command'] ?? '')),
+      h('span', { className: 'js-term-auditRisk' + (warn ? ' js-term-warn' : ''), 'data-risk': riskStr }, riskStr),
+      h('span', { className: 'js-term-auditTarget', title: String(r['target'] ?? '?') }, String(r['target'] ?? '?')),
+      h('span', { className: 'js-term-auditCmd', title: displayCommand }, displayCommand),
       h('span', { className: 'js-term-auditMeta' }, 'rc=' + String(r['exitCode'] ?? '?') + ' ' + String(r['durationMs'] ?? '?') + 'ms'),
       expanded
         ? h('div', { className: 'js-term-auditDetail' },
             h('div', null, 'Rule: ' + (rule.length > 0 ? rule : '—') + ' · confidence ' + (conf.length > 0 ? conf : '—') + (v > 0 ? ' · classifier v' + String(v) : '')),
             h('div', null, 'Reason: ' + (riskStr === 'UNKNOWN' ? '无法确认只读；' : riskStr === 'MODIFY' ? '已确认修改服务器状态；' : '') + (reason.length > 0 ? reason : '—')),
             h('div', null, 'Target: ' + String(r['target'] ?? '?') + ' · Hostname: ' + String(r['hostname'] ?? '?') + ' · Permission: ' + String(r['permissionMode'] ?? '?')),
-            h('div', null, 'Approval: ' + approval + (r['approvalRequired'] === true ? ' (required)' : '') + ' · normalized: ' + String(r['normalizedCommand'] ?? '')),
+            h('div', null, 'Approval: ' + approval + (r['approvalRequired'] === true ? ' (required)' : '') + ' · Result: ' + String(r['result'] ?? '?')),
+            h('div', null, 'Normalized: ' + String(r['normalizedRedactedCommand'] ?? r['normalizedCommand'] ?? displayCommand)),
           )
         : null,
     )
   })
 
-  // V0.3.1 P2: the asset list is a true virtual list (no slice(0,150)) — the
-  // full cached row set is scrollable even beyond 150 entries, and search still
-  // runs over ALL cached rows.
   const ASSET_ROW_H = 32
   const [assetWinStart, setAssetWinStart] = React.useState(0)
   const [assetWinH, setAssetWinH] = React.useState(360)
@@ -602,11 +609,22 @@ export function JumpServerSidebarTab(props: JumpServerSidebarTabProps): React.Re
         )
       : tab === 'audit'
         ? h('div', { className: 'js-term-audit' },
+            h('div', { className: 'js-term-auditSummary' },
+              h('span', { className: 'js-term-auditSummaryChip' }, '全部 ' + audit.records.length),
+              h('span', { className: 'js-term-auditSummaryChip' }, 'READ ' + String(auditCounts['READ'] ?? 0)),
+              h('span', { className: 'js-term-auditSummaryChip' }, 'UNKNOWN ' + String(auditCounts['UNKNOWN'] ?? 0)),
+              h('span', { className: 'js-term-auditSummaryChip' }, 'MODIFY ' + String(auditCounts['MODIFY'] ?? 0)),
+              h('span', { className: 'js-term-auditSummaryChip' }, '高危 ' + String(auditCounts['DANGEROUS'] ?? 0)),
+              h('span', { className: 'js-term-auditSummaryChip' }, '失败 ' + String(auditCounts['FAILED'] ?? 0)),
+              h('span', { className: 'js-term-auditSummaryChip' }, 'UTC+8'),
+            ),
             h('div', { className: 'js-term-searchRow' },
               h('label', { className: 'js-term-auditFilter' }, h('input', { type: 'checkbox', checked: audit.showFailed, onChange: (e: { target?: { checked?: boolean } | null }) => setAudit({ ...audit, showFailed: e.target?.checked === true }) }), '只看失败'),
               h('label', { className: 'js-term-auditFilter' }, h('input', { type: 'checkbox', checked: audit.showModify, onChange: (e: { target?: { checked?: boolean } | null }) => setAudit({ ...audit, showModify: e.target?.checked === true }) }), '只看修改'),
-              h('button', { type: 'button', className: 'js-term-iconBtn', title: '复制过滤结果', onClick: () => copyToClipboard(auditFiltered.map((r) => [fmtTime(r['timestamp']), String(r['actor'] ?? ''), String(r['operation'] ?? ''), String(r['risk'] ?? ''), String(r['target'] ?? ''), String(r['command'] ?? ''), 'rc=' + String(r['exitCode'] ?? '?')].join(' ')).join(String.fromCharCode(10))),
- }, '⧉'),
+              h('button', { type: 'button', className: 'js-term-iconBtn', title: '复制过滤结果', onClick: () => copyToClipboard(auditFiltered.map((r) => [fmtTime(r['timestamp']), String(r['actor'] ?? ''), String(r['operation'] ?? ''), String(r['risk'] ?? ''), String(r['target'] ?? ''), String(r['redactedCommand'] ?? r['command'] ?? ''), 'rc=' + String(r['exitCode'] ?? '?')].join(' ')).join(String.fromCharCode(10))) }, '⧉'),
+              h('button', { type: 'button', className: 'js-term-btn js-term-auditExport', title: '导出当前过滤结果 CSV', disabled: auditFiltered.length === 0, onClick: () => downloadAudit(auditFiltered, 'csv') }, 'CSV'),
+              h('button', { type: 'button', className: 'js-term-btn js-term-auditExport', title: '导出当前过滤结果 JSON', disabled: auditFiltered.length === 0, onClick: () => downloadAudit(auditFiltered, 'json') }, 'JSON'),
+              h('button', { type: 'button', className: 'js-term-btn js-term-auditExport', title: '导出当前过滤结果 Markdown', disabled: auditFiltered.length === 0, onClick: () => downloadAudit(auditFiltered, 'markdown') }, 'MD'),
               h('button', { type: 'button', className: 'js-term-iconBtn', title: '刷新', onClick: () => void refreshAudit() }, '↻'),
             ),
             audit.loading ? h('div', { className: 'js-term-empty' }, '加载中…') : (
