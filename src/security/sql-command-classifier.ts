@@ -35,7 +35,11 @@ function result(command: string, risk: CommandRisk, ruleId: string, reason: stri
   }
 }
 
-/** Tokenize enough shell syntax to preserve quoted SQL after -e/--execute. */
+/** Tokenize enough shell syntax to preserve quoted SQL after -e/--execute.
+ * Returns null if an unquoted shell control operator is seen: SQL semicolons
+ * inside the quoted -e argument are fine, but `mysql ... ; rm ...` must never
+ * be interpreted as one safe database command.
+ */
 function shellTokens(command: string): string[] | null {
   const out: string[] = []
   let current = ''
@@ -61,6 +65,8 @@ function shellTokens(command: string): string[] | null {
       quote = ch
       continue
     }
+    if (ch === ';' || ch === '|' || ch === '&' || ch === '<' || ch === '>' || ch === '`') return null
+    if (ch === '$' && command[i + 1] === '(') return null
     if (/\s/.test(ch)) {
       if (current.length > 0) { out.push(current); current = '' }
       continue
@@ -181,10 +187,6 @@ function extractExecute(tokens: string[]): string | null {
 export function classifyMysqlCli(command: string): Classification | null {
   const trimmed = command.trim()
   if (trimmed.length === 0) return null
-
-  // Do not bypass the generic shell classifier for pipelines, substitutions,
-  // redirections or multi-command shell programs.
-  if (/[|&<>`]/.test(trimmed) || /\$\(/.test(trimmed)) return null
 
   const tokens = shellTokens(trimmed)
   if (tokens === null || tokens.length === 0) return null
