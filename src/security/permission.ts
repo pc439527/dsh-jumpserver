@@ -1,10 +1,26 @@
 import type { CommandRisk, PermissionMode } from '../config/types.js'
-import { classifyCommand, isReadOnlyAllowed, type Classification } from './command-classifier.js'
+import { classifyCommand as classifyBaseCommand, type Classification } from './command-classifier.js'
+import { classifyMysqlCli } from './sql-command-classifier.js'
 import { JumpServerError } from '../jumpserver/errors.js'
 
 export type GateDecision =
   | { kind: 'allow' }
   | { kind: 'deny'; code: 'COMMAND_BLOCKED' | 'COMMAND_APPROVAL_REQUIRED'; reason: string }
+
+/**
+ * Authoritative classifier used by permission gates. Database CLIs with a
+ * verified non-interactive SQL form are classified before falling back to the
+ * generic shell classifier. Unknown/ambiguous SQL remains fail-closed.
+ */
+export function classifyCommand(command: string): Classification {
+  return classifyMysqlCli(command) ?? classifyBaseCommand(command)
+}
+
+export function isReadOnlyAllowed(command: string): { allowed: boolean; reason?: string } {
+  const classification = classifyCommand(command)
+  if (classification.risk === 'READ') return { allowed: true }
+  return { allowed: false, reason: classification.reason || 'not a confirmed read-only command' }
+}
 
 /**
  * V0.3.1 permission matrix (single fact source for Agent tools AND the manual
@@ -42,7 +58,6 @@ export function gateDecision(
   }
 }
 
-export { classifyCommand, isReadOnlyAllowed }
 export type { Classification }
 
 export interface TargetVerification {
