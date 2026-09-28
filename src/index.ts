@@ -26,6 +26,7 @@ import { registerCollectionTools } from './tools/inspection.js'
 import { JobStore } from './runtime/job-store.js'
 import { BaselineStore } from './runtime/baseline-store.js'
 import { jumpHomeBaselines, jumpHomeBootMarker, jumpHomeClientTrace, jumpHomeConsole, jumpHomeKnownHosts } from './runtime/paths.js'
+import { readOverlay, writeOverlayPatch } from './runtime/config-store.js'
 import { interruptSession } from './runtime/interrupt.js'
 import { startConsoleServer, type ConsoleHandle } from './runtime/console.js'
 import { OpsCaseRegistry } from './ops/evidence.js'
@@ -104,12 +105,40 @@ export function apply(ctx: Context, config: JumpServerConfig): void {
   // settings change (or a different selected profile) takes effect on the next
   // connect without restarting the Host. The profile wins field by field.
   const getConfig = (): Config => {
-    const cfg = source()
+    // V0.4.2: the settings card writes an explicit overlay file; it wins over
+    // the composed config so the UI can configure the plugin on any DSH build.
+    const cfg = { ...source(), ...readOverlay() } as Config
     const conn = resolveConnection(cfg)
     const knownHostsPath = typeof cfg.knownHostsPath === 'string' && cfg.knownHostsPath.length > 0
       ? cfg.knownHostsPath
       : jumpHomeKnownHosts()
     return { ...cfg, host: conn.host, port: conn.port, username: conn.username, passwordEnv: conn.passwordEnv, knownHostsPath }
+  }
+
+  /** Store a credential value when the host's credential service supports it. */
+  const storeCredential = async (ref: string, value: string): Promise<boolean> => {
+    try {
+      const credentials = ctx.get('credentials') as
+        | { set?: (r: string, v: string) => unknown; write?: (r: string, v: string) => unknown; store?: (r: string, v: string) => unknown }
+        | undefined
+      const write = credentials?.set ?? credentials?.write ?? credentials?.store
+      if (typeof write !== 'function') return false
+      await Promise.resolve(write.call(credentials, ref, value))
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  /** The settings card's read view: effective values, secrets stripped. */
+  const configView = (): { value: Record<string, unknown>; user: Record<string, unknown>; secrets: string[] } => {
+    const cfg = getConfig() as unknown as Record<string, unknown>
+    const { password, ...rest } = cfg
+    return {
+      value: { ...rest, passwordConfigured: typeof password === 'string' && password.length > 0 },
+      user: readOverlay(),
+      secrets: ['password'],
+    }
   }
 
   /** Where the live identity comes from (never the value itself). */
@@ -598,6 +627,13 @@ export function apply(ctx: Context, config: JumpServerConfig): void {
       }
 
       return { ok: false, code: 'NOT_NAVIGABLE', message: '会话状态 ' + st.state + ' 下无法执行人工输入（先连接并进入服务器）', state: st.state, sessionId }
+    },
+    credentialWriteFor: storeCredential,
+    configReadFor: () => configView(),
+    configWriteFor: (patch) => {
+      writeOverlayPatch(patch as Record<string, unknown>)
+      registry.applyScrollback(Math.max(200, getConfig().terminalScrollback))
+      return configView()
     },
     consoleUrlFor: (sessionId) => (sessionId === undefined || sessionId.length === 0 ? consoleUrlFor('') : consoleUrlFor(sessionId)),
     diagFor: (event, detail) => {

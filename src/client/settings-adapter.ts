@@ -157,3 +157,99 @@ export class NamespaceSettingsScope implements JumpServerSettingsScope {
     for (const listener of [...this.listeners]) listener()
   }
 }
+
+/**
+ * Settings scope backed by the plugin's OWN bridge route.
+ *
+ * Used when `connection.api.settings` is not reachable (the activation trace
+ * reports settingsApi:false on the desktop build). The Host merges the file it
+ * writes here into the effective configuration, so this is a real settings
+ * backend — not a read-only stub — and it needs no host service at all.
+ */
+export class BridgeSettingsScope implements JumpServerSettingsScope {
+  private snapshot: Snapshot = { status: 'loading', writable: true }
+  private readonly listeners = new Set<() => void>()
+  private inflight = false
+
+  async refresh(): Promise<void> {
+    if (this.inflight) return
+    this.inflight = true
+    try {
+      const response = await fetch('/api/jumpserver.config', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: '{}',
+      })
+      const body = (await response.json()) as { ok?: boolean; value?: Record<string, unknown>; user?: Record<string, unknown>; code?: string }
+      if (body.ok !== true || body.value === undefined) {
+        this.publish({ status: 'unavailable', writable: false })
+        return
+      }
+      this.publish({ status: 'ready', writable: true, value: body.value, user: body.user ?? {}, revision: Date.now() })
+    } catch {
+      this.publish({ status: 'unavailable', writable: false })
+    } finally {
+      this.inflight = false
+    }
+  }
+
+  getSnapshot(): Snapshot {
+    return this.snapshot
+  }
+
+  subscribe(listener: () => void): () => void {
+    this.listeners.add(listener)
+    void this.refresh()
+    return () => {
+      this.listeners.delete(listener)
+    }
+  }
+
+  set(field: string, value: unknown): Promise<boolean> {
+    return this.patch({ [field]: value })
+  }
+
+  unset(field: string): Promise<boolean> {
+    return this.patch({ [field]: null })
+  }
+
+  /** Store one credential value through the Host credential seam. */
+  async setCredential(ref: string, value: string): Promise<boolean> {
+    try {
+      const response = await fetch('/api/jumpserver.config', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ credential: { ref, value } }),
+      })
+      const body = (await response.json()) as { ok?: boolean; credentialConfigured?: boolean }
+      return body.ok === true
+    } catch {
+      return false
+    }
+  }
+
+  private async patch(patch: Record<string, unknown>): Promise<boolean> {
+    try {
+      const response = await fetch('/api/jumpserver.config', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ patch }),
+      })
+      const body = (await response.json()) as { ok?: boolean; value?: Record<string, unknown>; user?: Record<string, unknown> }
+      if (body.ok !== true) {
+        await this.refresh()
+        return false
+      }
+      this.publish({ status: 'ready', writable: true, value: body.value ?? {}, user: body.user ?? {}, revision: Date.now() })
+      return true
+    } catch {
+      await this.refresh()
+      return false
+    }
+  }
+
+  private publish(next: Snapshot): void {
+    this.snapshot = next
+    for (const listener of [...this.listeners]) listener()
+  }
+}

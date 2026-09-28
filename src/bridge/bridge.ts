@@ -44,6 +44,15 @@ export interface BridgeServices {
   grantedFor: (sessionId: string | undefined) => boolean
   /** V0.4.1: loopback console URL for this conversation (token embedded). */
   consoleUrlFor?: (sessionId: string | undefined) => string | undefined
+  /**
+   * V0.4.2: the plugin's own settings backend. The DSH browser settings seam is
+   * not reachable from this client context, so the settings card reads and
+   * writes the effective configuration through here instead.
+   */
+  configReadFor?: () => { value: Record<string, unknown>; user: Record<string, unknown>; secrets: string[] }
+  configWriteFor?: (patch: Record<string, unknown>) => { value: Record<string, unknown>; user: Record<string, unknown>; secrets: string[] }
+  /** V0.4.2: store one credential through the host credential seam. */
+  credentialWriteFor?: (ref: string, value: string) => Promise<boolean>
   /** Explicitly end SSH and revoke this conversation grant. */
   terminateFor?: (sessionId: string) => Promise<unknown>
   observerFor: (sessionId: string | undefined) => TerminalObserver | null
@@ -307,6 +316,45 @@ export function registerBridgeRoutes(webServer: {
           }
         } catch (error) {
           json(res, 500, { ok: false, code: 'MANUAL_EXEC_FAILED', message: error instanceof Error ? error.message : String(error) })
+        }
+      })()
+    },
+  }))
+
+  disposers.push(webServer.register({
+    kind: 'exact',
+    path: '/api/jumpserver.config',
+    handler: (req, res) => {
+      if (!requirePost(req, res)) return
+      void (async () => {
+        try {
+          const body = await readJsonBody(req)
+          if (services.configReadFor === undefined) {
+            json(res, 501, { ok: false, code: 'NOT_SUPPORTED', message: 'configuration is unavailable' })
+            return
+          }
+          const credential = body.credential as { ref?: unknown; value?: unknown } | undefined
+          if (credential !== undefined && credential !== null && typeof credential === 'object') {
+            const ref = typeof credential.ref === 'string' ? credential.ref : ''
+            const value = typeof credential.value === 'string' ? credential.value : ''
+            const stored = services.credentialWriteFor !== undefined && ref.length > 0 ? await services.credentialWriteFor(ref, value) : false
+            json(res, stored ? 200 : 501, stored
+              ? { ok: true, credentialConfigured: true }
+              : { ok: false, code: 'CREDENTIAL_STORE_UNAVAILABLE', message: 'this host has no writable credential store; set passwordEnv instead' })
+            return
+          }
+          if (body.patch === undefined || body.patch === null || typeof body.patch !== 'object' || Array.isArray(body.patch)) {
+            json(res, 200, { ok: true, ...services.configReadFor() })
+            return
+          }
+          if (services.configWriteFor === undefined) {
+            json(res, 501, { ok: false, code: 'NOT_SUPPORTED', message: 'configuration is read-only' })
+            return
+          }
+          const next = services.configWriteFor(body.patch as Record<string, unknown>)
+          json(res, 200, { ok: true, ...next })
+        } catch (error) {
+          json(res, 500, { ok: false, code: 'CONFIG_FAILED', message: error instanceof Error ? error.message : String(error) })
         }
       })()
     },

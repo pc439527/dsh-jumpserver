@@ -40,6 +40,11 @@ export function jumpHomeBootMarker(): string {
   return join(jumpHomeRoot(), 'boot.json')
 }
 
+/** Editable configuration overlay (settings card backend). */
+export function jumpHomeConfig(): string {
+  return join(jumpHomeRoot(), 'config.json')
+}
+
 /** Browser-half activation trace (JSON lines). */
 export function jumpHomeClientTrace(): string {
   return join(jumpHomeRoot(), 'client-trace.jsonl')
