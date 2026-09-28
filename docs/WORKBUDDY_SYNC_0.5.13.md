@@ -19,7 +19,8 @@ v0.5.5 不可达快速失败 / v0.5.7+5.8 语义风险裁决 / v0.5.9 拒绝审�
 | `errors.ts` `state-machine.ts` `detector.ts` `client.ts` | 同名 | ✅ |
 | `command-status.ts` `host-key.ts` `concurrency.ts` | 新增同名 | ✅ |
 | `session.ts` `session-manager.ts` | 同名 | ✅ |
-| `host-parse.ts` `profiles.ts` `topology.ts` `inspector.ts` `compare.ts` `runbook.ts` | 新增同名 | 🔜 模块已移植，工具未接线 |
+| `host-parse.ts` `profiles.ts` `topology.ts` `inspector.ts` `runbook.ts` | 新增同名 | ✅ 已接成 inspect / topology / profile_run / baseline_* 工具 |
+| `compare.ts` | 新增同名 | 🔜 已移植，待替换 DSH 现有 `jumpserver_compare`（ops 统一） |
 | `asset-list.ts` `command-runner.ts` `mutex.ts` `output-buffer.ts` `probe.ts` `session-registry.ts` `terminal-observer.ts` `timing.ts` | 同名 | ✅（本就一致，无需改动） |
 
 ### security/
@@ -27,15 +28,16 @@ v0.5.5 不可达快速失败 / v0.5.7+5.8 语义风险裁决 / v0.5.9 拒绝审�
 |---|---|---|
 | `audit.ts` `command-classifier.ts` `sql-command-classifier.ts` `permission.ts` | 同名 | ✅ |
 | `target-scope.ts` | 新增 | ✅ 已在 enter/run/batch/exec/人工进入 前强制执行 |
-| `risk-judge.ts` | 新增 | 🔜 模块已移植，未接入 permission-gate |
-| `permission-gate.ts` | 同名 | 🔜 已接 target scope；risk judge / 拒绝审计接线待做 |
+| `risk-judge.ts` | 新增 | ✅ 已接入 permission-gate（advisory + autoAllow + 审计行） |
+| `permission-gate.ts` | 同名 | ✅ target scope + risk judge + BLOCKED/DENIED 拒绝审计 |
 | `command-redaction.ts` `grant.ts` | 同名 | ✅ |
 
 ### runtime/（DSH 侧新建，WB 的 runtime/* 是 MCP/控制台专有）
 | WB 模块 | DSH 落点 | 状态 |
 |---|---|---|
-| `job-store.ts` `interrupt.ts` `time.ts` `baseline-store.ts` | `src/runtime/` 同名 | ✅ job 已接线；baseline 待接线 |
+| `job-store.ts` `interrupt.ts` `time.ts` `baseline-store.ts` | `src/runtime/` 同名 | ✅ job 与 baseline 均已接线并测试 |
 | `asset-store.ts` `topology-store.ts` | `src/runtime/` 同名 | 🔜 供侧栏用，待接线 |
+| `paths.ts`（DSH 新建） | `src/runtime/paths.ts` | ✅ 插件状态落在 `<dsh home>/jumpserver/` |
 | `audit-store.ts`（JSONL） | — | ⛔ DSH 用 `storageDomain`（见 §3） |
 | `audit-viewer.ts`（HTTP 控制台） | — | ⛔ DSH 由 better-sidebar 承担 |
 | `doctor.ts` `config-guard.ts` `profile-store.ts` `credential-vault.ts` `console-*` `session-scope.ts` `tool-host.ts` `runtime.ts` `tools-common.ts` `tools-ops.ts` `progress.ts` | — | ⛔ MCP/WorkBuddy 专有（等价能力见 §3） |
@@ -52,17 +54,17 @@ v0.5.5 不可达快速失败 / v0.5.7+5.8 语义风险裁决 / v0.5.9 拒绝审�
 | 工具 | 状态 |
 |---|---|
 | `jumpserver_status`（+ connection provenance / missing） | ✅ |
-| `jumpserver_enter/run/batch`（+ `accountIndex` / `accountByTarget` 待批量工具） | ✅ 单目标 accountIndex 已接 |
+| `jumpserver_enter/run/batch`（+ `accountIndex` / `accountByTarget`） | ✅ 已接 |
 | `jumpserver_exec`（+ target scope 复核） | ✅ |
 | `jumpserver_interrupt` `jumpserver_job_start` `jumpserver_job_read` `jumpserver_job_stop` `jumpserver_jobs` `jumpserver_snapshot` | ✅ 新增并测试 |
-| `jumpserver_inspect` `jumpserver_topology` `jumpserver_profile_run` `jumpserver_baseline_capture` `jumpserver_baseline_compare` | ⏳ 模块已就绪，待注册 |
+| `jumpserver_inspect` `jumpserver_topology` `jumpserver_profile_run` `jumpserver_baseline_capture` `jumpserver_baseline_compare` | ✅ 已注册并测试（含 `accountByTarget`） |
 | `jumpserver_audit`（对话内读审计） | ⏳ |
 | `jumpserver_triage/compare/case/remediate`（DSH 独有 ops） | ⏳ 待按"以 WB inspector 为事实源"统一 |
 | `jumpserver_console_rotate_token` `jumpserver_arm/disarm` | ⛔ DSH 无控制台令牌；DSH 的 `/jumpserver` 会话授权更强 |
 
 ## 2. 已完成并验证（本分支）
 
-三个提交，每个都通过 `npm run typecheck`（host+client）与 `npx vitest run`（376/376）：
+五个功能提交，每个都通过 `npm run typecheck`（host+client）与 `npx vitest run`（当前 387/387）：
 
 1. `2ce3924e4` 核心移植：传输层（账号选择 / 不可达冷却 / commandStatus / job PTY 归属 /
    sessionGate / 拒绝审计）、安全层（10 个新错误码、classifier 扩充、hdbsql+SAP、
@@ -73,6 +75,12 @@ v0.5.5 不可达快速失败 / v0.5.7+5.8 语义风险裁决 / v0.5.9 拒绝审�
    与缺失项诊断、多账号 `profiles`。
 3. `91d832683` 流式任务：`jumpserver_job_*` / `interrupt` / `snapshot` 六个工具 +
    `tests/jobs.test.ts`（游标读、单次 Ctrl+C、幂等 stop、按对话隔离、关闭后 LOST）。
+
+4. `75ac07f0d` 采集工具面：`inspect` / `topology` / `profile_run` / `baseline_capture` / `baseline_compare`
+   五个工具 + `accountByTarget` + baseline 落盘到 DSH home；顺带把 WB 源码里两个字符串字面量中的原始
+   NUL 字节换成 `\u0000` 转义（运行值不变，文件恢复为纯文本）。
+5. `62dba538d` 风险裁决与拒绝审计：advisory judge（仅 UNKNOWN 外发）、opt-in autoAllow、
+   BLOCKED/DENIED 各恰好一条审计、`riskJudge` 贯通 exec/run/batch/job_start 结果。
 
 顺带修掉两个**基线就存在的**陈旧测试：`tests/bridge-security.test.ts` 的快照长轮询
 （`sinceSeq: 1` vs 轮询桩 `cursorSeq: 1`，永远挂到 12 s）与三处已被 v0.5.5 语义取代的期望
@@ -90,31 +98,24 @@ v0.5.5 不可达快速失败 / v0.5.7+5.8 语义风险裁决 / v0.5.9 拒绝审�
 
 ## 4. 剩余工作（按优先级）
 
-1. **采集工具集（Phase 3）** — 注册 `inspect` / `topology` / `profile_run` /
-   `baseline_capture` / `baseline_compare`；把 `accountByTarget` 接到这些多目标工具；
-   `baseline-store` 落盘改到 `~/.dsh/jumpserver/baselines/`；渲染器复用
-   `renderInventory` / `renderTopology` / `renderRunbook` / `renderDrift`（需改写为 DSH
-   `output.render` 签名）。
-2. **ops 统一** — `jumpserver_triage` 改用 `inspector` 的固定只读探针 + `host-parse` 的
-   `HostInventory`，证据仍进 `EvidenceLedger`；`jumpserver_compare` 换成 `compareTargets`；
-   `jumpserver_remediate` 预检复用 `inspector`；删除 `src/ops/{profiles,collect}.ts` 的重复度量逻辑。
-3. **风险裁决接入（Phase 5）** — `permission-gate` 增加 `judgeUnknown` / `applyJudge` /
-   `judgeAutoAllowNote` / `recordRefusal`，审批文案带上裁决行；`autoAllow` 默认关闭。
-4. **`jumpserver_audit`** — 对话内读审计环形（带 `why=` 拒绝原因列）。
-5. **桥接与侧栏（Phase 6）** — `/api/jumpserver.jobs` / `.jobStop` / `.interrupt` 路由 +
-   侧栏"任务"标签；审计标签渲染拒绝记录；`PROTOCOL_VERSION` +1。
-6. **测试移植（Phase 7）** — 把 WB 的 `node:test .mjs` 用例转成 vitest：`host-parse` /
-   `runbook` / `compare` / `topology` / `concurrency` / `enter-unreachable` /
-   `session-account-selection` / `host-key` / `baseline` / `target-scope` /
-   `refusal-audit` / `job-start-gate` / `risk-judge(+autoallow)`；新增 context-budget 测试。
-7. **文档与版本** — README 工具表/权限矩阵重写；`package.json` → 0.4.0；
+1. **ops 统一（Phase 3b）** — `jumpserver_triage` 改用 `inspector` 的固定只读探针 + `host-parse` 的
+   `HostInventory`（证据仍进 `EvidenceLedger`）；`jumpserver_compare` 换成 `compareTargets`
+   （分组 + 多重集 outlier，失败主机保留自身错误码）；`jumpserver_remediate` 预检复用 `inspector`；
+   删除 `src/ops/{profiles,collect}.ts` 的重复度量逻辑，保留 case/证据账本。
+2. **`jumpserver_audit`** — 对话内读审计环形（带 `why=` 拒绝原因列），并把 `auditFor` 接到工具层。
+3. **桥接与侧栏（Phase 6）** — `/api/jumpserver.jobs` / `.jobStop` / `.interrupt` 路由 +
+   侧栏「任务」标签；审计标签渲染 `refusalReason`（已拦截 / 未批准）；`PROTOCOL_VERSION` +1。
+4. **测试移植（Phase 7）** — 把 WB 的 `node:test .mjs` 用例转成 vitest：`host-parse` / `runbook` /
+   `topology` / `concurrency` / `enter-unreachable` / `session-account-selection` / `host-key` /
+   `target-scope` / `job-start-gate`；新增 context-budget 测试（注册工具 schema < 40 KB）。
+5. **文档与版本** — README 工具表/权限矩阵重写（现为 22 个工具）；`package.json` → 0.4.0；
    `PLUGIN_VERSION` 同步；`PROTOCOL_VERSION` +1；`tests/version-consistency` 覆盖 README 工具表。
 
 ## 5. 验证入口
 
 ```bash
 npm run typecheck          # host + client
-npx vitest run             # 376/376（新增 tests/jobs.test.ts）
+npx vitest run             # 387/387（新增 jobs / inspection-tools / risk-judge-gate）
 node scripts/classifier-report.mjs
 npm run build && npm run smoke:client && node scripts/sync-profile.mjs
 ```
