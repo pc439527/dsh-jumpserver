@@ -1,9 +1,10 @@
 import { defineTool, type ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { Context } from '@deepseek-ai/cordis'
-import type { JumpServerConfig } from '../config/types.js'
+import { resolveConnection, type JumpServerConfig } from '../config/types.js'
 import { AbortRequestedError, JumpServerError } from '../jumpserver/errors.js'
 import type { SessionRegistry } from '../jumpserver/session-registry.js'
 import { gateCommand, gateCommandForNavigation, gateCommandsForNavigation, type GateServices } from '../security/permission-gate.js'
+import { requireTargetAllowed } from '../security/target-scope.js'
 import { JUMPSERVER_NOT_ARMED, NOT_ARMED_MESSAGE, type SessionGrant } from '../security/grant.js'
 import type { BatchCommandRequest, TargetBatchResult } from '../jumpserver/session-manager.js'
 import { runtimeVersion } from '../version.js'
@@ -87,7 +88,28 @@ export function registerJumpServerTools(ctx: Context, registry: SessionRegistry,
             const blocked = requireGrant(grants, exec)
             if (blocked !== null) return blocked
             const bundle = bundleFor(exec, registry)
-            return { ...statusToValue(bundle.manager.status()), ...runtimeVersion() }
+            // V0.5.2/V0.5.11: "what is missing" and "where did this identity
+            // come from" must be answerable without reading a config file — and
+            // never by printing a credential value.
+            const cfg = getConfig()
+            const conn = resolveConnection(cfg)
+            const missing: string[] = []
+            if (!cfg.host) missing.push('host')
+            if (!cfg.username) missing.push('username')
+            return {
+              ...statusToValue(bundle.manager.status()),
+              ...runtimeVersion(),
+              connectionComplete: missing.length === 0,
+              connectionMissing: missing,
+              credentialSource: conn.source,
+              ...(conn.profileLabel !== undefined
+                ? { credentialSourceDetail: conn.profileLabel }
+                : conn.profileId !== undefined
+                  ? { credentialSourceDetail: conn.profileId }
+                  : {}),
+              hostSource: conn.source,
+              usernameSource: conn.source,
+            }
           })
         },
       }),
@@ -123,6 +145,10 @@ export function registerJumpServerTools(ctx: Context, registry: SessionRegistry,
           'Enter a target asset THROUGH THE JumpServer menu for your conversation by its IP/name. Requires the conversation session to be at the JumpServer menu. Internally runs a target probe (hostname/whoami/pwd) and only reports the asset as entered after verification succeeds.',
         parameters: {
           target: { type: 'string', required: true, description: 'Target asset IP or name, e.g. 203.0.113.101' },
+          accountIndex: {
+            type: 'number',
+            description: 'V0.5.3: the account ID KoKo shows at its ID> prompt when the target has several authorised bastion users (use the exact number on screen, usually 1 or 2). Omit it and the call fails with ACCOUNT_SELECTION_REQUIRED carrying the parsed list, while the session stays live so the next call answers the SAME prompt without reconnecting.',
+          },
         },
         output: { schema: RESULT_SCHEMA, render: renderResult },
         async execute(args, exec) {
@@ -130,7 +156,11 @@ export function registerJumpServerTools(ctx: Context, registry: SessionRegistry,
             const blocked = requireGrant(grants, exec)
             if (blocked !== null) return blocked
             const bundle = bundleFor(exec, registry)
-            const status = await bundle.manager.enter(args.target, undefined, exec.signal)
+            // V0.4.2: scope check BEFORE navigation - a denied target must never
+            // get an SSH/PTY session opened against it.
+            requireTargetAllowed(getConfig(), args.target)
+            const accountIndex = typeof args.accountIndex === 'number' ? args.accountIndex : undefined
+            const status = await bundle.manager.enter(args.target, accountIndex, exec.signal)
             return statusToValue(status)
           })
         },
@@ -200,6 +230,9 @@ export function registerJumpServerTools(ctx: Context, registry: SessionRegistry,
             if (blocked !== null) return blocked
             const bundle = bundleFor(exec, registry)
             const services: GateServices = { getConfig, manager: bundle.manager, approval: ctx.get('approval') }
+            // V0.4.0: the scope guard also applies to commands run against an
+            // asset that was entered before the scope was narrowed.
+            requireTargetAllowed(getConfig(), bundle.manager.status().target ?? '')
             const gated = await gateCommand(services, exec, args.command)
             const timeoutMs = args.timeout !== undefined ? Math.max(1, args.timeout) * 1000 : undefined
             const { status, outcome } = await bundle.manager.exec({
@@ -228,6 +261,10 @@ export function registerJumpServerTools(ctx: Context, registry: SessionRegistry,
           target: { type: 'string', required: true, description: 'Target asset IP or name, e.g. 203.0.113.101' },
           command: { type: 'string', required: true, description: 'Shell command to execute on the remote asset' },
           timeout: { type: 'number', description: 'Timeout in seconds for this command (default: configured command timeout, max 600)' },
+          accountIndex: {
+            type: 'number',
+            description: 'V0.5.3: the account ID KoKo shows at its ID> prompt when the target has several authorised bastion users. See jumpserver_enter.',
+          },
         },
         output: { schema: RESULT_SCHEMA, render: renderResult },
         timeoutMs: 605000,
@@ -236,6 +273,7 @@ export function registerJumpServerTools(ctx: Context, registry: SessionRegistry,
             const blocked = requireGrant(grants, exec)
             if (blocked !== null) return blocked
             const bundle = bundleFor(exec, registry)
+            requireTargetAllowed(getConfig(), args.target)
             const services: GateServices = { getConfig, manager: bundle.manager, approval: ctx.get('approval') }
             const gated = await gateCommandForNavigation(services, exec, args.command)
             const timeoutMs = args.timeout !== undefined ? Math.max(1, args.timeout) * 1000 : undefined
@@ -249,6 +287,7 @@ export function registerJumpServerTools(ctx: Context, registry: SessionRegistry,
               approvalResult: gated.approvalRequired ? 'approved' : 'none',
               signal: exec.signal,
               beforeExec: gated.beforeExec,
+              accountIndex: typeof args.accountIndex === 'number' ? args.accountIndex : undefined,
             })
             const { target, hostname, status, outcome } = result
             const value = execOutcomeToValue(status, outcome)
@@ -276,6 +315,10 @@ export function registerJumpServerTools(ctx: Context, registry: SessionRegistry,
               additionalProperties: false,
               properties: {
                 target: { type: 'string', required: true, description: 'Target asset IP or name, e.g. 203.0.113.101' },
+                accountIndex: {
+                  type: 'number',
+                  description: 'V0.5.3: per-task account ID for KoKo multi-user assets (see jumpserver_enter).',
+                },
                 commands: {
                   type: 'array',
                   required: true,
@@ -315,6 +358,9 @@ export function registerJumpServerTools(ctx: Context, registry: SessionRegistry,
                 continue
               }
               try {
+                // V0.4.2: a denied / out-of-scope target is refused before any
+                // navigation, exactly like the single-target tools.
+                requireTargetAllowed(getConfig(), target)
                 // V0.3.2: classify the whole target batch together. Routine READ
                 // commands stay prompt-free; 2-10 approval-required commands can
                 // share one explicit prompt that lists every command.
@@ -354,6 +400,7 @@ export function registerJumpServerTools(ctx: Context, registry: SessionRegistry,
                   target,
                   commands: commandRequests,
                   signal: exec.signal,
+                  accountIndex: typeof task['accountIndex'] === 'number' ? (task['accountIndex'] as number) : undefined,
                 })
                 executed.push(result)
               } catch (error) {
