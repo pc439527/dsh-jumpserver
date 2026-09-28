@@ -1,6 +1,6 @@
 {
   "name": "dsh-jumpserver",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "JumpServer (KoKo) bastion connector for DeepSeek Harness: /jumpserver session-grant security, one SSH/PTY session PER conversation, menu/asset state machine, target verification, permission-gated Agent commands, audited human sidebar input, target-affinity batch execution, asset discovery with payload-phase capture + KoKo footer verification + verified-parse-health caching (refresh supported), FD-redirection-aware READ_ONLY classification, timeout recovery with shell re-verification, V0.3.0 Ops Investigation (triage/compare/case/remediate + evidence ledger + RCA report), ANSI/VT100 terminal sanitizing, and dsh-better-sidebar integration.",
   "type": "module",
   "main": "lib/index.js",

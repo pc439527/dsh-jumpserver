@@ -349,6 +349,19 @@ function indent(text: string, spaces: number): string {
   return text.split('\n').map((l) => pad + l).join('\n')
 }
 
+/**
+ * V0.5.3: per-target KoKo account id, e.g. {"192.168.79.10": 1}. Unknown or
+ * non-integer entries are dropped rather than guessed.
+ */
+export function accountMap(raw: unknown): Record<string, number> | undefined {
+  if (raw === null || typeof raw !== 'object') return undefined
+  const out: Record<string, number> = {}
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof value === 'number' && Number.isInteger(value) && value >= 0) out[key] = value
+  }
+  return Object.keys(out).length > 0 ? out : undefined
+}
+
 /** Upper bound for the optional rawText passthrough (keeps model context slim). */
 const MAX_RAW_TEXT_CHARS = 16384
 

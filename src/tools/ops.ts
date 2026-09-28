@@ -19,10 +19,12 @@ import type { SessionRegistry } from '../jumpserver/session-registry.js'
 import { JUMPSERVER_NOT_ARMED, NOT_ARMED_MESSAGE, type SessionGrant } from '../security/grant.js'
 import { classifyCommand } from '../security/command-classifier.js'
 import { redactCommandSecrets } from '../security/command-redaction.js'
-import { trustedRead } from '../ops/collect.js'
 import type { OpsCaseRegistry } from '../ops/evidence.js'
-import { compareCommands, deriveFindings, metricsOf, runProfileSweep, type CollectedCommand } from '../ops/collect.js'
-import { bundleFor, guardValue, sessionIdOf, type ResultValue } from './common.js'
+import { deriveFindings, runProfileSweep, type CollectedCommand } from '../ops/collect.js'
+import { compareTargets } from '../jumpserver/compare.js'
+import { resolveConcurrency } from '../config/types.js'
+import { requireTargetAllowed } from '../security/target-scope.js'
+import { accountMap, bundleFor, guardValue, renderResult, sessionIdOf, type ResultValue } from './common.js'
 
 const CMD_EXCERPT = 200
 
@@ -74,6 +76,8 @@ const OPS_SCHEMA = {
     evidence: { type: 'array', items: { type: 'string' } },
     targets: { type: 'array', items: { type: 'string' } },
     metrics: { type: 'object', additionalProperties: true },
+    groups: { type: 'array', items: { type: 'object', additionalProperties: true } },
+    outliers: { type: 'array', items: { type: 'object', additionalProperties: true } },
     rollbackSuggested: { type: 'array', items: { type: 'string' } },
     commands: {
       type: 'array',
@@ -208,15 +212,21 @@ export function registerOpsTools(
       defineTool({
         name: 'jumpserver_compare',
         description:
-          'Compare consistently-normalized metrics across 2-4 targets through JumpServer: hostname, load1 (uptime), memory % (free -m), root-disk % (df -h /), running app process count, and error-window line count. Flags deviating nodes (load/mem/disk thresholds, process-count imbalance, any error lines) and returns a diff table + evidence ids. All commands are pre-audited READ commands.',
+          'Run the SAME read-only command (or inspect profile) on 2-20 targets through JumpServer and report the DIFF: identical outputs collapse into one group and every deviating target is listed with the exact lines it is MISSING or has EXTRA (order-insensitive, multiset-aware, so ss/ps ordering never fakes a difference). Use it to answer "which node is different" across a fleet — config drift, a package only one host has, a service listening somewhere else. Pass exactly one of command / profile (default profile=basic). Failed targets keep their own error code and are excluded from the diff. Evidence lands in the conversation\'s case ledger.',
         parameters: {
           targets: {
             type: 'array',
             required: true,
-            description: 'Two to four target IPs/names, e.g. ["203.0.113.101","203.0.113.102"]',
+            description: 'Two to twenty target IPs/names, e.g. ["203.0.113.101","203.0.113.102"]',
             items: { type: 'string' },
           },
-          since: { type: 'string', description: "Error-window for journalctl, e.g. '30m', default '30m'" },
+          command: { type: 'string', description: 'One simple read-only command to run on every target, e.g. "ss -lntp"' },
+          profile: { type: 'string', description: 'Inspect profile to run on every target: basic (default) / network / process / service / web / java / database / container / full' },
+          accountByTarget: {
+            type: 'object',
+            additionalProperties: true,
+            description: 'V0.5.3: per-target KoKo account id for multi-user assets, e.g. {"192.168.79.10": 1}.',
+          },
         },
         output: { schema: OPS_SCHEMA, render: renderOps },
         timeoutMs: 1800000,
@@ -229,62 +239,63 @@ export function registerOpsTools(
             const rawTargets = Array.isArray(args.targets) ? args.targets.map((t) => String(t).trim()).filter((t) => t.length > 0) : []
             const targets = [...new Set(rawTargets)]
             if (targets.length < 2) return { ok: false, code: 'INVALID_COMPARE', message: 'compare requires at least two targets' }
-            if (targets.length > 4) return { ok: false, code: 'INVALID_COMPARE', message: 'compare supports at most four targets' }
-            const since = typeof args.since === 'string' ? args.since : undefined
+            if (targets.length > 20) return { ok: false, code: 'INVALID_COMPARE', message: 'compare supports at most twenty targets' }
+            const command = typeof args.command === 'string' && args.command.trim().length > 0 ? args.command : undefined
+            const profile = typeof args.profile === 'string' && args.profile.trim().length > 0 ? args.profile : undefined
+            if (command !== undefined && profile !== undefined) {
+              return { ok: false, code: 'INVALID_COMPARE', message: 'pass either command or profile, not both' }
+            }
+            for (const target of targets) requireTargetAllowed(getConfig(), target)
             let c = cases.current(sessionId)
             if (c === undefined) c = cases.newCase(sessionId, { title: 'Compare: ' + targets.join(' vs '), servers: targets })
+            // V0.4.1: one shared implementation (path-identical to jumpserver-mcp):
+            // order-insensitive grouping + multiset outliers, failed hosts excluded
+            // but keeping their own error code.
+            const result = await compareTargets(bundle.manager, getConfig, {
+              targets,
+              ...(command !== undefined ? { command } : { profile: profile ?? 'basic' }),
+              signal: exec.signal,
+              concurrency: resolveConcurrency(getConfig()).batchConcurrency,
+              accountByTarget: accountMap(args.accountByTarget),
+            })
             const evidence: string[] = []
-            const metricValues: Record<string, Record<string, number | string | null>> = {}
             const failures: string[] = []
-            for (const target of targets) {
-              if (exec.signal.aborted === true) throw new AbortRequestedError()
-              const plan = compareCommands(since ?? '30m')
-              const batch = await bundle.manager.runTargetBatch({
-                target,
-                commands: plan.map((cmd) => trustedRead(cmd.command)),
-                signal: exec.signal,
-              })
-              if (batch.error !== null) {
-                failures.push(target + ': ' + batch.error.code + ' ' + batch.error.message)
+            for (const target of result.results) {
+              if (target.error !== null) {
+                failures.push(target.target + ': ' + target.error.code + ' ' + target.error.message)
                 continue
               }
-              const collected: CollectedCommand[] = plan.map((p, i) => {
-                const r = batch.commands[i]
-                return {
-                  command: p.command,
-                  category: p.category,
-                  label: p.label ?? null,
-                  exitCode: r?.exitCode ?? null,
-                  output: r?.output ?? '',
-                  truncated: r?.truncated ?? false,
-                  error: r?.error ?? null,
-                }
-              })
-              for (const cmd of collected) {
-                evidence.push(cases.appendEvidence(sessionId, evidenceInput('compare', target, batch.hostname, cmd)).id)
-              }
-              const metrics = metricsOf(collected)
-              const keys = ['hostname', 'load1', 'memPct', 'diskRootPct', 'procCount', 'errorCount']
-              for (const key of keys) {
-                metricValues[key] = metricValues[key] ?? {}
-                metricValues[key]![target] = (metrics as unknown as Record<string, number | string | null>)[key] ?? null
-              }
+              evidence.push(cases.appendEvidence(sessionId, {
+                kind: 'compare',
+                target: target.target,
+                hostname: target.hostname,
+                category: result.source,
+                command: result.source,
+                exitCode: target.exitCode,
+                output: target.lines.join('\n'),
+                truncated: target.truncated,
+              }).id)
             }
-            if (Object.keys(metricValues).length === 0) {
-              return { ok: false, code: 'COMPARE_FAILED', message: failures.join('; ') }
-            }
+            // groupBySignature reports the minority targets twice: once as the
+            // majority group's outliers and once inside their own block. The
+            // actionable projection is the majority comparison — each deviating
+            // target listed ONCE with what it is missing / has extra.
+            const outliers = (result.groups[0]?.outliers ?? []).map((o) => ({ target: o.target, missing: o.missing, extra: o.extra }))
+            const findings = result.distinct <= 1
+              ? ['所有目标输出一致（' + String(result.succeeded) + ' 台）']
+              : outliers.map((o) => o.target + ' 与多数派不同：缺少 ' + String(o.missing.length) + ' 行，多出 ' + String(o.extra.length) + ' 行')
             return {
-              ok: failures.length === 0,
-              code: failures.length > 0 ? 'COMPARE_PARTIAL' : undefined,
-              message: failures.length > 0 ? failures.join('; ') : undefined,
+              ok: result.failed === 0,
+              ...(result.failed > 0 ? { code: 'COMPARE_PARTIAL', message: failures.join('; ') } : {}),
               target: targets.join(','),
               caseId: c.id,
-              profiles: ['compare'],
-              findings: diffMetrics(metricValues, targets),
+              profiles: [result.source],
+              findings,
               evidence,
-              commands: [],
               targets,
-              metrics: metricValues,
+              metrics: { distinct: result.distinct, succeeded: result.succeeded, failed: result.failed },
+              groups: result.groups.map((group) => ({ signatureLines: group.signature.length, signature: group.signature.slice(0, 20), members: group.outliers.length })),
+              outliers,
             }
           })
         },
@@ -545,41 +556,6 @@ export function registerOpsTools(
   return disposers
 }
 
-/** Flag deviating targets per metric (threshold + cohort rules). */
-function diffMetrics(metricValues: Record<string, Record<string, number | string | null>>, targets: string[]): string[] {
-  const out: string[] = []
-  const num = (key: string): Array<{ target: string; value: number }> =>
-    Object.entries(metricValues[key] ?? {})
-      .filter((entry): entry is [string, number] => typeof entry[1] === 'number' && Number.isFinite(entry[1]))
-      .map(([target, value]) => ({ target, value }))
-
-  const load = num('load1')
-  if (load.length >= 2) {
-    const max = Math.max(...load.map((l) => l.value))
-    const min = Math.min(...load.map((l) => l.value))
-    for (const l of load) {
-      if (l.value >= 4) out.push('load1 ' + l.value + ' on ' + l.target + ' (busy)')
-      else if (max > 0 && min > 0 && max / min >= 3) out.push('load1 imbalance: ' + l.target + '=' + l.value + ' vs cohort ' + min + '..' + max)
-    }
-  }
-  for (const m of num('memPct')) {
-    if (m.value >= 90) out.push('memory ' + m.value + '% on ' + m.target + ' (>=90%)')
-  }
-  for (const d of num('diskRootPct')) {
-    if (d.value >= 85) out.push('root disk ' + d.value + '% on ' + d.target + ' (>=85%)')
-  }
-  const proc = num('procCount')
-  if (proc.length >= 2) {
-    const max = Math.max(...proc.map((p) => p.value))
-    for (const p of proc) {
-      if (max > 0 && p.value < max / 2) out.push('app process count ' + p.value + ' on ' + p.target + ' (busiest ' + max + ')')
-    }
-  }
-  for (const e of num('errorCount')) {
-    if (e.value > 0) out.push('error lines ' + e.value + ' on ' + e.target)
-  }
-  return out
-}
 
 function planToText(target: string, pre: CollectedCommand[], change: string[], rollback: string[], postCheck: string[]): string {
   const lines: string[] = []

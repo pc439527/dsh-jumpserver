@@ -29,7 +29,7 @@ import { resolveRunbook, runRunbook } from '../jumpserver/runbook.js'
 import { requireTargetAllowed } from '../security/target-scope.js'
 import { BaselineStore, diffBaseline, type Baseline, type BaselineHost } from '../runtime/baseline-store.js'
 import type { HostInventory } from '../jumpserver/host-parse.js'
-import { bundleFor, guardValue, renderResult, sessionIdOf, type ResultValue } from './common.js'
+import { accountMap, bundleFor, guardValue, renderResult, sessionIdOf, type ResultValue } from './common.js'
 
 const MAX_TARGETS = 20
 const MAX_EDGES = 200
@@ -92,16 +92,6 @@ function profileList(raw: unknown): string[] | undefined {
   if (typeof raw !== 'string') return undefined
   const names = raw.split(/[,\s]+/).map((n) => n.trim()).filter((n) => n.length > 0)
   return names.length > 0 ? names : undefined
-}
-
-/** V0.5.3: per-target KoKo account id, e.g. {"192.168.79.10": 1}. */
-function accountMap(raw: unknown): Record<string, number> | undefined {
-  if (raw === null || typeof raw !== 'object') return undefined
-  const out: Record<string, number> = {}
-  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
-    if (typeof value === 'number' && Number.isInteger(value) && value >= 0) out[key] = value
-  }
-  return Object.keys(out).length > 0 ? out : undefined
 }
 
 /** Project a full HostInventory down to the compact, model-facing shape. */

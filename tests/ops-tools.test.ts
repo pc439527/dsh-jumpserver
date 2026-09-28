@@ -149,53 +149,70 @@ describe('V0.3.0 jumpserver_triage (auto detect -> nginx profile)', () => {
   })
 })
 
-describe('V0.3.0 jumpserver_compare', () => {
-  const memHigh = '             total        used        free      shared  buff/cache   available\nMem:          15952       14820         300          12         832         900\nSwap:         8192         100        8092\n'
-  const memLow = '             total        used        free      shared  buff/cache   available\nMem:          15952        3100       10000         12        2000       12500\nSwap:         8192           0        8192\n'
-  const dfHigh = 'Filesystem      Size  Used Avail Use% Mounted on\n/dev/sda1        50G   45G  3.3G  94% /\n'
-  const dfLow = 'Filesystem      Size  Used Avail Use% Mounted on\n/dev/sda1        50G   10G   37G  22% /\n'
+describe('V0.4.1 jumpserver_compare (grouped output diff)', () => {
+  /** Wire one target: enter + probe + one command + leave back to the menu. */
+  function queueTarget(wire: FakeWire, target: string, output: string): void {
+    wire.queue((w: string) => (w.startsWith(target) ? ASSET_PROMPT : undefined))
+    wire.queue((w: string) => probeReply(w))
+    wire.queue(replyWith(output))
+    wire.queue(KOKO_MENU)
+  }
 
-  it('normalizes metrics per target and flags deviating nodes', async () => {
+  it('groups identical output and reports the deviating target with its extra lines', async () => {
     const wire = new FakeWire()
     const h = makeOpsHarness(wire)
     setTimeout(() => wire.emit(KOKO_MENU), 20)
-    // target A
-    wire.queue((w: string) => (w.startsWith('203.0.113.101') ? ASSET_PROMPT : undefined))
-    wire.queue((w: string) => probeReply(w))
-    wire.queue(replyWith('node-a\n'))          // hostname
-    wire.queue(replyWith(' 10:00:00 up 13 days,  load average: 1.02, 0.98, 0.95\n')) // uptime
-    wire.queue(replyWith(memHigh))              // free -m -> 94%
-    wire.queue(replyWith(dfHigh))               // df -> 94%
-    wire.queue(replyWith('5\n'))               // app process count
-    wire.queue(replyWith('37\n'))              // error lines
-    // leave A -> enter B
-    wire.queue(KOKO_MENU)
-    wire.queue((w: string) => (w.startsWith('203.0.113.102') ? ASSET_PROMPT : undefined))
-    wire.queue((w: string) => probeReply(w))
-    wire.queue(replyWith('node-b\n'))
-    wire.queue(replyWith(' 10:00:00 up 13 days,  load average: 1.05, 0.99, 0.96\n'))
-    wire.queue(replyWith(memLow))
-    wire.queue(replyWith(dfLow))
-    wire.queue(replyWith('2\n'))               // app process count (half of A)
-    wire.queue(replyWith('0\n'))
+    // Two identical hosts form the majority; the third carries one EXTRA line.
+    queueTarget(wire, '203.0.113.101', 'LISTEN 0 128 0.0.0.0:80 0.0.0.0:*\n')
+    queueTarget(wire, '203.0.113.102', 'LISTEN 0 128 0.0.0.0:80 0.0.0.0:*\n')
+    queueTarget(wire, '203.0.113.103', 'LISTEN 0 128 0.0.0.0:80 0.0.0.0:*\nLISTEN 0 128 0.0.0.0:8080 0.0.0.0:*\n')
     h.grants.arm('conversation-A', 'persistent')
     const value = await toolOf(h.defs, 'jumpserver_compare').execute(
-      { targets: ['203.0.113.101', '203.0.113.102'] },
+      { targets: ['203.0.113.101', '203.0.113.102', '203.0.113.103'], command: 'ss -lntp' },
       h.execFor('conversation-A'),
     )
     expect(value.ok).toBe(true)
-    const findings = (value.findings as string[]) ?? []
-    expect(findings).toEqual(expect.arrayContaining([
-      expect.stringContaining('memory 94% on 203.0.113.101'),
-      expect.stringContaining('root disk 94% on 203.0.113.101'),
-      expect.stringContaining('error lines 37 on 203.0.113.101'),
-      expect.stringContaining('app process count 2 on 203.0.113.102'),
-    ]))
-    const metrics = value.metrics as Record<string, Record<string, number>>
-    expect(metrics['memPct']!['203.0.113.101']).toBe(94)
-    expect(metrics['procCount']!['203.0.113.102']).toBe(2)
-    expect((value.evidence as string[]).length).toBe(12)
+    // Two distinct line-sets: the majority is the shared :80 line, so :8080 is
+    // an EXTRA line on 102 — order-insensitive, multiset-aware.
+    expect((value.metrics as Record<string, number>)['distinct']).toBe(2)
+    const outliers = value.outliers as Array<Record<string, unknown>>
+    expect(outliers).toHaveLength(1)
+    expect(outliers[0]!['target']).toBe('203.0.113.103')
+    expect((outliers[0]!['extra'] as string[]).join(' ')).toContain('8080')
+    expect((value.findings as string[])[0]).toContain('203.0.113.103')
     expect(value.caseId).toBe('CASE-001')
+    // One evidence record per reachable target.
+    expect((value.evidence as string[]).length).toBe(3)
+  })
+
+  it('reports a fleet with no drift as a single group', async () => {
+    const wire = new FakeWire()
+    const h = makeOpsHarness(wire)
+    setTimeout(() => wire.emit(KOKO_MENU), 20)
+    queueTarget(wire, '203.0.113.101', 'LISTEN 0 128 0.0.0.0:80 0.0.0.0:*\n')
+    queueTarget(wire, '203.0.113.102', 'LISTEN 0 128 0.0.0.0:80 0.0.0.0:*\n')
+    h.grants.arm('conversation-A', 'persistent')
+    const value = await toolOf(h.defs, 'jumpserver_compare').execute(
+      { targets: ['203.0.113.101', '203.0.113.102'], command: 'ss -lntp' },
+      h.execFor('conversation-A'),
+    )
+    expect(value.ok).toBe(true)
+    expect((value.metrics as Record<string, number>)['distinct']).toBe(1)
+    expect(value.outliers).toEqual([])
+    expect((value.findings as string[])[0]).toContain('一致')
+  })
+
+  it('refuses command + profile together and a single target', async () => {
+    const wire = new FakeWire()
+    const h = makeOpsHarness(wire)
+    h.grants.arm('conversation-A', 'persistent')
+    const both = await toolOf(h.defs, 'jumpserver_compare').execute(
+      { targets: ['203.0.113.101', '203.0.113.102'], command: 'df -h', profile: 'basic' },
+      h.execFor('conversation-A'),
+    )
+    expect(both.code).toBe('INVALID_COMPARE')
+    const one = await toolOf(h.defs, 'jumpserver_compare').execute({ targets: ['203.0.113.101'] }, h.execFor('conversation-A'))
+    expect(one.code).toBe('INVALID_COMPARE')
   })
 })
 

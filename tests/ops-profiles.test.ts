@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { isReadOnlyAllowed } from '../src/security/command-classifier.js'
 import { allProfileCommands, detectAppIds, linuxCommands, profileCommands, resolveProfile, sanitizeSince } from '../src/ops/profiles.js'
-import { compareCommands, parseDfRoot, parseFreeMem, parseUptime } from '../src/ops/collect.js'
+import { parseDfRoot, parseFreeMem, parseUptime } from '../src/ops/collect.js'
 
 describe('V0.3.0 profiles: every command is READ (approval-free triage)', () => {
   it('every profile command classifies as READ', () => {
@@ -55,12 +55,6 @@ describe('V0.3.0 metric parsers', () => {
     expect(parseDfRoot(text)).toBe(94)
   })
 
-  it('compareCommands are all READ and carry a since window', () => {
-    for (const c of compareCommands('30m')) {
-      expect(isReadOnlyAllowed(c.command).allowed, c.command).toBe(true)
-    }
-    expect(compareCommands('2h').some((c) => c.command.includes('--since 2h'))).toBe(true)
-  })
 })
 
 describe('V0.3.0 since sanitization', () => {
