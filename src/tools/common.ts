@@ -51,6 +51,8 @@ export const RESULT_SCHEMA = {
     pluginVersion: { type: 'string' },
     hostBuild: { type: 'string' },
     protocolVersion: { type: 'integer' },
+    /** V0.4.1: loopback console URL for this conversation (token embedded). */
+    consoleUrl: { type: 'string' },
   },
 } as const
 
