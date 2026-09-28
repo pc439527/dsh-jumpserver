@@ -120,6 +120,16 @@ export interface JumpServerConfig {
    * recipe. jumpserver_profile_run executes one by name against a target set.
    */
   runbooks?: Record<string, RunbookDef>
+  /**
+   * V0.4.0: serve the embedded ops console on 127.0.0.1 (default true). It is
+   * the desktop-friendly alternative to the better-sidebar tab: a loopback-only
+   * page with the terminal mirror, assets, jobs and the audit trail, reached
+   * through a per-process token URL reported by jumpserver_status.
+   * Absent means enabled (the schema default); only `false` turns it off.
+   */
+  consoleEnabled?: boolean
+  /** Console port; 0 (default) binds an ephemeral loopback port. */
+  consolePort?: number
   /** Auto reconnect at most 2 times with 1s/3s backoff when idle (default true) */
   autoReconnect: boolean
   /** Persist command audit records (default true) */

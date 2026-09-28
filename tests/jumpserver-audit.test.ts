@@ -42,7 +42,29 @@ function harness(entries: Array<Record<string, unknown>>, overrides: Partial<Jum
     get: () => undefined,
     logger: { debug() {}, warn() {}, info() {} },
   } as unknown as Context
-  registerJumpServerTools(fakeCtx, {} as unknown as SessionRegistry, () => cfg(overrides), grants, undefined, () => entries)
+  // Minimal registry stub: only the audit tool's dependencies are exercised,
+  // but jumpserver_status needs a bundle whose manager can report a status.
+  const bundle = {
+    manager: {
+      status: () => ({
+        state: 'DISCONNECTED', gateway: '203.0.113.10:2222', target: null, hostname: null, user: null,
+        pwd: null, connectedAt: null, lastActivityAt: null, reconnectCount: 0, configured: true, permissionMode: 'READ_ONLY',
+      }),
+    },
+    observer: { recordState() {} },
+    lastUsedAt: Date.now(),
+  }
+  const registry = { getOrCreate: () => bundle, get: () => bundle } as unknown as SessionRegistry
+  registerJumpServerTools(
+    fakeCtx,
+    registry,
+    () => cfg(overrides),
+    grants,
+    undefined,
+    () => entries,
+    // V0.4.0: the loopback console URL accessor.
+    (sessionId) => 'http://127.0.0.1:9/?token=test&session=' + sessionId,
+  )
   const def = defs.find((d) => d.name === 'jumpserver_audit')!
   const execFor = (sessionId: string) => ({ agent: { session: { header: { id: sessionId } } }, signal: new AbortController().signal, name: 'jumpserver_audit', callId: 'c1' })
   return { grants, def, execFor, defs }
@@ -75,6 +97,16 @@ const BLOCKED: Record<string, unknown> = {
   refusalReason: '规则 dangerous.rm 拒绝',
   toolCallId: 'call-10',
 }
+
+describe('jumpserver_status console handover', () => {
+  it('reports the loopback console URL for THIS conversation', async () => {
+    const h = harness([], {})
+    h.grants.arm('conversation-A', 'persistent')
+    const status = h.defs.find((d) => d.name === 'jumpserver_status')!
+    const value = await status.execute({}, h.execFor('conversation-A'))
+    expect(value.consoleUrl).toBe('http://127.0.0.1:9/?token=test&session=conversation-A')
+  })
+})
 
 describe('jumpserver_audit', () => {
   it('is grant-gated like every other jumpserver_* tool', async () => {

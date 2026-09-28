@@ -27,6 +27,7 @@
 - **语义风险裁决（可选，默认关闭）**：分类器给出 `UNKNOWN` 的命令，可征询 TypeSafe System One（Jev）的结构化第二意见，**只作为审批文案里的参考**；`riskJudge.autoAllow` 打开后，通过全部阈值与结构否决的判定才可跳过人工确认，并在审计里记 `AUTO_ALLOWED`。任何失败（未启用/无凭据/超时/非 2xx/畸形响应）静默降级为普通审批。
 - **多账号身份**：`profiles` + `activeProfileId` 可在设置页保存并切换多套堡垒机身份（host/port/username + credential-ref），选中者优先；密码始终只经凭据域解析，绝不落盘到插件目录。
 - **实时终端镜像 + 人工输入 + 任务/审计侧栏**：所有 PTY 输入/输出/目标事件经 `TerminalObserver` 有界事件流（seq）供侧栏渲染；侧栏含 **终端 / 资产 / 任务 / 审计** 四个标签，人工输入经 SessionManager 执行并同样审计，拒绝记录以「已拦截 / 未批准」呈现而非红色失败。
+- **内置控制台（desktop 友好）**：Host 在 127.0.0.1 上提供一个**自带页面**的运维控制台（终端镜像 / 资产 / 任务 / 审计），URL 由 `jumpserver_status` 返回（含每进程令牌 + 对话 id）。它**不依赖任何客户端插件**——侧栏标签需要第三方的 `dsh-better-sidebar`，而控制台在任何 DSH 形态（含 desktop）下都能用。
 - **凭据安全**：密码走 DSH 凭据域 credential-ref（`passwordEnv`），连接时解析、不缓存，绝不进入 tool result / 日志 / 审计 / 终端事件 / 浏览器响应。
 
 ## 架构
@@ -67,7 +68,7 @@ src/
 
 ## 安装
 
-终端标签页注册在 **dsh-better-sidebar** 中，因此**先装 dsh-better-sidebar，再装 dsh-jumpserver**：
+侧栏终端标签页注册在 **dsh-better-sidebar**（第三方插件）中；**不装它也能用**——设置卡片照常出现，终端改走内置控制台。想用侧栏标签就先装 better-sidebar，再装 dsh-jumpserver：
 
 ```bash
 # ① 构建本插件（生成 lib/，含 lib/client.js 浏览器 bundle）
@@ -159,6 +160,7 @@ jumpserver_job_read(jobId="jsjob_xxxx")                          # 只取增量
 | assetGroups | {} | 资产组别名：组名 → 关键词列表 |
 | runbooks | {} | 命名 runbook：`{ title, steps[] }`，步骤为 profile 或只读 command，可带 `expect` 断言 |
 | riskJudge | {} | 可选语义裁决：`{ enabled, endpoint, apiKeyEnv, model, timeoutMs, cacheTtlSeconds, redactNetwork, autoAllow{...} }`，**默认关闭**；API Key 只经 credential-ref 解析 |
+| consoleEnabled / consolePort | true / 0 | 内置控制台：仅绑定 127.0.0.1，0 = 随机回环端口；URL 由 `jumpserver_status` 返回 |
 | autoReconnect / enableAudit | true / true | 空闲断线自动重连（最多 2 次）/ 命令审计 |
 | autoOpenTerminal / terminalScrollback | true / 5000 | 进会话页自动打开侧栏标签 / 终端保留行数 |
 
@@ -219,6 +221,15 @@ jumpserver_job_read(jobId="jsjob_xxxx")                          # 只取增量
 - 需要固定探针时用 `jumpserver_inspect`，不要自己发明 shell 采集；
 - 多目标 → 每个目标一个 tasks 条目；完成一个目标的所有命令后才切换目标。
 
+## 控制台（desktop 版本推荐）
+
+Desktop 版 DSH 与 web 版跑的是同一套客户端运行时，但侧栏标签依赖第三方插件 **dsh-better-sidebar**：没装它时插件的浏览器半边以前会**整体不激活**（连设置卡片都不出现）。V0.4.0 起 " + BT + "betterSidebar" + BT + " 变为**可选**，并新增内置控制台，desktop 无需任何客户端插件即可观察与接管会话。
+
+- **入口**：调用 " + BT + "jumpserver_status" + BT + "，返回的 " + BT + "consoleUrl" + BT + " 就是本对话的控制台地址（Host 启动日志里也会打印基础地址）。直接粘贴进浏览器打开即可。
+- **内容**：**终端**（实时 PTY 镜像，输入黄/输出绿/系统蓝，人工输入支持菜单态 " + BT + "p" + BT + " / IP 或名称 / " + BT + "q" + BT + " / " + BT + "exit" + BT + "）、**资产**、**任务**（停止 / 中断）、**审计**（拒绝记录显示为「已拦截 / 未批准 + 原因」）。
+- **安全模型**（三条必须同时成立）：① 只绑定 " + BT + "127.0.0.1" + BT + "，永不监听可路由地址；② 每个请求都要带每进程随机令牌（页面 URL 与 " + BT + "x-console-token" + BT + " 头，常量时间比较）；③ API 就是侧栏用的**同一套 bridge 接口**——会话授权、状态机、人工输入的一次性确认挑战、审计全部一致，控制台只增加通道，不新增策略。
+- **不做**：不自动拉起系统浏览器（模型只把 URL 交给你），不引入跨进程实例选择器。
+
 ## 侧栏（better-sidebar 标签页）
 
 | 标签 | 内容 |
@@ -265,6 +276,7 @@ jumpserver_job_read(jobId="jsjob_xxxx")                          # 只取增量
 - 终端为"线性镜像"，不完整模拟光标定位/全屏程序（`top` 等交互界面显示为原始字节流；流式场景请用 `jumpserver_job_*`）。
 - 命令分类按词法拆分（引号内 `|` 等边界可能误拦，宁可误拦）；无法确认的命令标为 `UNKNOWN` 而非"修改"。
 - `jumpserver_job_*` 只覆盖流式输出，不提供交互式 stdin 会话。
+- 内置控制台是**多对话共用**的：URL 带 `session=` 参数限定到某个对话；同一对话的多个页面各自独立游标。
 
 ## 故障排查
 
@@ -299,7 +311,7 @@ node scripts/plugin-load-smoke.mjs   # 已安装包加载冒烟
 npm run sync               # build + 把 lib/ + package.json 同步进 web profile 安装副本
 ```
 
-测试覆盖亮点：`tests/jobs.test.ts`（单次 Ctrl+C / 幂等停止 / 对话隔离 / 游标读）、`tests/inspection-tools.test.ts`（结构化画像 + 基线漂移往返）、`tests/risk-judge-gate.test.ts`（advisory / 失败降级 / autoAllow 与分布否决）、`tests/context-budget.test.ts`（工具表 schema 预算 28 KB）、`tests/classifier-corpus.test.ts`（READ 误判 <2%、0 误放）。
+测试覆盖亮点：`tests/console.test.ts`（控制台令牌/路由/端口释放）、`tests/jobs.test.ts`（单次 Ctrl+C / 幂等停止 / 对话隔离 / 游标读）、`tests/inspection-tools.test.ts`（结构化画像 + 基线漂移往返）、`tests/risk-judge-gate.test.ts`（advisory / 失败降级 / autoAllow 与分布否决）、`tests/context-budget.test.ts`（工具表 schema 预算 28 KB）、`tests/classifier-corpus.test.ts`（READ 误判 <2%、0 误放）。
 
 GitHub Actions CI（typecheck + vitest + build + classifier 门槛 + e2e + client bundle smoke）在 main 与 PR 上自动运行。
 
