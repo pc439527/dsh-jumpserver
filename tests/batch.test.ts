@@ -107,8 +107,10 @@ describe('SessionManager.runTargetBatch (V0.2 target affinity)', () => {
     const wire = new FakeWire()
     const manager = new SessionManager(makeOptions(wire))
     setTimeout(() => wire.emit(KOKO_MENU), 20)
-    // enter fails: the target write produces a connection-failure banner
-    wire.queue('\r\n连接失败\r\nPress any key to continue\r\n')
+    // enter fails: the target write produces a non-network failure banner
+    // (V0.5.5: a NETWORK banner is classified ASSET_UNREACHABLE instead and
+    // must stay retryable — see tests/session-unreachable.test.ts)
+    wire.queue('\r\n资产不存在\r\nPress any key to continue\r\n')
     const result = await manager.runTargetBatch({
       target: '203.0.113.999',
       commands: [{ command: 'hostname', risk: 'READ' }],

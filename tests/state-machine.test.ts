@@ -10,6 +10,8 @@ describe('state machine legal transitions', () => {
     expect(nextState(SessionState.ASSET_SHELL, SessionState.COMMAND_RUNNING)).toBe(SessionState.COMMAND_RUNNING)
     expect(nextState(SessionState.COMMAND_RUNNING, SessionState.ASSET_SHELL)).toBe(SessionState.ASSET_SHELL)
     expect(nextState(SessionState.ASSET_SHELL, SessionState.JUMPSERVER_MENU)).toBe(SessionState.JUMPSERVER_MENU)
+    // V0.5.5: a failed asset dial paints KoKo's own prompt and returns to the menu.
+    expect(nextState(SessionState.ENTERING_ASSET, SessionState.JUMPSERVER_MENU)).toBe(SessionState.JUMPSERVER_MENU)
   })
 
   it('collapses illegal transitions to UNKNOWN (never guesses)', () => {
@@ -17,7 +19,6 @@ describe('state machine legal transitions', () => {
     expect(nextState(SessionState.ASSET_SHELL, SessionState.ENTERING_ASSET)).toBe(SessionState.UNKNOWN)
     expect(nextState(SessionState.DISCONNECTED, SessionState.ASSET_SHELL)).toBe(SessionState.UNKNOWN)
     expect(nextState(SessionState.CONNECTING, SessionState.ASSET_SHELL)).toBe(SessionState.UNKNOWN)
-    expect(nextState(SessionState.ENTERING_ASSET, SessionState.JUMPSERVER_MENU)).toBe(SessionState.UNKNOWN)
     expect(nextState(SessionState.COMMAND_RUNNING, SessionState.JUMPSERVER_MENU)).toBe(SessionState.UNKNOWN)
   })
 

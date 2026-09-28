@@ -1,0 +1,6 @@
+url: https://github.com/pc439527/dsh-jumpserver
+name: pc439527/dsh-jumpserver
+category: remote
+description:
+  en: 'JumpServer (KoKo) bastion bridge for DSH: per-conversation SSH/PTY sessions through the bastion menu, asset discovery, permission-gated and audited command execution, batch diagnostics, and a mirrored human-controllable terminal tab.'
+  zh: 'DSH 的 JumpServer（KoKo）堡垒机桥接：按对话隔离的 SSH/PTY 会话、资产发现、权限闸门与审计的命令执行、批量诊断，以及可人工接管的终端镜像标签页。'
