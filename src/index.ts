@@ -333,7 +333,7 @@ export function apply(ctx: Context, config: JumpServerConfig): void {
         }
         if (kind === 'enter') {
           try {
-            await bundle.manager.enter(command.trim(), signal)
+            await bundle.manager.enter(command.trim(), undefined, signal)
             const after = bundle.manager.status()
             return { ok: true, kind: 'enter', state: after.state, target: after.target, hostname: after.hostname, sessionId }
           } catch (error) {

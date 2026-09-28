@@ -118,7 +118,7 @@ describe('browser bridge security boundaries', () => {
     const calls = counters()
     const services = makeServices(true, calls)
     expect((await drive(routeOf(services, '/api/jumpserver.manual'), { sessionId: 'conv-1', command: 'uptime' })).status).toBe(200)
-    expect((await drive(routeOf(services, '/api/jumpserver.snapshot'), { sessionId: 'conv-1', sinceSeq: 1 })).status).toBe(200)
+    expect((await drive(routeOf(services, '/api/jumpserver.snapshot'), { sessionId: 'conv-1', sinceSeq: 0 })).status).toBe(200)
     expect((await drive(routeOf(services, '/api/jumpserver.audit'), { sessionId: 'conv-1' })).status).toBe(200)
     expect(calls.manual).toBe(1)
     expect(calls.audit).toBe(1)

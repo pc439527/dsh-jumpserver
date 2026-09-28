@@ -3,7 +3,7 @@ import { AbortRequestedError, JumpServerError } from './errors.js'
 import { MarkerWatcher } from './output-buffer.js'
 import { cleanAnsi } from './output-buffer.js'
 import { nextState, SessionState } from './state-machine.js'
-import { ScreenDetector, type ScreenState } from './detector.js'
+import { looksLikeAccountSelection, looksLikeMenuPrompt, ScreenDetector, type ScreenState } from './detector.js'
 import { buildDoneScript, buildProbeScript, cleanCommandOutput, parseDoneLine, PROBE_PREFIX } from './command-runner.js'
 import { parseProbeOutput } from './probe.js'
 import { MAX_ASSET_CAPTURE_BYTES, MAX_OUTPUT_BYTES } from '../config/types.js'
@@ -11,7 +11,17 @@ import { footerComplete, hasPayloadEvidence, looksPaged, parseFooter } from './a
 import { randomHex, sleep } from './timing.js'
 
 export interface WireFactory {
-  (params: { host: string; port: number; username: string; password: string; connectTimeoutMs: number }): Promise<Wire>
+  (params: {
+    host: string
+    port: number
+    username: string
+    password: string
+    connectTimeoutMs: number
+    /** V0.5.0: pinned SSH host-key fingerprint (optional). */
+    hostFingerprint?: string
+    /** V0.5.0: known_hosts store for TOFU. */
+    knownHostsPath?: string
+  }): Promise<Wire>
 }
 
 export interface SessionRuntimeConfig {
@@ -22,6 +32,10 @@ export interface SessionRuntimeConfig {
   /** Test seam: replaces the real ssh2 transport. */
   wireFactory?: WireFactory
   connectTimeoutMs: number
+  /** V0.5.0: pinned SSH host-key fingerprint; when set, only a match is accepted. */
+  hostFingerprint?: string
+  /** V0.5.0: known_hosts store for TOFU when no fingerprint is pinned. */
+  knownHostsPath?: string
   enterAssetMs: number
   probeMs: number
   commandMs: number
@@ -63,10 +77,27 @@ export interface SessionStatus {
   reconnectCount: number
 }
 
+/**
+ * V0.4.3: what actually happened to the COMMAND, as opposed to whether the
+ * transport delivered a completion marker.
+ *
+ * `executionState: 'COMPLETED'` only means "the completion marker came back
+ * normally". A command that exits 127 (`jps: command not found`) is a
+ * COMPLETED execution with a FAILED command. Reporting it as ok=true hid real
+ * failures from the model, the console audit and any PASS/FAIL judgement.
+ */
+export type CommandStatus =
+  | 'SUCCESS'         // exit code 0
+  | 'EXIT_NONZERO'    // ran to completion, exited with a non-zero code
+  | 'TIMEOUT'         // the completion marker never arrived
+  | 'INTERRUPTED'     // Ctrl+C / abort
+  | 'CONNECTION_LOST' // the PTY closed underneath us
+  | 'UNKNOWN'         // ran, but the outcome could not be determined
+
 export type ExecOutcome =
-  | { kind: 'completed'; exitCode: number; output: string; truncated: boolean; durationMs: number; executionState: 'COMPLETED' }
-  | { kind: 'timeout'; output: string; truncated: boolean; durationMs: number; executionState: 'TIMEOUT' | 'UNKNOWN' }
-  | { kind: 'signal-lost'; output: string; durationMs: number; executionState: 'UNKNOWN' }
+  | { kind: 'completed'; exitCode: number; commandStatus: 'SUCCESS' | 'EXIT_NONZERO'; output: string; truncated: boolean; durationMs: number; executionState: 'COMPLETED' }
+  | { kind: 'timeout'; commandStatus: 'TIMEOUT' | 'UNKNOWN'; output: string; truncated: boolean; durationMs: number; executionState: 'TIMEOUT' | 'UNKNOWN' }
+  | { kind: 'signal-lost'; commandStatus: 'CONNECTION_LOST'; output: string; durationMs: number; executionState: 'UNKNOWN' }
 
 export interface ExecOptions {
   timeoutMs?: number
@@ -83,6 +114,63 @@ const EXEC_RECOVERY_MS = 3000
 
 /** KoKo connection-failure markers that abort an asset entry fast (instead of waiting out the timeout). */
 const ENTER_FAILURE_PATTERN = /连接失败|无法连接|连接超时|未找到|不存在|无权限|无资产|permission denied|ssh:\s*connect|host\s+key|timed\s*out|error|失败/i
+
+/**
+ * V0.5.5: the SUBSET of those markers that means "the bastion cannot reach the
+ * asset at all". Real KoKo banner (captured from a live session):
+ *
+ *   开始连接到 root(root)@10.0.0.10 error: 网络不通（连接超时）
+ *
+ * Kept separate from {@link ENTER_FAILURE_PATTERN} because the two need
+ * different answers: a generic failure is worth a diagnostic, but an
+ * unreachable asset is a STOP — the credentials, the account index and the
+ * tool arguments are all irrelevant, so retrying can only burn another KoKo
+ * dial timeout (measured: ~15 s per attempt) and another model round-trip.
+ */
+const ENTER_UNREACHABLE_PATTERN =
+  /网络不通|网络不可达|无法访问|无法连接|连接超时|连接失败|连接被拒绝|拒绝连接|连接被重置|no route to host|network is unreachable|connection (?:timed out|refused|reset|closed)|connect(?:ion)? refused|unable to connect|dial tcp/i
+
+/**
+ * V0.5.5: how long a target that just failed to dial is refused outright (ms).
+ * Long enough to break a model's retry loop, short enough that a real network
+ * fix does not need a connector restart. Every refusal reports the remaining
+ * window in `detail` so the caller knows it is a cooldown, not a new failure.
+ */
+const UNREACHABLE_COOLDOWN_MS = 120000
+
+/**
+ * V0.5.6: the sentence that tells the caller the prompt it just saw is still
+ * answerable. Without it the model reads ACCOUNT_SELECTION_REQUIRED as "the
+ * session is broken", reconnects, and only then reaches the real failure —
+ * measured: one full SSH handshake + menu round trip plus a model round trip
+ * (~40 s) spent on a PTY that was still waiting for the answer.
+ */
+const ACCOUNT_PROMPT_STAYS_LIVE =
+  ' — the session stays live at the KoKo ID> prompt: call again with accountIndex to answer it (no reconnect needed)'
+
+/**
+ * V0.5.5: the KoKo line that explains why an entry failed.
+ *
+ * Scans the tail for the last line carrying a failure MARKER rather than just
+ * taking the last line — KoKo prints its prompt immediately BELOW the reason:
+ *
+ *   开始连接到 root(root)@10.0.0.10 error: 网络不通（连接超时）
+ *   [Host]> _
+ *
+ * Pre-V0.5.5 the `detail` carried the regex MATCH ("error"), which told the
+ * model nothing and is why it kept guessing arguments instead of reporting.
+ */
+function failureBanner(text: string, pattern: RegExp, max = 300): string {
+  const lines = text.split('\n')
+  let fallback = ''
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    const flat = lines[i]!.replace(/[\s\u3000]{2,}/g, ' ').trim()
+    if (flat.length === 0) continue
+    if (fallback === '') fallback = flat
+    if (flat.length <= max && pattern.test(flat)) return flat
+  }
+  return fallback.length > max ? fallback.slice(0, max) + '…' : fallback
+}
 
 /**
  * One persistent JumpServer session: a single SSH/PTY transport whose logical
@@ -109,6 +197,40 @@ export class JumpServerSession {
    */
   private menuCapturePayloadAt: number | null = null
   private menuCaptureLastPayloadAt: number | null = null
+  /**
+   * V0.5.5 fail-fast cache: target -> "the bastion could not dial this asset
+   * until <timestamp>, KoKo said <reason>". Deliberately NOT cleared on
+   * reconnect: the gateway being re-established says nothing about the asset's
+   * network path, which is the thing that actually failed.
+   */
+  private unreachable = new Map<string, { until: number; reason: string }>()
+  /**
+   * V0.5.6: set while the session is parked on KoKo's `ID>` account-selection
+   * prompt — i.e. after ACCOUNT_SELECTION_REQUIRED, until the caller answers.
+   *
+   * The session deliberately STAYS LIVE there instead of collapsing to UNKNOWN.
+   * Collapsing was meant to be fail-closed, but it broke the only way to answer:
+   * `requireLiveSession()` / `ensureConnectedLocked()` refuse a non-live
+   * session, so the very next call — the one carrying the `accountIndex` the
+   * connector had just asked for — was rejected with CONNECTION_LOST. The
+   * caller had no choice but to reconnect (fresh SSH handshake + fresh menu)
+   * before it could answer a prompt on a PTY that was never dead.
+   *
+   * Real transcript (2026-09-14, console pid 36612), 3m56s for one dead asset:
+   *
+   *   enter(no session)     CONNECTION_LOST
+   *   connect               ok
+   *   enter                 ACCOUNT_SELECTION_REQUIRED   <- prompt raised
+   *   enter(accountIndex=1) CONNECTION_LOST              <- answer refused
+   *   connect               (reconnect, second SSH dial)
+   *   enter(accountIndex=1) ASSET_UNREACHABLE            <- the real failure
+   *
+   * `pendingAccountChoice` removes the detour: the second call answers the
+   * prompt that is already painted, and only then does KoKo dial the asset.
+   *
+   * Never auto-picked — only an explicit `accountIndex` answers this prompt.
+   */
+  private pendingAccountChoice: { target: string; accounts: string } | null = null
 
   currentTarget: string | null = null
   currentHostname: string | null = null
@@ -141,6 +263,30 @@ export class JumpServerSession {
     return this.opWatcher !== null
   }
 
+  /**
+   * V0.5.6: true when this session is LIVE on KoKo's `ID>` prompt for `target`
+   * and the caller is now supplying the `accountIndex` it asked for. Only then
+   * may a caller skip the "must be at the menu" precondition: the target line
+   * was already written, the numbered list is still painted, and the only byte
+   * missing is the chosen ID.
+   *
+   * The live-session requirement is what fails closed — if KoKo timed the
+   * selection out, the transport died, or the session moved on, this returns
+   * false and the normal preconditions apply (reconnect and re-enter).
+   */
+  canResumeAccountSelection(target: string, accountIndex?: number): boolean {
+    if (accountIndex === undefined) return false
+    if (!this.parkedOnAccountPrompt(target)) return false
+    if (this.wire === null || this.wireClosed) return false
+    return looksLikeAccountSelection(this.detector.tailPreview(2048)).detected
+  }
+
+  /** V0.5.6: a previous call left this session waiting on KoKo's `ID>` prompt for `target`. */
+  private parkedOnAccountPrompt(target: string): boolean {
+    const pending = this.pendingAccountChoice
+    return pending !== null && pending.target === target && this.stateValue === SessionState.ENTERING_ASSET
+  }
+
   status(): SessionStatus {
     return {
       state: this.stateValue,
@@ -166,6 +312,8 @@ export class JumpServerSession {
             username: this.cfg.username,
             password: this.cfg.password,
             connectTimeoutMs: this.cfg.connectTimeoutMs,
+            hostFingerprint: this.cfg.hostFingerprint,
+            knownHostsPath: this.cfg.knownHostsPath,
           })
         : await SshPtyWire.connect({
             host: this.cfg.host,
@@ -173,6 +321,8 @@ export class JumpServerSession {
             username: this.cfg.username,
             password: this.cfg.password,
             connectTimeoutMs: this.cfg.connectTimeoutMs,
+            hostFingerprint: this.cfg.hostFingerprint,
+            knownHostsPath: this.cfg.knownHostsPath,
           })
       this.attach(wire)
       const menuSeen = await this.waitForScreen(SessionState.JUMPSERVER_MENU, this.cfg.connectTimeoutMs, signal)
@@ -190,32 +340,164 @@ export class JumpServerSession {
     }
   }
 
-  async enter(target: string, signal?: AbortSignal): Promise<void> {
-    this.assertState(SessionState.JUMPSERVER_MENU, 'NOT_AT_MENU', 'enter(target) requires the JumpServer menu')
+  /**
+   * Enter a target asset through the JumpServer KoKo menu.
+   *
+   * @param target       Asset IP or name (must already exist on the menu).
+   * @param accountIndex The account ID displayed by KoKo on the `ID>` selection
+   *                    screen. Required only when the target has more than one
+   *                    authorised bastion user — KoKo paints a numbered list
+   *                    ending in `ID>` and waits. The value passed here is the
+   *                    number shown on that screen (usually 1 or 2), NOT a
+   *                    0-based array position. When omitted on a multi-user
+   *                    asset this throws ACCOUNT_SELECTION_REQUIRED with the
+   *                    parsed account list in `detail`. Single-user assets
+   *                    auto-login and ignore this argument.
+   * @param signal       Abort signal (the menu-loop polls every ~120ms).
+   */
+  async enter(target: string, accountIndex?: number, signal?: AbortSignal): Promise<void> {
     if (!TARGET_PATTERN.test(target)) {
       throw new JumpServerError('ASSET_NOT_FOUND', 'invalid target: ' + target)
     }
-    this.currentTarget = target
-    this.currentHostname = null
-    this.currentUser = null
-    this.currentPwd = null
-    this.setState(SessionState.ENTERING_ASSET)
+    if (accountIndex !== undefined && (!Number.isInteger(accountIndex) || accountIndex < 0)) {
+      throw new JumpServerError('INVALID_ARGUMENT', 'accountIndex must be the non-negative integer shown by KoKo')
+    }
+    // V0.5.6: this call may be the ANSWER to a prompt we raised a moment ago.
+    // Check that before the menu precondition — the session is not at the menu,
+    // it is (truthfully) still mid-entry, sitting on KoKo's `ID>` prompt.
+    if (this.parkedOnAccountPrompt(target)) {
+      const sel = looksLikeAccountSelection(this.detector.tailPreview(2048))
+      if (!sel.detected) {
+        // The prompt that was on screen is gone: KoKo timed the selection out,
+        // or the transport died underneath it. Nothing can be answered here, so
+        // fail closed instead of typing an index into an unknown screen.
+        this.pendingAccountChoice = null
+        this.setState(this.wireClosed || this.wire === null ? SessionState.DISCONNECTED : SessionState.UNKNOWN)
+        throw new JumpServerError(
+          'ACCOUNT_SELECTION_EXPIRED',
+          'the KoKo account-selection prompt for ' + target + ' is no longer on the session — reconnect and enter again',
+        )
+      }
+      if (accountIndex === undefined) {
+        throw new JumpServerError(
+          'ACCOUNT_SELECTION_REQUIRED',
+          'target ' + target + ' has ' + sel.options.length + ' accounts; pass accountIndex in jumpserver_enter/jumpserver_run/jumpserver_batch',
+          'accounts=' + sel.preview.join(' | '),
+        )
+      }
+    }
+    // True only when the prompt is still painted on a LIVE session AND the
+    // caller supplied the index — see canResumeAccountSelection().
+    const resuming = this.canResumeAccountSelection(target, accountIndex)
+    if (!resuming) {
+      this.assertState(SessionState.JUMPSERVER_MENU, 'NOT_AT_MENU', 'enter(target) requires the JumpServer menu')
+      // V0.5.5 fail-fast: a target the bastion could not dial seconds ago is
+      // refused here, BEFORE any byte reaches the PTY. KoKo would otherwise
+      // spend another ~15 s on the same dead dial and report the same banner,
+      // which is exactly the loop that burned 2m53s of a real conversation.
+      const cooldown = this.unreachable.get(target)
+      if (cooldown !== undefined) {
+        const remainingMs = cooldown.until - Date.now()
+        if (remainingMs > 0) {
+          throw new JumpServerError(
+            'ASSET_UNREACHABLE',
+            'asset ' + target + ' was unreachable from the bastion moments ago — not retried (fail-fast, no PTY write)',
+            'koko=' + cooldown.reason + ' retryAfterMs=' + remainingMs,
+          )
+        }
+        this.unreachable.delete(target)
+      }
+      this.currentTarget = target
+      this.currentHostname = null
+      this.currentUser = null
+      this.currentPwd = null
+      this.setState(SessionState.ENTERING_ASSET)
+    }
     try {
-      this.wire!.write(target + '\n')
-    this.callbacks.onInput?.(target) // the user-visible target line
-      // KoKo dials the asset with a progress banner; watch for the prompt,
-      // a connection-failure message, the wire closing, or the deadline.
+      if (resuming) {
+        // The list is still on screen and KoKo is still waiting: answer it in
+        // place. Deliberately NO detector reset (it would wipe the rows we are
+        // about to read) and no second target line (KoKo would read the IP as
+        // the account ID).
+        this.callbacks.onLog?.('answering the pending KoKo account prompt for ' + target + ' on the live session')
+      } else {
+        // V0.5.5: everything the enter loop concludes must come from THIS dial.
+        // KoKo paints the failure banner just above its own prompt and we only
+        // look 400 chars back, so a banner left over from a previous failed
+        // attempt used to be re-matched against a perfectly healthy new one —
+        // a false "failure" that is impossible to diagnose from the result.
+        this.detector.reset()
+        this.wire!.write(target + '\n')
+        this.callbacks.onInput?.(target) // the user-visible target line
+      }
+      // KoKo dials the asset with a progress banner. There are four terminal
+      // shapes the wait may resolve into:
+      //   1. ASSET_SHELL prompt — success, probe next;
+      //   2. multi-user `ID>` selection — write accountIndex, then keep waiting;
+      //   3. a connection-failure banner — bail with the visible failure text;
+      //   4. wire closed or deadline reached — bail with ASSET_ENTER_TIMEOUT.
+      // accountChoiceWritten makes sure we only fire the index ONCE per enter,
+      // even if KoKo redraws the list (or our detector briefly flickers).
       const deadline = Date.now() + this.cfg.enterAssetMs
       let shellSeen = false
       let failureText: string | undefined
+      let accountChoiceWritten = accountIndex === undefined ? true : false
       for (;;) {
         const screen = this.detector.detect()
         if (screen === 'ASSET_SHELL') {
           shellSeen = true
           break
         }
-        const tail = this.detector.tailPreview(400)
-        const failure = ENTER_FAILURE_PATTERN.exec(tail)
+        // Multi-username selection — detect before the failure pattern so we
+        // never mistake a numbered "0) admin" row for a "failed" connection.
+        if (!accountChoiceWritten) {
+          const tail = this.detector.tailPreview(2048)
+          const sel = looksLikeAccountSelection(tail)
+          if (sel.detected) {
+            if (accountIndex === undefined) {
+              // Will not happen given the assignment above, but be explicit:
+              // never auto-pick an account on the operator's behalf.
+              this.pendingAccountChoice = { target, accounts: sel.preview.join(' | ') }
+              throw new JumpServerError(
+                'ACCOUNT_SELECTION_REQUIRED',
+                'target ' + target + ' has ' + sel.options.length + ' accounts; pass accountIndex in jumpserver_enter/jumpserver_run/jumpserver_batch' + ACCOUNT_PROMPT_STAYS_LIVE,
+                'accounts=' + sel.preview.join(' | '),
+              )
+            }
+            const chosen = sel.options.find((o) => o.index === accountIndex)
+            if (chosen === undefined) {
+              this.pendingAccountChoice = { target, accounts: sel.preview.join(' | ') }
+              throw new JumpServerError(
+                'ACCOUNT_SELECTION_REQUIRED',
+                'target ' + target + ' has ' + sel.options.length + ' accounts; accountIndex=' + accountIndex + ' is not one of the displayed IDs' + ACCOUNT_PROMPT_STAYS_LIVE,
+                'accounts=' + sel.preview.join(' | ') + ' (requested accountIndex=' + accountIndex + ')',
+              )
+            }
+            const line = String(chosen.index) + '\n'
+            this.wire!.write(line)
+            this.callbacks.onInput?.(String(chosen.index))
+            accountChoiceWritten = true
+            // KoKo needs a beat to repaint the shell banner — give it the
+            // same 120ms cadence the rest of the loop uses, then re-detect.
+            await sleep(120)
+            continue
+          }
+        } else if (accountIndex === undefined) {
+          // Caller did not supply accountIndex; if KoKo raises the selection
+          // screen we MUST surface it rather than auto-pick.
+          const tail = this.detector.tailPreview(2048)
+          const sel = looksLikeAccountSelection(tail)
+          if (sel.detected) {
+            this.pendingAccountChoice = { target, accounts: sel.preview.join(' | ') }
+            throw new JumpServerError(
+              'ACCOUNT_SELECTION_REQUIRED',
+              'target ' + target + ' has ' + sel.options.length + ' accounts; pass accountIndex in jumpserver_enter/jumpserver_run/jumpserver_batch' + ACCOUNT_PROMPT_STAYS_LIVE,
+              'accounts=' + sel.preview.join(' | '),
+            )
+          }
+        }
+        const failureTail = this.detector.tailPreview(400)
+        const failure = ENTER_FAILURE_PATTERN.exec(failureTail)
         if (failure !== null) {
           failureText = failure[0]
           break
@@ -226,12 +508,29 @@ export class JumpServerSession {
         await sleep(120)
       }
       if (failureText !== undefined) {
-        this.setState(SessionState.UNKNOWN)
-        throw new JumpServerError('ASSET_ENTER_TIMEOUT', 'asset connection reported failure while entering ' + target, failureText)
+        // V0.5.5: the banner is a full SENTENCE ("开始连接到 root(root)@10.0.0.10
+        // error: 网络不通（连接超时）"), not the regex token that happened to
+        // match first. Reporting the token gave the model `detail: error` and
+        // no way to tell a dead asset from a wrong accountIndex.
+        const banner = failureBanner(this.detector.tailPreview(2000), ENTER_FAILURE_PATTERN) || failureText
+        if (ENTER_UNREACHABLE_PATTERN.test(banner)) {
+          this.unreachable.set(target, { until: Date.now() + UNREACHABLE_COOLDOWN_MS, reason: banner })
+          throw new JumpServerError(
+            'ASSET_UNREACHABLE',
+            'asset ' + target + ' is unreachable from the bastion — KoKo reported a network-level failure. This is NOT a configuration, credential or accountIndex problem.',
+            'koko=' + banner + ' retryAfterMs=' + UNREACHABLE_COOLDOWN_MS,
+          )
+        }
+        throw new JumpServerError('ASSET_ENTER_TIMEOUT', 'asset connection reported failure while entering ' + target, 'koko=' + banner)
       }
       if (!shellSeen) {
-        this.setState(SessionState.UNKNOWN)
-        throw new JumpServerError('ASSET_ENTER_TIMEOUT', 'asset shell for ' + target + ' was not detected within the enter timeout')
+        const tail = this.detector.tailPreview(2048)
+        const sel = looksLikeAccountSelection(tail)
+        throw new JumpServerError(
+          'ASSET_ENTER_TIMEOUT',
+          'asset shell for ' + target + ' was not detected within the enter timeout',
+          'detected=' + sel.detected + ' options=' + (sel.preview.join(' | ') || 'none') + ' tail=' + tail.slice(-500),
+        )
       }
       const marker = randomHex(6)
       const probeScript = buildProbeScript(marker)
@@ -253,10 +552,16 @@ export class JumpServerSession {
       this.currentUser = info.user
       this.currentPwd = info.pwd
       this.callbacks.onTarget?.(target, info.hostname, info.user, info.pwd)
+      this.unreachable.delete(target)
+      this.pendingAccountChoice = null
       this.setState(SessionState.ASSET_SHELL)
       this.touch()
     } catch (error) {
-      if (this.stateValue === SessionState.ENTERING_ASSET && !this.wireClosed) this.setState(SessionState.UNKNOWN)
+      this.recoverAfterFailedEnter()
+      // V0.5.6: a prompt still painted stays answerable; on every other exit
+      // the screen it referred to is gone, so the answer must go through a
+      // fresh enter() (and that one reconnects if it has to).
+      if (this.stateValue !== SessionState.ENTERING_ASSET) this.pendingAccountChoice = null
       throw error
     }
   }
@@ -276,10 +581,26 @@ export class JumpServerSession {
     try {
       const run = await this.runOp(script, marker, timeoutMs, options.signal)
       const durationMs = Date.now() - started
-      if (run.aborted) throw new AbortRequestedError()
+      if (run.aborted) {
+        // V0.4.0 P0: an ABORT is not a timeout, but the risk is the same —
+        // the remote foreground job keeps running after the model stopped
+        // listening (tail -f, a stuck script, a long find). Interrupt it with
+        // Ctrl+C and re-prove the shell before the connector declares the
+        // asset usable again. Note the recovery runs WITHOUT the abort signal:
+        // we are already aborting, so it must not cancel itself.
+        const verified = await this.interruptAndRecover(EXEC_RECOVERY_MS)
+        if (verified) {
+          this.setState(SessionState.ASSET_SHELL)
+          this.touch()
+        } else {
+          this.setState(SessionState.UNKNOWN)
+          this.callbacks.onLog?.('command aborted; the remote job was interrupted but the shell could not be re-verified - session collapsed to UNKNOWN')
+        }
+        throw new AbortRequestedError()
+      }
       if (run.closed) {
         this.setState(SessionState.DISCONNECTED)
-        return { kind: 'signal-lost', output: '', durationMs, executionState: 'UNKNOWN' }
+        return { kind: 'signal-lost', commandStatus: 'CONNECTION_LOST', output: '', durationMs, executionState: 'UNKNOWN' }
       }
       if (!run.matched) {
         // V0.2.5 P0: a timeout only means the completion marker never
@@ -288,15 +609,15 @@ export class JumpServerSession {
         // Interrupt the job (Ctrl+C), wait for the prompt, then re-prove the
         // shell with the lightweight probe; otherwise collapse to UNKNOWN so
         // the next navigation reconnects instead of typing into a dead PTY.
-        const verified = await this.recoverShell(EXEC_RECOVERY_MS, options.signal)
+        const verified = await this.interruptAndRecover(EXEC_RECOVERY_MS, options.signal)
         if (!verified) {
           this.setState(SessionState.UNKNOWN)
           this.callbacks.onLog?.('command timed out and the shell could not be re-verified; session collapsed to UNKNOWN')
-          return { kind: 'timeout', output: run.text, truncated: run.truncated, durationMs, executionState: 'UNKNOWN' }
+          return { kind: 'timeout', commandStatus: 'UNKNOWN', output: run.text, truncated: run.truncated, durationMs, executionState: 'UNKNOWN' }
         }
         this.setState(SessionState.ASSET_SHELL)
         this.touch()
-        return { kind: 'timeout', output: run.text, truncated: run.truncated, durationMs, executionState: 'TIMEOUT' }
+        return { kind: 'timeout', commandStatus: 'TIMEOUT', output: run.text, truncated: run.truncated, durationMs, executionState: 'TIMEOUT' }
       }
       const done = parseDoneLine(run.text, marker)
       this.setState(SessionState.ASSET_SHELL)
@@ -307,6 +628,9 @@ export class JumpServerSession {
       return {
         kind: 'completed',
         exitCode: done.exitCode,
+        // V0.4.3: the command itself succeeded or failed — separate from the
+        // transport having completed the exchange.
+        commandStatus: done.exitCode === 0 ? 'SUCCESS' : 'EXIT_NONZERO',
         output: cleanCommandOutput(run.text, marker),
         truncated: run.truncated,
         durationMs,
@@ -315,6 +639,80 @@ export class JumpServerSession {
     } catch (error) {
       if (this.stateValue === SessionState.COMMAND_RUNNING && !this.wireClosed) this.setState(SessionState.ASSET_SHELL)
       throw error
+    }
+  }
+
+  /**
+   * V0.4.0 P0: out-of-band interrupt. Writes Ctrl+C straight to the PTY
+   * WITHOUT taking the operation queue, so it reaches the remote shell even
+   * while a command (or a whole batch) is still in flight. Used by
+   * jumpserver_interrupt and by the console's 中断 button.
+   */
+  sendInterrupt(): boolean {
+    if (this.wire === null || this.wireClosed) return false
+    try {
+      this.wire.write('\u0003')
+      this.callbacks.onInput?.('^C')
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  /**
+   * Interrupt whatever the remote shell is doing, then re-prove the shell.
+   * The connector only returns to ASSET_SHELL when a probe actually answers.
+   * V0.4.4: a thin wrapper around interruptAndVerify() so there is exactly
+   * ONE place that combines Ctrl+C with re-probe.
+   */
+  async interrupt(budgetMs: number = EXEC_RECOVERY_MS): Promise<{ sent: boolean; verified: boolean; state: SessionState }> {
+    return this.interruptAndVerify(budgetMs)
+  }
+
+  /**
+   * V0.4.4: the ONLY public path that combines Ctrl+C with a probe. Stops
+   * a streaming job / out-of-band interrupt / exec recovery all funnel
+   * through here so the connector never sends ^C twice and never declares
+   * the shell usable without a fresh probe.
+   */
+  async interruptAndVerify(budgetMs: number = EXEC_RECOVERY_MS): Promise<{ sent: boolean; verified: boolean; state: SessionState }> {
+    const sent = this.sendInterrupt()
+    if (!sent) return { sent: false, verified: false, state: this.stateValue }
+    this.callbacks.onLog?.('interrupt: Ctrl+C sent; re-verifying the remote shell')
+    const verified = await this.probeShellOnly(budgetMs)
+    if (verified) {
+      this.setState(SessionState.ASSET_SHELL)
+      this.touch()
+    } else {
+      this.setState(SessionState.UNKNOWN)
+    }
+    return { sent, verified, state: this.stateValue }
+  }
+
+  /**
+   * V0.4.4: prove the shell is at a prompt WITHOUT sending another Ctrl+C.
+   * Use this when the caller already knows the foreground job has been
+   * interrupted (e.g. JobStore.stop -> the previous interruptAndVerify
+   * step cleared the queue; re-probing must NOT send ^C again).
+   */
+  async verifyShell(budgetMs = 3000): Promise<boolean> {
+    return this.probeShellOnly(budgetMs)
+  }
+
+  /**
+   * Raw write for the streaming job model (tail -f / journalctl -f / top):
+   * the line is sent as-is, with NO completion marker and NO state wait —
+   * output is collected from the observer stream instead.
+   */
+  writeLine(text: string): boolean {
+    if (this.wire === null || this.wireClosed) return false
+    try {
+      this.wire.write(text.endsWith('\n') ? text : text + '\n')
+      this.callbacks.onInput?.(text.replace(/\n$/, ''))
+      this.touch()
+      return true
+    } catch {
+      return false
     }
   }
 
@@ -445,6 +843,13 @@ export class JumpServerSession {
     this.connectedAt = null
     this.lastActivityAt = null
     this.detector.reset()
+    // V0.5.5: an explicit close is the operator saying "start over" (the reason
+    // they closed is usually that the network was just fixed), so the
+    // unreachable cooldown must not outlive it. A plain reconnect() does NOT
+    // clear it — re-establishing the gateway says nothing about the asset.
+    this.unreachable.clear()
+    // V0.5.6: same for a pending account prompt — the PTY it lived on is gone.
+    this.pendingAccountChoice = null
     this.setState(SessionState.DISCONNECTED)
   }
 
@@ -557,12 +962,14 @@ export class JumpServerSession {
   }
 
   /**
-   * Command-timeout recovery (V0.2.5 P0): send Ctrl+C to interrupt a possibly
-   * still-running foreground job, wait for the shell prompt to reappear, then
-   * prove the shell actually answers a probe. Returns false when the shell
-   * cannot be verified — the caller must NOT restore ASSET_SHELL.
+   * V0.4.4: ^C + re-probe. The single V0.4.0→V0.4.3 entry point for exec
+   * recovery (timeout / abort) and any other path that MUST interrupt a
+   * possibly running remote job before declaring the shell usable again.
+   * Splits the V0.4.3 recoverShell() into a pure probe (probeShellOnly)
+   * plus this ^C wrapper so callers that have already interrupted can
+   * re-probe WITHOUT sending a second Ctrl+C.
    */
-  private async recoverShell(budgetMs: number, signal?: AbortSignal): Promise<boolean> {
+  private async interruptAndRecover(budgetMs: number, signal?: AbortSignal): Promise<boolean> {
     if (this.wire === null || this.wireClosed) return false
     try {
       this.wire.write('\u0003')
@@ -570,6 +977,18 @@ export class JumpServerSession {
       return false
     }
     this.callbacks.onLog?.('command timed out; sending Ctrl+C and re-verifying the remote shell')
+    return this.probeShellOnly(budgetMs, signal)
+  }
+
+  /**
+   * V0.4.4: prove the shell answers a probe WITHOUT touching the wire.
+   * Waits for the asset-shell prompt, runs the connector-internal probe,
+   * parses the H=/U=/P= answer. Returns false when the wire is gone, the
+   * prompt never arrived, the probe did not match, or the parser failed.
+   * Pure side-effect-free test of "can I trust this session again".
+   */
+  private async probeShellOnly(budgetMs: number, signal?: AbortSignal): Promise<boolean> {
+    if (this.wire === null || this.wireClosed) return false
     const promptDeadline = Date.now() + Math.min(budgetMs, 2000)
     for (;;) {
       if (signal?.aborted === true) return false
@@ -584,6 +1003,17 @@ export class JumpServerSession {
     return parseProbeOutput(run.text, marker) !== null
   }
 
+  /**
+   * V0.4.3: apply the outcome of an out-of-band verification (job stop).
+   * recoverShell proves the shell answers a probe; the caller must then move
+   * the state machine to match, or the session keeps reporting its stale
+   * COMMAND_RUNNING / UNKNOWN state.
+   */
+  setStateForVerification(state: 'ASSET_SHELL' | 'UNKNOWN'): void {
+    this.setState(state === 'ASSET_SHELL' ? SessionState.ASSET_SHELL : SessionState.UNKNOWN)
+    if (state === 'ASSET_SHELL') this.touch()
+  }
+
   private assertState(expected: SessionState, code: 'NOT_AT_MENU' | 'NOT_IN_ASSET', detail: string): void {
     if (this.stateValue !== expected) throw new JumpServerError(code, detail)
   }
@@ -596,6 +1026,55 @@ export class JumpServerSession {
     }
     this.stateValue = resolved
     this.callbacks.onStateChange?.(resolved)
+  }
+
+  /**
+   * V0.5.5: leave the session in a state that is ACTUALLY true after a failed
+   * asset entry.
+   *
+   * When KoKo cannot dial the asset it prints the reason and re-paints its own
+   * menu prompt one line below, so the bastion session is intact and every
+   * other asset is still one `enter()` away. Collapsing to UNKNOWN there was a
+   * lie with a price: the next call needed a full reconnect (fresh SSH
+   * handshake ~14 s + a fresh asset-list capture), and the model — seeing
+   * `state: UNKNOWN` — had no way to know the difference between "dead
+   * session" and "one bad asset". Real transcript: 8 enter/connect cycles,
+   * 2m53s, all of it avoidable.
+   *
+   * The check is tail-anchored and positive (see looksLikeMenuPrompt), and it
+   * deliberately does NOT accept an `ID>` prompt: answering that prompt with an
+   * asset name would be read as an account choice. No prompt → UNKNOWN, as
+   * before. A dead transport is DISCONNECTED, which is what it is.
+   */
+  private recoverAfterFailedEnter(): void {
+    if (this.stateValue !== SessionState.ENTERING_ASSET) return
+    if (this.wireClosed || this.wire === null) {
+      this.setState(SessionState.DISCONNECTED)
+      return
+    }
+    // V0.5.6: KoKo is waiting for an account ID on a LIVE session — we are
+    // still mid-entry, only paused on a prompt, and the caller's next call can
+    // answer it. Stay in ENTERING_ASSET so that call is allowed through.
+    const accountTail = this.detector.tailPreview(2048)
+    if (looksLikeAccountSelection(accountTail).detected) {
+      if (this.currentTarget !== null && this.pendingAccountChoice === null) {
+        this.pendingAccountChoice = {
+          target: this.currentTarget,
+          accounts: looksLikeAccountSelection(accountTail).preview.join(' | '),
+        }
+      }
+      return
+    }
+    if (looksLikeMenuPrompt(this.detector.tailPreview(400))) {
+      this.currentTarget = null
+      this.currentHostname = null
+      this.currentUser = null
+      this.currentPwd = null
+      this.setState(SessionState.JUMPSERVER_MENU)
+      this.touch()
+      return
+    }
+    this.setState(SessionState.UNKNOWN)
   }
 
   private teardownTransport(): void {

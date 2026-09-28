@@ -1,6 +1,23 @@
 import z from '@deepseek-ai/schemastery'
-import { DEFAULT_ASSET_CACHE_TTL_SECONDS, DEFAULT_PASSWORD_ENV, DEFAULT_TERMINAL_SCROLLBACK, type JumpServerConfig } from './types.js'
+import {
+  DEFAULT_ASSET_CACHE_TTL_SECONDS,
+  DEFAULT_BATCH_CONCURRENCY,
+  DEFAULT_MAX_SESSIONS,
+  DEFAULT_PASSWORD_ENV,
+  DEFAULT_TERMINAL_SCROLLBACK,
+  MAX_BATCH_CONCURRENCY,
+  MAX_SESSIONS_CEILING,
+  type JumpServerConfig,
+} from './types.js'
 
+/**
+ * The settings-card schema is the UI contract: every field here renders in
+ * DSH 设置 → 插件 → JumpServer. Fields the model/UI must not hand-edit stay
+ * loosely typed on purpose (see assetGroups below): schemastery's dict/nested
+ * schema drags cosmokit's Dict into the emitted declaration (TS2742) and the
+ * settings card treats the value as plain JSON anyway. Runtime access is
+ * defensively parsed in src/config/types.ts + the owning module.
+ */
 export const Config = z.object({
   enabled: z.boolean().default(true).description('启用 JumpServer（关闭后所有 jumpserver_* 工具返回 DISABLED）'),
   autoOpenTerminal: z.boolean().default(true).description('授权（/jumpserver）后自动打开侧栏的 JumpServer 终端标签页；未授权不自动打开'),
@@ -22,6 +39,13 @@ export const Config = z.object({
     .role('credential-ref')
     .default(DEFAULT_PASSWORD_ENV)
     .description('保存密码的环境变量名（credential-ref；连接时解析，绝不进入模型上下文）'),
+  profiles: z
+    .any()
+    .default([])
+    .description('V0.4.0 多账号：{ id, label, host, port, username, passwordEnv } 列表；activeProfileId 选中者优先于上面的 host/username/passwordEnv，密码仍是 credential-ref（可在配置或 cordis.patch.yml 提供）'),
+  activeProfileId: z.string().description('V0.4.0 当前选中的账号 profile id；留空表示使用设置页的 host/username'),
+  hostFingerprint: z.string().description('V0.5.0 SSH 主机密钥指纹（如 SHA256:AbCdEf…）；设置后只接受完全一致的密钥，不设置则首次信任并记录（TOFU）'),
+  knownHostsPath: z.string().description('V0.5.0 TOFU 主机密钥存储路径；留空用插件数据目录下的 known_hosts.json'),
   connectTimeout: z.number().min(1).default(15).description('连接超时（秒）'),
   commandTimeout: z.number().min(1).default(60).description('命令默认超时（秒）'),
   idleTimeout: z.number().min(1).default(30).description('空闲连接超时（分钟）'),
@@ -47,6 +71,27 @@ export const Config = z.object({
     .default('CONFIRM_MODIFY')
     .description('V0.2.7 人工终端输入策略：FOLLOW_AGENT 跟随 Agent 权限矩阵 / CONFIRM_MODIFY 只读放行、修改命令需二次确认（推荐，默认）/ FULL_ACCESS 人工输入不设限（仍审计）')
     .role('select'),
+  timeZone: z.string().default('Asia/Shanghai').description('V0.4.0 审计时间显示时区（IANA 名称；存储始终为 UTC）'),
+  allowedTargets: z
+    .array(z.string())
+    .default([])
+    .description('V0.4.0 目标白名单：精确（192.168.79.10）/ 前缀（结尾 . - :）/ glob（oa-*）/ CIDR（192.168.79.0/24）；留空不限制'),
+  deniedTargets: z
+    .array(z.string())
+    .default([])
+    .description('V0.4.0 目标黑名单（先于白名单判断，永远优先拒绝）；语法同白名单'),
+  batchConcurrency: z
+    .number()
+    .min(1)
+    .max(MAX_BATCH_CONCURRENCY)
+    .default(DEFAULT_BATCH_CONCURRENCY)
+    .description('V0.4.1 单个批量/巡检调用内并行处理的目标数（1..' + MAX_BATCH_CONCURRENCY + '，1 = 严格串行）；一个对话仍只有一条 PTY'),
+  maxSessions: z
+    .number()
+    .min(1)
+    .max(MAX_SESSIONS_CEILING)
+    .default(DEFAULT_MAX_SESSIONS)
+    .description('V0.4.1 同时进入的目标数上限（1..' + MAX_SESSIONS_CEILING + '，进程级 Semaphore，仅在 batchConcurrency > 1 时生效）'),
   autoReconnect: z.boolean().default(true).description('空闲断线自动重连（最多 2 次）'),
   assetCacheTtlSeconds: z
     .number()
@@ -54,14 +99,18 @@ export const Config = z.object({
     .max(3600)
     .default(DEFAULT_ASSET_CACHE_TTL_SECONDS)
     .description('资产列表缓存时长（秒）：一次 p 抓取在会话内本地复用，避免每次资产查询都重新向 KoKo 发 p（默认 ' + DEFAULT_ASSET_CACHE_TTL_SECONDS + '）'),
-  // V0.2.6: system asset groups (group name -> keywords). Kept loosely typed
-  // on purpose: schemastery's dict schema drags cosmokit's Dict into the
-  // emitted declaration (TS2742), and the UI/patch flow treats the value as
-  // plain JSON anyway. Runtime access is defensively parsed in the manager.
   assetGroups: z
     .any()
     .default({})
     .description('V0.2.6 系统资产组（别名）：组名 -> 关键词列表；jumpserver_assets(group="OA") 按关键词 OR 匹配，例如 { "OA": { "keywords": ["OA","portal","workflow","办公"] } }（可在配置或 cordis.patch.yml 提供）'),
+  runbooks: z
+    .any()
+    .default({})
+    .description('V0.4.1 命名 runbook：名称 -> { title, steps[] }；每个 step 是 profile 或只读 command，可带 expect 断言。jumpserver_profile_run 按名称执行（非 READ 步骤会被跳过并上报）'),
+  riskJudge: z
+    .any()
+    .default({})
+    .description('V0.5.7 可选语义风险裁决（TypeSafe System One / Jev）：仅对 UNKNOWN 命令征询第二意见，默认关闭；{ enabled, endpoint, apiKeyEnv, model, timeoutMs, cacheTtlSeconds, redactNetwork, autoAllow:{...} }。API Key 只经 credential-ref 解析，不写入配置'),
   enableAudit: z.boolean().default(true).description('记录 Agent 与人工命令执行审计（不含任何密码）'),
 })
 
