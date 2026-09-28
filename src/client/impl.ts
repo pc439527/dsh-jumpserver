@@ -1,7 +1,20 @@
 /**
- * Browser half of dsh-jumpserver: settings card plus the terminal registered
- * as a dsh-better-sidebar tab. Pure thin client — transport/state/secrets stay
- * on the Host; the tab consumes redacted session-scoped bridge snapshots.
+ * Browser half of dsh-jumpserver: settings card plus (optionally) the terminal
+ * registered as a dsh-better-sidebar tab. Pure thin client — transport/state/
+ * secrets stay on the Host; the tab consumes redacted session-scoped bridge
+ * snapshots.
+ *
+ * V0.4.1 ACTIVATION CONTRACT (learned the hard way): an entry that stays
+ * `pending` on an unsatisfied service ABORTS the whole web boot ("web boot: 1
+ * entry did not activate"). `inject` may therefore list ONLY services the
+ * shell is guaranteed to provide. Everything else — the sidebar registry, the
+ * locale service, the settings seam — is resolved through `ctx.get(...)` and
+ * degrades gracefully:
+ *
+ *   inject = ['slots']          // the only seat a settings card needs
+ *   betterSidebar  -> optional  (dsh-better-sidebar; the console replaces it)
+ *   locale         -> optional  (fallback copy when absent)
+ *   connection.api.settings/credentials -> optional (card degrades to read-only)
  */
 import * as React from 'react'
 import type { TabComponentProps } from 'dsh-better-sidebar/src/client/service'
@@ -10,18 +23,16 @@ import { injectStyles } from './styles.js'
 import { fetchStatus } from './api.js'
 import { JumpServerSettingsCard } from './settings-card.js'
 import { JumpServerSidebarTab, TAB_ID, TAB_ORDER, terminalIcon, type JumpServerSettingsScope } from './terminal-tab.js'
+import { NamespaceSettingsScope, type SettingsApiFace } from './settings-adapter.js'
 import type { BetterSidebarService, BrowserCtx } from './context.js'
 
 /**
- * Services the loader must have up before this browser half activates.
- *
- * V0.4.0: `betterSidebar` is deliberately NOT in this list. It is a separate
- * plugin, and requiring it meant a DSH install without dsh-better-sidebar (for
- * example the desktop app) activated NOTHING — not even the settings card. A
- * missing sidebar now only skips the terminal tab; the loopback console
- * reported by jumpserver_status covers the terminal use case.
+ * The ONLY injected service. `slots` is provided by the client runtime itself
+ * (@deepseek-ai/dsh-client-runtime) and is what the settings card registers
+ * into; every other service this plugin uses is optional and read with
+ * `ctx.get`, so a composition without it can never stall the boot.
  */
-export const inject = ['slots', 'locale', 'settingsScope', 'connection']
+export const inject = ['slots']
 
 /** locale bind() -> plain object snapshot (re-read at every render, never stale). */
 function tMap(bind: (key: string) => string): Record<string, string> {
@@ -30,40 +41,52 @@ function tMap(bind: (key: string) => string): Record<string, string> {
   })
 }
 
+interface CredentialsApi {
+  credentials: {
+    describe(args: { refs: string[] }): Promise<{ result: { ok: boolean; value?: { credentials?: Record<string, { configured?: boolean; writable?: boolean }> } } }>
+    set(args: { ref: string; value: string }): Promise<unknown>
+  }
+}
+
 /** Sessions that already auto-opened the tab (per page load; a reload resets). */
 const autoOpenedFor = new Set<string>()
 
 export function apply(ctx: BrowserCtx): void {
   injectStyles()
-  const locale = ctx.locale
-  const t = locale.bind(NS)
-  ctx.effect(() => locale.register(NS, { zh, en }), 'jumpserver: browser dictionaries')
 
-  const scope = ctx.settingsScope.bind({ namespace: NS })
-  const scopeApi = scope as unknown as JumpServerSettingsScope
-  const connection = ctx.get('connection') as { api?: unknown }
-  const api = (connection?.api ?? {}) as {
-    credentials: {
-      describe(args: { refs: string[] }): Promise<{ result: { ok: boolean; value?: { credentials?: Record<string, { configured?: boolean; writable?: boolean }> } } }>
-      set(args: { ref: string; value: string }): Promise<unknown>
-    }
+  // ---- optional: i18n -----------------------------------------------------
+  const locale = ctx.get('locale') as BrowserCtx['locale'] | undefined
+  const t: (key: string) => string = locale !== undefined
+    ? locale.bind(NS)
+    : (key: string) => ({ tabTitle: 'JumpServer' }[key] ?? key)
+  if (locale !== undefined) ctx.effect(() => locale.register(NS, { zh, en }), 'jumpserver: browser dictionaries')
+
+  // ---- optional: settings + credentials over the connection seam ----------
+  const connection = ctx.get('connection') as { api?: unknown } | undefined
+  const connectionApi = (connection?.api ?? undefined) as (SettingsApiFace & Partial<CredentialsApi>) | undefined
+  let scope: JumpServerSettingsScope | undefined
+  if (connectionApi !== undefined && typeof connectionApi.settings?.describe === 'function') {
+    scope = new NamespaceSettingsScope(connectionApi as SettingsApiFace, NS)
   }
 
-  const resolved = (): Record<string, unknown> => (scopeApi.getSnapshot().value ?? {}) as Record<string, unknown>
-  const getAutoOpen = (): boolean => resolved()['autoOpenTerminal'] === true
+  if (scope !== undefined) {
+    const api = { credentials: connectionApi?.credentials } as unknown
+    ctx.slots.inject('settings.plugin.item', () =>
+      ctx.slots.register({
+        name: 'settings.plugin.item',
+        key: NS,
+        locale: NS,
+        inject: () => ({ t: tMap(t), scope, api }),
+      }, JumpServerSettingsCard),
+    )
+  }
 
-  ctx.slots.inject('settings.plugin.item', () =>
-    ctx.slots.register({
-      name: 'settings.plugin.item',
-      key: NS,
-      locale: NS,
-      inject: () => ({ t: tMap(t), scope, api }),
-    }, JumpServerSettingsCard),
-  )
-
-  // Everything below is the optional better-sidebar integration.
-  const sidebar = ctx.betterSidebar ?? (ctx.get('betterSidebar') as BetterSidebarService | undefined)
+  // ---- optional: better-sidebar terminal tab ------------------------------
+  const sidebar = ctx.get('betterSidebar') as BetterSidebarService | undefined
   if (sidebar === undefined) {
+    // No sidebar plugin installed (a plain desktop install): nothing else to
+    // register here. The Host's loopback console is the terminal for this
+    // install, and jumpserver_status hands out its URL.
     ctx.effect(() => () => undefined, 'jumpserver: no dsh-better-sidebar — terminal tab skipped (use the loopback console)')
     return
   }
@@ -85,7 +108,7 @@ export function apply(ctx: BrowserCtx): void {
           key: props.scope.sessionId,
           ...props,
           t,
-          settingsScope: scopeApi,
+          settingsScope: scope as JumpServerSettingsScope,
         }),
     })
     return dispose
@@ -99,7 +122,8 @@ export function apply(ctx: BrowserCtx): void {
     const sessionIdOf = (): string | undefined => (sidebar.getSnapshot() as { sessionId?: string })?.sessionId
     const maybeOpen = (sessionId: string): void => {
       if (autoOpenedFor.has(sessionId)) return
-      if (getAutoOpen() !== true) return
+      if (scope === undefined) return
+      if ((scope.getSnapshot().value ?? {})['autoOpenTerminal'] !== true) return
       void fetchStatus(sessionId, undefined)
         .then((data) => {
           if (autoOpenedFor.has(sessionId)) return
@@ -116,9 +140,15 @@ export function apply(ctx: BrowserCtx): void {
     }
     notify()
     const unsubscribe = sidebar.subscribeState(notify)
+    // Settings arrive asynchronously over the connection, so "autoOpenTerminal
+    // just became true" must re-run the decision immediately instead of waiting
+    // for the next poll tick.
+    const settingsScope = scope
+    const unsubscribeScope = settingsScope === undefined ? () => undefined : settingsScope.subscribe(() => notify())
     const poll = setInterval(notify, 2500)
     return () => {
       unsubscribe()
+      unsubscribeScope()
       clearInterval(poll)
     }
   }, 'jumpserver: auto-open terminal tab per active session after /jumpserver grant')
