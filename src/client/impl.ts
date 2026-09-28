@@ -97,13 +97,18 @@ export function apply(ctx: BrowserCtx): void {
   // backend is unavailable.
   const cardScope = scope ?? UNAVAILABLE_SCOPE
   const api = { credentials: connectionApi?.credentials } as unknown
+  // V0.4.1: the current settings shell exposes 'settings.section' (that is what
+  // dsh-better-sidebar registers into). The old 'settings.plugin.item' name is
+  // NOT declared in this build: the client trace proved its inject callback
+  // never fired, which is exactly why the plugin page showed no settings form.
   diag('slot:inject:start', { scope: scope !== undefined ? 'ready' : 'unavailable' })
-  ctx.slots.inject('settings.plugin.item', () => {
-    diag('slot:inject:fired')
+  ctx.slots.inject('settings.section', () => {
+    diag('slot:inject:fired', { slot: 'settings.section' })
     return ctx.slots.register({
-      name: 'settings.plugin.item',
-      key: NS,
-      locale: NS,
+      name: 'settings.section',
+      id: NS,
+      order: 100,
+      label: () => t('tabTitle'),
       inject: () => ({ t: tMap(t), scope: cardScope, api }),
     }, JumpServerSettingsCard)
   })

@@ -196,6 +196,7 @@ export function apply(ctx: Context, config: JumpServerConfig): void {
 
   // V0.4.0: streaming jobs (tail -f / journalctl -f / tcpdump) own the PTY
   // until stopped; output is harvested from the conversation's observer.
+  mark('settings:done')
   const jobs = new JobStore(registry)
   // V0.4.1: every tool result carries the console URL once the console binds.
   setConsoleUrlResolver((sessionId) => consoleUrlFor(sessionId))
@@ -219,6 +220,7 @@ export function apply(ctx: Context, config: JumpServerConfig): void {
   ctx.effect(
     async () => {
       mark('settings:start')
+      mark('settings:resolve')
       const settings = (ctx as unknown as { get?: (name: string) => unknown }).get?.('settings') as
         | { installSection?: (...args: unknown[]) => void }
         | undefined
