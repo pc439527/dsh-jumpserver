@@ -58,13 +58,21 @@ v0.5.5 不可达快速失败 / v0.5.7+5.8 语义风险裁决 / v0.5.9 拒绝审�
 | `jumpserver_exec`（+ target scope 复核） | ✅ |
 | `jumpserver_interrupt` `jumpserver_job_start` `jumpserver_job_read` `jumpserver_job_stop` `jumpserver_jobs` `jumpserver_snapshot` | ✅ 新增并测试 |
 | `jumpserver_inspect` `jumpserver_topology` `jumpserver_profile_run` `jumpserver_baseline_capture` `jumpserver_baseline_compare` | ✅ 已注册并测试（含 `accountByTarget`） |
-| `jumpserver_audit`（对话内读审计） | ⏳ |
+| `jumpserver_audit`（对话内读审计 + 拒绝原因） | ✅ 已注册并测试 |
 | `jumpserver_triage/compare/case/remediate`（DSH 独有 ops） | ⏳ 待按"以 WB inspector 为事实源"统一 |
 | `jumpserver_console_rotate_token` `jumpserver_arm/disarm` | ⛔ DSH 无控制台令牌；DSH 的 `/jumpserver` 会话授权更强 |
 
+### 侧栏 / 桥接
+| 能力 | 状态 |
+|---|---|
+| 侧栏 任务 标签（列表 / 停止 / 中断） | ✅ |
+| 侧栏 审计 标签渲染「已拦截 / 未批准」+ 拒绝筛选 | ✅ |
+| `/api/jumpserver.jobs` / `.jobStop` / `.interrupt` | ✅ 均 POST-only + same-site + 按对话授权 |
+| `PROTOCOL_VERSION` | ✅ 3 → 4 |
+
 ## 2. 已完成并验证（本分支）
 
-五个功能提交，每个都通过 `npm run typecheck`（host+client）与 `npx vitest run`（当前 387/387）：
+七个功能提交，每个都通过 `npm run typecheck`（host+client）与 `npx vitest run`（当前 399/399）：
 
 1. `2ce3924e4` 核心移植：传输层（账号选择 / 不可达冷却 / commandStatus / job PTY 归属 /
    sessionGate / 拒绝审计）、安全层（10 个新错误码、classifier 扩充、hdbsql+SAP、
@@ -81,6 +89,9 @@ v0.5.5 不可达快速失败 / v0.5.7+5.8 语义风险裁决 / v0.5.9 拒绝审�
    NUL 字节换成 `\u0000` 转义（运行值不变，文件恢复为纯文本）。
 5. `62dba538d` 风险裁决与拒绝审计：advisory judge（仅 UNKNOWN 外发）、opt-in autoAllow、
    BLOCKED/DENIED 各恰好一条审计、`riskJudge` 贯通 exec/run/batch/job_start 结果。
+6. `jumpserver_audit`：对话内审计（本地时间、`why=` 拒绝原因、`refusalsOnly`、limit/filter）。
+7. 侧栏 任务 标签 + 桥接 `/api/jumpserver.jobs|jobStop|interrupt` + 审计标签「已拦截/未批准」
+   与拒绝筛选；`PROTOCOL_VERSION` 3 → 4。
 
 顺带修掉两个**基线就存在的**陈旧测试：`tests/bridge-security.test.ts` 的快照长轮询
 （`sinceSeq: 1` vs 轮询桩 `cursorSeq: 1`，永远挂到 12 s）与三处已被 v0.5.5 语义取代的期望
@@ -102,20 +113,17 @@ v0.5.5 不可达快速失败 / v0.5.7+5.8 语义风险裁决 / v0.5.9 拒绝审�
    `HostInventory`（证据仍进 `EvidenceLedger`）；`jumpserver_compare` 换成 `compareTargets`
    （分组 + 多重集 outlier，失败主机保留自身错误码）；`jumpserver_remediate` 预检复用 `inspector`；
    删除 `src/ops/{profiles,collect}.ts` 的重复度量逻辑，保留 case/证据账本。
-2. **`jumpserver_audit`** — 对话内读审计环形（带 `why=` 拒绝原因列），并把 `auditFor` 接到工具层。
-3. **桥接与侧栏（Phase 6）** — `/api/jumpserver.jobs` / `.jobStop` / `.interrupt` 路由 +
-   侧栏「任务」标签；审计标签渲染 `refusalReason`（已拦截 / 未批准）；`PROTOCOL_VERSION` +1。
-4. **测试移植（Phase 7）** — 把 WB 的 `node:test .mjs` 用例转成 vitest：`host-parse` / `runbook` /
+2. **测试移植（Phase 7）** — 把 WB 的 `node:test .mjs` 用例转成 vitest：`host-parse` / `runbook` /
    `topology` / `concurrency` / `enter-unreachable` / `session-account-selection` / `host-key` /
    `target-scope` / `job-start-gate`；新增 context-budget 测试（注册工具 schema < 40 KB）。
-5. **文档与版本** — README 工具表/权限矩阵重写（现为 22 个工具）；`package.json` → 0.4.0；
-   `PLUGIN_VERSION` 同步；`PROTOCOL_VERSION` +1；`tests/version-consistency` 覆盖 README 工具表。
+3. **文档与版本** — README 工具表/权限矩阵重写（现为 24 个工具 + 侧栏 4 个标签）；`package.json`
+   → 0.4.0；`PLUGIN_VERSION` 同步；`tests/version-consistency` 覆盖 README 工具表。
 
 ## 5. 验证入口
 
 ```bash
 npm run typecheck          # host + client
-npx vitest run             # 387/387（新增 jobs / inspection-tools / risk-judge-gate）
+npx vitest run             # 399/399（新增 jobs / jobs-bridge / inspection-tools / risk-judge-gate / jumpserver-audit）
 node scripts/classifier-report.mjs
 npm run build && npm run smoke:client && node scripts/sync-profile.mjs
 ```

@@ -68,6 +68,16 @@ export interface BridgeServices {
    * The route enforces a live conversation grant before reaching this service.
    */
   manualExec: (sessionId: string, command: string, signal?: AbortSignal, confirmed?: boolean, confirmToken?: string) => Promise<Record<string, unknown>>
+  /** V0.4.0: streaming jobs of one conversation (never another's). */
+  jobsFor?: (sessionId: string) => Promise<Array<Record<string, unknown>>>
+  /** V0.4.5: idempotent job stop (one Ctrl+C, shared verdict). */
+  jobStopFor?: (sessionId: string, jobId: string) => Promise<Record<string, unknown>>
+  /**
+   * V0.4.5: the ONE interrupt entry point. A streaming job is stopped through
+   * the JobStore; a bare shell gets the out-of-band Ctrl+C. Also used by the
+   * sidebar's 中断 button, so the two paths can never drift.
+   */
+  interruptFor?: (sessionId: string) => Promise<Record<string, unknown>>
 }
 
 const SNAPSHOT_HOLD_MS = 12000
@@ -285,6 +295,84 @@ export function registerBridgeRoutes(webServer: {
           }
         } catch (error) {
           json(res, 500, { ok: false, code: 'MANUAL_EXEC_FAILED', message: error instanceof Error ? error.message : String(error) })
+        }
+      })()
+    },
+  }))
+
+  disposers.push(webServer.register({
+    kind: 'exact',
+    path: '/api/jumpserver.jobs',
+    handler: (req, res) => {
+      if (!requirePost(req, res)) return
+      void (async () => {
+        try {
+          const body = await readJsonBody(req)
+          const sessionId = validSessionId(body.sessionId)
+          if (sessionId === null) {
+            json(res, 400, { ok: false, code: 'INVALID_SESSION', message: 'valid sessionId is required' })
+            return
+          }
+          if (!requireGrant(services, sessionId, res)) return
+          const jobs = services.jobsFor !== undefined ? await services.jobsFor(sessionId) : []
+          json(res, 200, { ok: true, jobs, count: jobs.length, sessionId })
+        } catch (error) {
+          json(res, 500, { ok: false, code: 'JOBS_FAILED', message: error instanceof Error ? error.message : String(error) })
+        }
+      })()
+    },
+  }))
+
+  disposers.push(webServer.register({
+    kind: 'exact',
+    path: '/api/jumpserver.jobStop',
+    handler: (req, res) => {
+      if (!requirePost(req, res)) return
+      void (async () => {
+        try {
+          const body = await readJsonBody(req)
+          const sessionId = validSessionId(body.sessionId)
+          const jobId = typeof body.jobId === 'string' ? body.jobId.trim() : ''
+          if (sessionId === null || jobId.length === 0) {
+            json(res, 400, { ok: false, code: 'INVALID_REQUEST', message: 'valid sessionId and jobId are required' })
+            return
+          }
+          if (!requireGrant(services, sessionId, res)) return
+          if (services.jobStopFor === undefined) {
+            json(res, 501, { ok: false, code: 'NOT_SUPPORTED', message: 'job control is unavailable' })
+            return
+          }
+          const result = await services.jobStopFor(sessionId, jobId)
+          json(res, result.ok === false ? 409 : 200, result)
+        } catch (error) {
+          json(res, 500, { ok: false, code: 'JOB_STOP_FAILED', message: error instanceof Error ? error.message : String(error) })
+        }
+      })()
+    },
+  }))
+
+  disposers.push(webServer.register({
+    kind: 'exact',
+    path: '/api/jumpserver.interrupt',
+    handler: (req, res) => {
+      if (!requirePost(req, res)) return
+      void (async () => {
+        try {
+          const body = await readJsonBody(req)
+          const sessionId = validSessionId(body.sessionId)
+          if (sessionId === null) {
+            json(res, 400, { ok: false, code: 'INVALID_SESSION', message: 'valid sessionId is required' })
+            return
+          }
+          if (!requireGrant(services, sessionId, res)) return
+          if (services.interruptFor === undefined) {
+            json(res, 501, { ok: false, code: 'NOT_SUPPORTED', message: 'interrupt is unavailable' })
+            return
+          }
+          const result = await services.interruptFor(sessionId)
+          json(res, 200, result)
+        } catch (error) {
+          json(res, 500, { ok: false, code: 'INTERRUPT_FAILED', message: error instanceof Error ? error.message : String(error) })
         }
       })()
     },
