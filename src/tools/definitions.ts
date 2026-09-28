@@ -32,6 +32,8 @@ export const ASSETS_SCHEMA = {
   additionalProperties: false,
   properties: {
     ok: { type: 'boolean', required: true },
+    /** V0.4.1: loopback console URL for this conversation (token embedded). */
+    consoleUrl: { type: 'string' },
     code: { type: 'string' },
     message: { type: 'string' },
     count: { type: 'integer' },
@@ -73,6 +75,8 @@ export const AUDIT_SCHEMA = {
   additionalProperties: false,
   properties: {
     ok: { type: 'boolean', required: true },
+    /** V0.4.1: loopback console URL for this conversation (token embedded). */
+    consoleUrl: { type: 'string' },
     code: { type: 'string' },
     message: { type: 'string' },
     detail: { type: 'string' },
