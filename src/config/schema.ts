@@ -22,14 +22,14 @@ export const Config = z.object({
   enabled: z.boolean().default(true).description('启用 JumpServer（关闭后所有 jumpserver_* 工具返回 DISABLED）'),
   autoOpenTerminal: z.boolean().default(true).description('授权（/jumpserver）后自动打开侧栏的 JumpServer 终端标签页；未授权不自动打开'),
   terminalScrollback: z.number().min(100).max(50000).default(DEFAULT_TERMINAL_SCROLLBACK).description('终端保留行数（scrollback，默认 ' + DEFAULT_TERMINAL_SCROLLBACK + '）'),
-  host: z.string().required().description('JumpServer 服务器地址（传输网关，如 203.0.113.10）'),
+  host: z.string().default('').description('JumpServer 服务器地址（传输网关，如 203.0.113.10）；留空时工具返回 NOT_CONFIGURED，先在设置页填写'),
   port: z
     .number()
     .min(1)
     .max(65535)
     .default(2222)
     .description('JumpServer SSH 端口'),
-  username: z.string().required().description('JumpServer 登录用户名'),
+  username: z.string().default('').description('JumpServer 登录用户名；留空时工具返回 NOT_CONFIGURED'),
   password: z
     .string()
     .role('secret')
