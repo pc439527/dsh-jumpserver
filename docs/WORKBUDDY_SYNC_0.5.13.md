@@ -127,3 +127,24 @@ npx vitest run             # 399/399（新增 jobs / jobs-bridge / inspection-to
 node scripts/classifier-report.mjs
 npm run build && npm run smoke:client && node scripts/sync-profile.mjs
 ```
+
+## 6. 部署状态（本机）
+
+| 项 | 值 |
+|---|---|
+| 运行 profile | **desktop**（`$DSH_PROFILE_DIR=C:\Users\114976\.dsh\profiles\desktop`），DSH desktop 0.1.7-rc.2（alpha 通道）；本机**没有** `web` profile |
+| 已安装 | `dsh-jumpserver@0.4.0`（`node_modules/dsh-jumpserver`：`lib/` + `cordis.patch.yml` + `package.json` + `README.md`） |
+| 安装方式 | profile `package.json` 增加 `"dsh-jumpserver": "file:D:/cusor/DSH/jumpserver"` + `dsh.profile.bundles` 追加 `dsh-jumpserver`，随后用内置 pnpm 安装（本机无 `dsh` CLI 可用） |
+| 一致性校验 | 部署副本的 `lib/index.js`、`lib/client.js`、`package.json` 与仓库构建产物 **SHA256 逐字节一致** |
+| 依赖 | `ssh2` / `zod` 等已装；`cpu-features` 原生构建失败（无 C++ 工具链）——ssh2 会自动退回纯 JS 实现 |
+| 生效方式 | **需要重启 DSH（dsh web / 桌面应用）**，Host 在启动时装载插件；随后硬刷新浏览器 |
+
+顺带修掉两个打包缺陷（提交 `a5074c6c6`）：`files` 只含 `lib` 导致安装副本丢失 `cordis.patch.yml`（少它插件无法被装载）；`sync-profile.mjs` 写死 web profile，现按 `JS_PROFILE_PKG > $DSH_PROFILE_DIR > web 默认` 解析。
+
+**侧栏尚未可用**：插件的客户端半边 inject 了 `betterSidebar`，而 profile 里没有 `dsh-better-sidebar`。其版本要按内核通道选（本机为 alpha）：`dsh plugin --profile desktop add dsh-better-sidebar@alpha`（或 `@latest`，对应 stable 内核）。未安装时 Host 工具（25 个）仍可用，侧栏标签与设置卡片不会出现。
+
+**回滚**：`C:\Users\114976\.dsh\profiles\desktop\package.json.bak-0.4.0` 是安装前的备份；恢复它并删除 `node_modules/dsh-jumpserver` 即回到安装前状态。
+
+## 7. 已知验证边界
+
+`scripts/plugin-load-smoke.mjs` 无法在本工作区独立运行：它需要宿主提供的 `@deepseek-ai/*` peer（如 `@deepseek-ai/dsh-storage`，被 `dsh-storage-domain` 依赖），这些在 DSH 应用内由宿主解析、workspace 中不存在。因此本轮的验证是：仓库侧 typecheck / 403 用例 / build / client bundle smoke / 工具表预算全绿，加上部署副本与构建产物的逐字节一致性；"应用真正装载"这一步需要重启后由 `jumpserver_status` 确认 `pluginVersion 0.4.0`。
