@@ -221,7 +221,7 @@ export function buildTopology(inventories: HostInventory[], options: { depth?: n
     const groups = new Map<string, { proxy: string; upstream: string; members: string[] }>()
     for (const edge of edges) {
       if (edge.type !== 'reverse_proxy') continue
-      const key = edge.from + ' ' + edge.port
+      const key = edge.from + '\u0000' + edge.port
       const group = groups.get(key) ?? { proxy: edge.from, upstream: key, members: [] }
       if (!group.members.includes(edge.to)) group.members.push(edge.to)
       groups.set(key, group)

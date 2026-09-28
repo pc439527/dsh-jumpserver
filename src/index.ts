@@ -18,12 +18,14 @@ import { JUMPSERVER_SECTION_NAME, JUMPSERVER_SECTION_ORDER, JUMPSERVER_SOP } fro
 import { registerJumpServerTools } from './tools/definitions.js'
 import { registerOpsTools } from './tools/ops.js'
 import { registerJobTools } from './tools/jobs.js'
+import { registerCollectionTools } from './tools/inspection.js'
 import { JobStore } from './runtime/job-store.js'
+import { BaselineStore } from './runtime/baseline-store.js'
+import { jumpHomeBaselines, jumpHomeKnownHosts } from './runtime/paths.js'
 import { OpsCaseRegistry } from './ops/evidence.js'
 import { manualPolicyOf, resolveConcurrency, resolveConnection } from './config/types.js'
 import { Semaphore } from './jumpserver/concurrency.js'
 import { requireTargetAllowed } from './security/target-scope.js'
-import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import { classifyManual, manualGate, menuManualKind } from './security/manual-policy.js'
 
 export const name = 'dsh-jumpserver'
@@ -59,7 +61,7 @@ export function apply(ctx: Context, config: JumpServerConfig): void {
     const conn = resolveConnection(cfg)
     const knownHostsPath = typeof cfg.knownHostsPath === 'string' && cfg.knownHostsPath.length > 0
       ? cfg.knownHostsPath
-      : dshHomePath('jumpserver', 'known_hosts.json')
+      : jumpHomeKnownHosts()
     return { ...cfg, host: conn.host, port: conn.port, username: conn.username, passwordEnv: conn.passwordEnv, knownHostsPath }
   }
 
@@ -148,6 +150,8 @@ export function apply(ctx: Context, config: JumpServerConfig): void {
   // V0.4.0: streaming jobs (tail -f / journalctl -f / tcpdump) own the PTY
   // until stopped; output is harvested from the conversation's observer.
   const jobs = new JobStore(registry)
+  // V0.4.1: named baseline snapshots for drift detection.
+  const baselines = new BaselineStore(jumpHomeBaselines())
 
   /** One authoritative end-and-lock lifecycle for every explicit close path. */
   const terminateConversationJumpServer = async (sessionId: string) => {
@@ -237,6 +241,7 @@ export function apply(ctx: Context, config: JumpServerConfig): void {
       // same grant boundary and the per-conversation case registry.
       const opsDisposers = registerOpsTools(ctx, registry, getConfig, grants, cases)
       const jobDisposers = registerJobTools(ctx, registry, getConfig, grants, jobs)
+      const collectDisposers = registerCollectionTools(ctx, registry, getConfig, grants, baselines)
       const disposeCommand = registerJumpServerCommand(ctx, registry, getConfig, grants, terminateConversationJumpServer)
       return () => {
         jobs.dispose()
@@ -245,6 +250,7 @@ export function apply(ctx: Context, config: JumpServerConfig): void {
         for (const dispose of disposers) dispose()
         for (const dispose of opsDisposers) dispose()
         for (const dispose of jobDisposers) dispose()
+        for (const dispose of collectDisposers) dispose()
         grants.revokeAll()
         registry.dispose()
       }
