@@ -52,32 +52,62 @@ export class NamespaceSettingsScope implements JumpServerSettingsScope {
     }
   }
 
-  /** Re-read the namespace view (single-flight: concurrent renders share one call). */
+  /**
+   * Re-read the namespace view (single-flight: concurrent renders share one call).
+   *
+   * Shape tolerance on purpose. The wire carries an RpcResponse whose payload
+   * has been wrapped differently across DSH builds (`result.namespaces` in the
+   * current contract, `result.value.namespaces` / `result.ok+value` in older
+   * ones), and the request envelope is either the bare payload or `{ payload }`.
+   * Guessing wrong used to surface as a bare 异常 in the settings card, so both
+   * are accepted, and a namespace that has not been registered YET (the Host
+   * installs its settings section during its own activation) gets one retry
+   * before the card is told the namespace is unavailable.
+   */
   refresh(): void {
     if (this.inflight !== null) return
-    this.inflight = this.api.settings
-      .describe({})
-      .then((response) => {
-        const view = (response?.result?.namespaces ?? []).find((entry) => entry['ns'] === this.ns)
-        if (view === undefined) {
-          this.publish({ status: 'unavailable', writable: false })
-          return
-        }
+    this.inflight = this.describeView()
+      .then(async (found) => {
+        if (found === null) await this.retryOnce()
+      })
+      .finally(() => {
+        this.inflight = null
+      })
+  }
+
+  private async retryOnce(): Promise<void> {
+    await new Promise((resolve) => setTimeout(resolve, 800))
+    const again = await this.describeView().catch(() => null)
+    if (again === null) this.publish({ status: 'unavailable', writable: false })
+  }
+
+  /** Read the namespace view, tolerating both request envelopes and both payload shapes. */
+  private async describeView(): Promise<true | null> {
+    const attempts: Array<Record<string, unknown>> = [{}, { payload: {} }]
+    let lastError: unknown
+    for (const request of attempts) {
+      try {
+        const response = (await this.api.settings.describe(request as never)) as Record<string, unknown>
+        const envelope = (response?.['result'] ?? response) as Record<string, unknown>
+        const payload = (envelope?.['value'] ?? envelope) as Record<string, unknown>
+        const namespaces = (payload?.['namespaces'] ?? envelope?.['namespaces'] ?? []) as Array<Record<string, unknown>>
+        const view = namespaces.find((entry) => entry['ns'] === this.ns)
+        if (view === undefined) return null
         this.publish({
           status: 'ready',
-          writable: response?.result?.writable === true,
+          writable: envelope['writable'] === true || payload['writable'] === true,
           value: (view['value'] ?? {}) as Record<string, unknown>,
           base: (view['base'] ?? {}) as Record<string, unknown>,
           user: (view['user'] ?? {}) as Record<string, unknown>,
           revision: typeof view['revision'] === 'number' ? (view['revision'] as number) : undefined,
         })
-      })
-      .catch(() => {
-        this.publish({ status: 'unavailable', writable: false })
-      })
-      .finally(() => {
-        this.inflight = null
-      })
+        return true
+      } catch (error) {
+        lastError = error
+      }
+    }
+    if (lastError !== undefined) throw lastError
+    return null
   }
 
   async set(field: string, value: unknown): Promise<boolean> {
@@ -92,9 +122,16 @@ export class NamespaceSettingsScope implements JumpServerSettingsScope {
     try {
       const request: { ns: string; ops: Array<Record<string, unknown>>; expectedRevision?: number } = { ns: this.ns, ops: [op] }
       if (typeof this.snapshot.revision === 'number') request.expectedRevision = this.snapshot.revision
-      const response = await this.api.settings.mutate(request)
-      const view = response?.result
-      if (view !== undefined && view['ns'] === this.ns) {
+      let response: Record<string, unknown> | undefined
+      try {
+        response = (await this.api.settings.mutate(request as never)) as Record<string, unknown>
+      } catch (first) {
+        // Older/alternative envelope: { payload: <request> }.
+        response = (await this.api.settings.mutate({ payload: request } as never)) as Record<string, unknown>
+      }
+      const envelope = (response?.['result'] ?? response) as Record<string, unknown>
+      const view = ((envelope?.['value'] ?? envelope) as Record<string, unknown>)
+      if (view !== undefined && view !== null && view['ns'] === this.ns) {
         this.publish({
           status: 'ready',
           writable: true,
