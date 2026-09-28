@@ -221,3 +221,67 @@ export interface ClassifyResponse {
 export function fetchClassify(command: string, signal?: AbortSignal): Promise<ClassifyResponse> {
   return postJson<ClassifyResponse>('/api/jumpserver.classify', { command }, { signal, timeoutMs: 10000 })
 }
+
+/** V0.4.0: one streaming job of this conversation. */
+export interface JobEntry {
+  id: string
+  target: string
+  hostname: string | null
+  command: string
+  state: string
+  startedAt: number
+  stoppedAt: number | null
+  bytes: number
+  truncated: boolean
+  error: string | null
+}
+
+/** V0.4.0: streaming jobs of this conversation (never another's). */
+export interface JobsResponse {
+  ok?: boolean
+  code?: string
+  message?: string
+  count?: number
+  jobs?: JobEntry[]
+}
+
+export interface JobStopResponse {
+  ok?: boolean
+  code?: string
+  message?: string
+  jobId?: string
+  jobState?: string
+  target?: string | null
+  error?: string | null
+}
+
+/**
+ * V0.4.5: the outcome of the ONE interrupt entry point. mode=job means a
+ * streaming job owned the PTY and was stopped through the job path (exactly one
+ * Ctrl+C); mode=shell means a bare shell got the out-of-band interrupt.
+ */
+export interface InterruptResponse {
+  ok?: boolean
+  code?: string
+  message?: string
+  mode?: string
+  sent?: boolean
+  verified?: boolean
+  state?: string
+  target?: string | null
+  jobId?: string | null
+  jobState?: string | null
+  jobsStopped?: number
+}
+
+export function fetchJobs(sessionId: string, signal?: AbortSignal): Promise<JobsResponse> {
+  return postJson<JobsResponse>('/api/jumpserver.jobs', { sessionId }, { signal, timeoutMs: 10000 })
+}
+
+export function stopJob(sessionId: string, jobId: string, signal?: AbortSignal): Promise<JobStopResponse> {
+  return postJson<JobStopResponse>('/api/jumpserver.jobStop', { sessionId, jobId }, { signal, timeoutMs: 30000, acceptErrorBody: true })
+}
+
+export function interruptSession(sessionId: string, signal?: AbortSignal): Promise<InterruptResponse> {
+  return postJson<InterruptResponse>('/api/jumpserver.interrupt', { sessionId }, { signal, timeoutMs: 30000, acceptErrorBody: true })
+}

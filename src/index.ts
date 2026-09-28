@@ -22,6 +22,7 @@ import { registerCollectionTools } from './tools/inspection.js'
 import { JobStore } from './runtime/job-store.js'
 import { BaselineStore } from './runtime/baseline-store.js'
 import { jumpHomeBaselines, jumpHomeKnownHosts } from './runtime/paths.js'
+import { interruptSession } from './runtime/interrupt.js'
 import { OpsCaseRegistry } from './ops/evidence.js'
 import { manualPolicyOf, resolveConcurrency, resolveConnection } from './config/types.js'
 import { Semaphore } from './jumpserver/concurrency.js'
@@ -236,7 +237,16 @@ export function apply(ctx: Context, config: JumpServerConfig): void {
       }, 30000)
       const cfgAtBoot = getConfig()
       ctx.logger.warn('[dsh-jumpserver] started: gateway=' + cfgAtBoot.host + ':' + cfgAtBoot.port + ' mode=' + cfgAtBoot.permissionMode)
-      const disposers = registerJumpServerTools(ctx, registry, getConfig, grants, terminateConversationJumpServer)
+      const disposers = registerJumpServerTools(
+        ctx,
+        registry,
+        getConfig,
+        grants,
+        terminateConversationJumpServer,
+        // V0.5.9: the conversation's own audit ring (including BLOCKED/DENIED
+        // refusals) is what jumpserver_audit and the sidebar audit tab read.
+        (sessionId) => recentAudits.get(sessionId) ?? [],
+      )
       // V0.3.0: ops investigation tools (triage/compare/case/remediate) share the
       // same grant boundary and the per-conversation case registry.
       const opsDisposers = registerOpsTools(ctx, registry, getConfig, grants, cases)
@@ -517,6 +527,35 @@ export function apply(ctx: Context, config: JumpServerConfig): void {
       }
 
       return { ok: false, code: 'NOT_NAVIGABLE', message: '会话状态 ' + st.state + ' 下无法执行人工输入（先连接并进入服务器）', state: st.state, sessionId }
+    },
+    // V0.4.5: the sidebar's 任务/中断 buttons go through the SAME entry points as
+    // the tools, so the UI can never interrupt a job twice or reach another
+    // conversation's job.
+    jobsFor: async (sessionId) =>
+      jobs.list(sessionId).map((job) => ({
+        id: job.id,
+        target: job.target,
+        hostname: job.hostname,
+        command: job.command,
+        state: job.state,
+        startedAt: job.startedAt,
+        stoppedAt: job.stoppedAt,
+        bytes: job.bytes,
+        truncated: job.truncated,
+        error: job.error,
+      })),
+    jobStopFor: async (sessionId, jobId) => {
+      if (jobs.get(jobId, sessionId) === null) {
+        return { ok: false, code: 'UNKNOWN_JOB', message: 'no job with id ' + jobId + ' in this conversation', jobId }
+      }
+      const job = await jobs.stop(jobId, 'sidebar', sessionId)
+      return { ok: job.state === 'STOPPED', jobId: job.id, jobState: job.state, target: job.target, error: job.error, sessionId }
+    },
+    interruptFor: async (sessionId) => {
+      const bundle = registry.get(sessionId)
+      if (bundle === undefined) return { ok: false, code: 'NO_SESSION', message: 'this conversation has no JumpServer session', sessionId }
+      const result = await interruptSession(jobs, bundle.manager, sessionId)
+      return { ...result, ok: result.sent, sessionId }
     },
   }
 

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { JumpServerSidebarTab } from '../src/client/terminal-tab.js'
+import { auditFailed, auditRefusalLabel, auditRefused, JumpServerSidebarTab } from '../src/client/terminal-tab.js'
 
 const DICT: Record<string, string> = {
   tabTitle: 'JumpServer',
@@ -78,10 +78,42 @@ describe('V0.2.2 cross-plugin context boundary', () => {
     expect(html).not.toMatch(/关闭标签页|Close tab/)
   })
 
+  it('offers the 任务 tab next to 终端 / 资产 / 审计', () => {
+    const html = renderToStaticMarkup(createElement(JumpServerSidebarTab, { ...baseProps, settingsScope: fakeScope() }))
+    expect(html).toContain('>终端<')
+    expect(html).toContain('>资产<')
+    expect(html).toContain('>审计<')
+    expect(html).toMatch(/>任务/)
+  })
+
   it('reads the scrollback budget from the passed settingsScope (live setting)', () => {
     const html = renderToStaticMarkup(
       createElement(JumpServerSidebarTab, { ...baseProps, visible: false, settingsScope: fakeScope({ terminalScrollback: 1200 }) }),
     )
     expect(html).toContain('js-term-pane')
+  })
+})
+
+describe('V0.5.9 refusal rendering', () => {
+  it('treats BLOCKED / DENIED as refusals, not as failures', () => {
+    const blocked = { result: 'BLOCKED', refusalReason: '规则 dangerous.rm 拒绝' }
+    const denied = { result: 'DENIED', refusalReason: '未获人工批准' }
+    expect(auditRefused(blocked)).toBe(true)
+    expect(auditRefused(denied)).toBe(true)
+    // A refusal is the policy working — it must never render as a red failure.
+    expect(auditFailed(blocked)).toBe(false)
+    expect(auditFailed(denied)).toBe(false)
+  })
+
+  it('still reports a genuine command failure as a failure', () => {
+    expect(auditFailed({ result: 'error', exitCode: 1 })).toBe(true)
+    expect(auditFailed({ result: 'EXIT_NONZERO', exitCode: 127 })).toBe(true)
+    expect(auditRefused({ result: 'ok', exitCode: 0 })).toBe(false)
+  })
+
+  it('labels the refusal with its reason and distinguishes denied from blocked', () => {
+    expect(auditRefusalLabel({ result: 'BLOCKED', refusalReason: '规则 X' })).toBe('已拦截：规则 X')
+    expect(auditRefusalLabel({ result: 'DENIED', refusalReason: '未获人工批准' })).toBe('未批准：未获人工批准')
+    expect(auditRefusalLabel({ result: 'BLOCKED' })).toBe('已拦截')
   })
 })

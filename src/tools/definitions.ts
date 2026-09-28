@@ -8,6 +8,7 @@ import { requireTargetAllowed } from '../security/target-scope.js'
 import { JUMPSERVER_NOT_ARMED, NOT_ARMED_MESSAGE, type SessionGrant } from '../security/grant.js'
 import type { BatchCommandRequest, TargetBatchResult } from '../jumpserver/session-manager.js'
 import { runtimeVersion } from '../version.js'
+import { formatAuditTime, resolveTimeZone } from '../runtime/time.js'
 import { assetsToValue, bundleFor, execOutcomeToValue, guardValue, renderAssetsResult, renderBatchResult, renderResult, RESULT_SCHEMA, sessionIdOf, statusToValue, type ResultValue } from './common.js'
 
 function thisJumpError(error: unknown): { code: string; message: string } {
@@ -66,13 +67,52 @@ export const ASSETS_SCHEMA = {
   },
 } as const
 
+/** Canonical output schema for jumpserver_audit. */
+export const AUDIT_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    ok: { type: 'boolean', required: true },
+    code: { type: 'string' },
+    message: { type: 'string' },
+    detail: { type: 'string' },
+    /** How many entries matched (before the limit was applied). */
+    entries: { type: 'integer' },
+    /** How many were actually returned. */
+    showing: { type: 'integer' },
+    timeZone: { type: 'string' },
+    filtered: { type: 'boolean' },
+    refusalCount: { type: 'integer' },
+    output: { type: 'string' },
+  },
+} as const
+
+function renderAudit(_args: Record<string, unknown>, value: ResultValue): Array<{ type: 'text'; text: string }> {
+  const lines: string[] = []
+  if (value.ok === true) lines.push('ok')
+  if (value.code !== undefined) lines.push('code: ' + String(value.code))
+  if (value.message !== undefined) lines.push(String(value.message))
+  lines.push(
+    'audit entries=' + String(value.entries ?? 0) +
+      ' showing=' + String(value.showing ?? 0) +
+      (value.filtered === true ? ' (filtered)' : '') +
+      ' refusals=' + String(value.refusalCount ?? 0) +
+      ' tz=' + String(value.timeZone ?? '?'),
+  )
+  if (typeof value.output === 'string' && value.output.length > 0) {
+    lines.push('--- audit ---')
+    lines.push(value.output)
+  }
+  return [{ type: 'text', text: lines.join('\n') }]
+}
+
 /**
  * Register the jumpserver_* tools and return their disposers. V0.2.3 P0:
  * every tool routes through the conversation-scoped SessionRegistry using
  * exec.agent.session.id, so 对话 A and 对话 B never share a PTY/mutex/
  * terminal stream. V0.2.3 P1 adds jumpserver_assets (KoKo 'p' -> local filter).
  */
-export function registerJumpServerTools(ctx: Context, registry: SessionRegistry, getConfig: () => JumpServerConfig, grants: SessionGrant, terminateConversation?: (sessionId: string) => Promise<unknown>): Array<() => void> {
+export function registerJumpServerTools(ctx: Context, registry: SessionRegistry, getConfig: () => JumpServerConfig, grants: SessionGrant, terminateConversation?: (sessionId: string) => Promise<unknown>, auditFor?: (sessionId: string) => Array<Record<string, unknown>>): Array<() => void> {
   const disposers: Array<() => void> = []
 
   disposers.push(
@@ -481,5 +521,83 @@ export function registerJumpServerTools(ctx: Context, registry: SessionRegistry,
     ),
   )
 
+  disposers.push(
+    ctx.tools.register(
+      defineTool({
+        name: 'jumpserver_audit',
+        description:
+          'Read the audit trail of YOUR conversation in chat: recent audited events (local time, operation, target asset, redacted command, risk, result) plus the REASON on every refusal. Use it when the user asks what the AI actually ran through JumpServer, or what was blocked/denied. Purely local — it never touches the bastion, needs no live session, and returns no credential: commands are stored redacted. It still requires the conversation grant, so a locked conversation cannot read session history.',
+        parameters: {
+          limit: { type: 'number', description: 'How many recent entries to return (default 20, max 200, oldest first)' },
+          filter: {
+            type: 'string',
+            description: 'Optional case-insensitive substring matched against each entry (an IP, a command fragment, an operation name)',
+          },
+          refusalsOnly: {
+            type: 'boolean',
+            description: 'Only entries that were refused — BLOCKED (the rules said no) or DENIED (no human approval). Answers "what was stopped".',
+          },
+        },
+        output: { schema: AUDIT_SCHEMA, render: renderAudit },
+        async execute(args, exec) {
+          return guardValue(exec, async () => {
+            const blocked = requireGrant(grants, exec)
+            if (blocked !== null) return blocked
+            const all = auditFor !== undefined ? auditFor(sessionIdOf(exec)) : []
+            const q = typeof args.filter === 'string' && args.filter.length > 0 ? args.filter.toLowerCase() : null
+            const refusalsOnly = args.refusalsOnly === true
+            const filtered = all.filter((entry) => {
+              if (refusalsOnly && !isRefusal(entry)) return false
+              if (q === null) return true
+              return JSON.stringify(entry).toLowerCase().includes(q)
+            })
+            const limit = typeof args.limit === 'number' && Number.isFinite(args.limit)
+              ? Math.min(200, Math.max(1, Math.floor(args.limit)))
+              : 20
+            const picked = filtered.slice(-limit)
+            const timeZone = resolveTimeZone(getConfig().timeZone)
+            const lines = picked.map((entry) => auditLine(entry, timeZone))
+            const refusalCount = all.filter(isRefusal).length
+            return {
+              ok: true,
+              entries: filtered.length,
+              showing: picked.length,
+              timeZone,
+              filtered: q !== null || refusalsOnly,
+              refusalCount,
+              output: lines.length > 0 ? lines.join('\n') : '(no audited command in this conversation yet)',
+            }
+          })
+        },
+      }),
+    ),
+  )
+
   return disposers
+}
+
+/** V0.5.9: a refused entry is BLOCKED (the rules) or DENIED (no approval). */
+function isRefusal(entry: Record<string, unknown>): boolean {
+  const result = String(entry['result'] ?? '')
+  return result === 'BLOCKED' || result === 'DENIED' || typeof entry['refusalReason'] === 'string'
+}
+
+/** One audit line; the refusal reason is appended only when there is one. */
+function auditLine(entry: Record<string, unknown>, timeZone: string): string {
+  const parts = [
+    formatAuditTime(entry['timestamp'], timeZone),
+    String(entry['operation'] ?? '-'),
+    String(entry['target'] ?? entry['hostname'] ?? '-'),
+    '[' + String(entry['risk'] ?? '?') + ']',
+    String(entry['result'] ?? '?'),
+  ]
+  if (entry['toolCallId'] !== undefined) parts.push('call=' + String(entry['toolCallId']))
+  if (entry['batchId'] !== undefined) parts.push('batch=' + String(entry['batchId']))
+  parts.push('actor=' + String(entry['actor'] ?? 'AGENT'))
+  const why = entry['refusalReason']
+  if (why !== undefined && why !== null && String(why).length > 0) parts.push('why=' + String(why))
+  const judge = entry['riskJudge']
+  if (judge !== undefined && judge !== null && String(judge).length > 0) parts.push('judge=' + String(judge))
+  parts.push(String(entry['redactedCommand'] ?? entry['command'] ?? '-'))
+  return parts.join(' | ')
 }
