@@ -130,7 +130,7 @@ export function registerJumpServerTools(ctx: Context, registry: SessionRegistry,
             const blocked = requireGrant(grants, exec)
             if (blocked !== null) return blocked
             const bundle = bundleFor(exec, registry)
-            const status = await bundle.manager.enter(args.target, exec.signal)
+            const status = await bundle.manager.enter(args.target, undefined, exec.signal)
             return statusToValue(status)
           })
         },

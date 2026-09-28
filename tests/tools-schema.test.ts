@@ -53,7 +53,7 @@ describe('tool output schema contract (harness validator)', () => {
   it('completed exec outcome validates (includes output + exitCode)', () => {
     const value = execOutcomeToValue(
       { ...baseStatus, state: SessionState.ASSET_SHELL, target: '203.0.113.101', hostname: 'web-app-01' },
-      { kind: 'completed', exitCode: 0, output: 'hostname\nweb-app-01', truncated: false, durationMs: 123, executionState: 'COMPLETED' },
+      { kind: 'completed', exitCode: 0, commandStatus: 'SUCCESS', output: 'hostname\nweb-app-01', truncated: false, durationMs: 123, executionState: 'COMPLETED' },
     )
     assertValid(value, 'completed')
   })
@@ -61,7 +61,7 @@ describe('tool output schema contract (harness validator)', () => {
   it('timeout outcome validates', () => {
     const value = execOutcomeToValue(
       { ...baseStatus, state: SessionState.ASSET_SHELL, target: '203.0.113.101', hostname: 'web-app-01' },
-      { kind: 'timeout', output: 'partial', truncated: true, durationMs: 5000, executionState: 'TIMEOUT' },
+      { kind: 'timeout', commandStatus: 'TIMEOUT', output: 'partial', truncated: true, durationMs: 5000, executionState: 'TIMEOUT' },
     )
     assertValid(value, 'timeout')
   })
@@ -69,7 +69,7 @@ describe('tool output schema contract (harness validator)', () => {
   it('signal-lost outcome validates (target/hostname may be null here -> omitted)', () => {
     const value = execOutcomeToValue(
       { ...baseStatus, state: SessionState.UNKNOWN },
-      { kind: 'signal-lost', output: '', durationMs: 42, executionState: 'UNKNOWN' },
+      { kind: 'signal-lost', commandStatus: 'CONNECTION_LOST', output: '', durationMs: 42, executionState: 'UNKNOWN' },
     )
     assertValid(value, 'signal-lost')
   })
@@ -134,6 +134,7 @@ describe('jumpserver_batch result contract (V0.2)', () => {
           {
             command: 'hostname',
             executionState: 'COMPLETED',
+            commandStatus: 'SUCCESS',
             exitCode: 0,
             output: 'web-app-01\n',
             truncated: false,

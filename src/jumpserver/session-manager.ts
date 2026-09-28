@@ -1,6 +1,6 @@
 import { DEFAULT_ASSET_CACHE_TTL_SECONDS, DEFAULT_TIMEOUTS, type JumpServerConfig, type PermissionMode } from '../config/types.js'
 import type { TerminalObserver } from './terminal-observer.js'
-import { AbortRequestedError, JumpServerError } from './errors.js'
+import { AbortRequestedError, APPROVAL_DENIED_REASON, JumpServerError } from './errors.js'
 import { filterAssets, filterAssetsByGroup, parseAssetList, resolveGroupKeywords, type AssetEntry, type AssetHealth, type AssetListResult } from './asset-list.js'
 import { cleanAnsi } from './output-buffer.js'
 import { MAX_ASSET_CAPTURE_BYTES } from '../config/types.js'
@@ -36,6 +36,29 @@ export interface AuditRecord {
   approvalRequired: boolean
   /** V0.3.1: 'none' | 'approved' | 'denied' — the gate outcome. */
   approvalResult: string
+  /**
+   * V0.5.8: one line recording what the semantic judge (Jev) said about a
+   * command the rule classifier could not rule on, prefixed AUTO_ALLOWED when
+   * that opinion let the command run without a human round-trip. Absent for
+   * every command the classifier decided on its own.
+   */
+  riskJudge?: string
+  /**
+   * V0.5.9: why a refused command was refused. Present on `BLOCKED` records
+   * (the rules refused it) and `DENIED` records (nobody approved it). Without
+   * it the trail says something was stopped but not why.
+   */
+  refusalReason?: string
+  /** V0.4.0: MCP request id that produced this record (AI task correlation). */
+  toolCallId?: string
+  /** V0.4.0: one id per jumpserver_batch / inspect / topology call. */
+  batchId?: string
+  /** V0.4.0: long-running job id (jumpserver_job_start). */
+  taskId?: string
+  /** V0.4.0: index of this command inside its batch (audit ordering). */
+  batchIndex?: number
+  /** V0.4.0: monotonic per-process write sequence (stable ordering in the JSONL). */
+  sequence?: number
   permissionMode: PermissionMode
   result: string
   exitCode: number | null
@@ -56,6 +79,12 @@ export interface SessionManagerOptions {
   wireFactory?: import('./session.js').WireFactory
   /** V0.2: live terminal mirror sink; every PTY input/output/state/target event lands here. */
   observer?: TerminalObserver
+  /**
+   * V0.4.3: process-wide gate on simultaneous target batches. `maxSessions`
+   * was configured but never enforced; wiring this Semaphore makes it real —
+   * with batchConcurrency>1 at most `maxSessions` targets are entered at once.
+   */
+  sessionGate?: { acquire: () => Promise<() => void> }
 }
 
 export interface ExecRequest {
@@ -69,6 +98,12 @@ export interface ExecRequest {
   /** V0.3.1: approval outcomes from the gate. */
   approvalRequired?: boolean
   approvalResult?: string
+  /** V0.5.8: audit line for the judge decision behind this command, when there was one. */
+  riskJudge?: string
+  /** V0.4.0: MCP request id (audit correlation). */
+  toolCallId?: string
+  /** V0.4.0: batch/inspect run id (audit correlation). */
+  batchId?: string
   signal?: AbortSignal
 }
 
@@ -84,6 +119,15 @@ export interface RunRequest {
   classification?: { risk: string; reason?: string; ruleId?: string; confidence?: string; classifierVersion?: number; normalizedCommand?: string }
   approvalRequired?: boolean
   approvalResult?: string
+  /** V0.5.8: audit line for the judge decision behind this command, when there was one. */
+  riskJudge?: string
+  /** V0.4.0: MCP request id (audit correlation). */
+  toolCallId?: string
+  /** V0.4.0: batch/inspect run id (audit correlation). */
+  batchId?: string
+  /** V0.5.3: 0-based accountIndex to select a user on KoKo's `ID>` prompt.
+   *  Required only when the target has more than one bastion user. */
+  accountIndex?: number
   /** Runs right after navigation (target verified) and immediately before exec. */
   beforeExec?: () => Promise<void>
 }
@@ -99,6 +143,14 @@ export interface BatchCommandRequest {
   classification?: { risk: string; reason?: string; ruleId?: string; confidence?: string; classifierVersion?: number; normalizedCommand?: string }
   approvalRequired?: boolean
   approvalResult?: string
+  /** V0.5.8: audit line for the judge decision behind this command, when there was one. */
+  riskJudge?: string
+  /** V0.4.0: MCP request id (audit correlation). */
+  toolCallId?: string
+  /** V0.4.0: batch/inspect run id (audit correlation). */
+  batchId?: string
+  /** V0.4.0: index of this command inside its batch (audit ordering). */
+  batchIndex?: number
   /** Runs right after the target is verified and immediately before this command's exec. */
   beforeExec?: () => Promise<void>
 }
@@ -108,28 +160,55 @@ export interface TargetBatchRequest {
   target: string
   commands: BatchCommandRequest[]
   signal?: AbortSignal
+  /** V0.4.0: MCP request id (audit correlation). */
+  toolCallId?: string
+  /** V0.4.0: one id for the whole batch run (inspect/topology/batch). */
+  batchId?: string
+  /** V0.5.3: 0-based accountIndex for the target's `ID>` prompt (when multiple users). */
+  accountIndex?: number
+}
+
+/**
+ * V0.5.12: the nested failure shape produced by errorDetail(). The interfaces
+ * below used to declare `{ code, message }` only, so even though errorDetail()
+ * attached `detail` at runtime, the renderers were typed out of seeing it —
+ * the compiler blessed a projection that silently dropped every diagnostic.
+ */
+export interface NestedFailure {
+  code: string
+  message: string
+  /** Structured diagnostic: parsed account list, detector tail, host-key reason. */
+  detail?: string
 }
 
 export interface BatchCommandResult {
   command: string
   executionState: string
+  /**
+   * V0.4.3: what happened to the COMMAND (SUCCESS/EXIT_NONZERO/TIMEOUT/...).
+   * executionState only says whether the transport exchange completed.
+   */
+  commandStatus: string
   exitCode: number | null
   output: string
   truncated: boolean
   durationMs: number
-  error: { code: string; message: string } | null
+  error: NestedFailure | null
 }
 
 export interface TargetBatchResult {
   target: string
   hostname: string | null
   /** Navigation-level failure (enter/menu problems): commands stay empty. */
-  error: { code: string; message: string } | null
+  error: NestedFailure | null
   commands: BatchCommandResult[]
 }
 
 const RECONNECT_LIMIT = 2
 const RECONNECT_BACKOFF = [1000, 3000] as const
+
+/** V0.4.0: monotonic audit write sequence (per process). */
+let auditSequence = 0
 
 export function toRuntimeConfig(cfg: JumpServerConfig, password: string, wireFactory?: import('./session.js').WireFactory): SessionRuntimeConfig {
   return {
@@ -138,6 +217,8 @@ export function toRuntimeConfig(cfg: JumpServerConfig, password: string, wireFac
     username: cfg.username,
     password,
     connectTimeoutMs: cfg.connectTimeout * 1000,
+    hostFingerprint: cfg.hostFingerprint,
+    knownHostsPath: cfg.knownHostsPath,
     enterAssetMs: DEFAULT_TIMEOUTS.enterAsset,
     probeMs: DEFAULT_TIMEOUTS.probe,
     commandMs: cfg.commandTimeout * 1000,
@@ -212,6 +293,22 @@ export class SessionManager {
   private assetCache: AssetCaptureCache | null = null
   /** V0.2.5: a connection dropped during a pending op; reconnect once the turn settles. */
   private reconnectPending = false
+  /**
+   * V0.4.0: id of the streaming job currently owning the PTY (tail -f …).
+   * While set, no other command may use the shell — mixing commands into a
+   * streaming job's output would corrupt both.
+   */
+  private activeJob: string | null = null
+  /**
+   * V0.4.4: job that has been asked to stop but has not finished verifying
+   * the shell yet. The PTY is still in the middle of recovering (Ctrl+C
+   * sent + probe in flight) and MUST NOT be touched by another command.
+   * `activeJob` stays set for the duration so the existing "another job
+   * owns this shell" guard still fires; once verifyShell resolves we
+   * release BOTH fields together. This kills the V0.4.3 race where the
+   * manager cleared activeJob BEFORE the probe was even scheduled.
+   */
+  private stoppingJob: string | null = null
 
   constructor(private readonly options: SessionManagerOptions) {}
 
@@ -257,9 +354,75 @@ export class SessionManager {
     }
   }
 
+  /** True while a streaming job owns the PTY (see activeJob). */
+  hasActiveJob(): boolean {
+    return this.activeJob !== null
+  }
+
+  /**
+   * V0.4.5: which job currently owns this session's PTY, or null. The JobStore
+   * pump uses this as the authority for "does this job still own a shell?",
+   * instead of inferring ownership from the DISCONNECTED state — a reconnect
+   * that completed within one pump interval used to leave a dead job RUNNING.
+   */
+  activeJobId(): string | null {
+    return this.activeJob
+  }
+
+  /** Fail fast when a streaming job owns the shell instead of corrupting its output. */
+  private assertNoActiveJob(): void {
+    if (this.stoppingJob !== null) {
+      throw new JumpServerError('SESSION_BUSY', 'a job (' + this.stoppingJob + ') is being stopped but the shell has not been re-verified yet')
+    }
+    if (this.activeJob !== null) {
+      throw new JumpServerError('SESSION_BUSY', 'a streaming job (' + this.activeJob + ') owns this shell; stop it with jumpserver_job_stop first')
+    }
+  }
+
+  /**
+   * V0.4.5: drop PTY ownership. Called whenever the transport underneath the
+   * session disappears — close(), dispose(), transport loss, or a reconnect
+   * that replaces the session object. Without this a streaming job kept a
+   * ghost claim on a shell that no longer exists, so after a reconnect every
+   * exec / job_start answered SESSION_BUSY forever, and the JobStore (which
+   * only looked at DISCONNECTED) could keep reporting a lost job as RUNNING.
+   */
+  private releasePtyOwnership(): void {
+    this.activeJob = null
+    this.stoppingJob = null
+  }
+
   /** Public connect: serialized through the session queue. */
   async connect(signal?: AbortSignal): Promise<ManagerStatus> {
     return this.queue(() => this.connectLocked(signal), signal)
+  }
+
+  /**
+   * V0.4.0 P0: out-of-band interrupt — Ctrl+C reaches the remote shell even
+   * while a command/batch is in flight (the queue is deliberately bypassed;
+   * queueing would only deliver the interrupt after the running op finished).
+   */
+  async interrupt(): Promise<{ sent: boolean; verified: boolean; state: string; target: string | null }> {
+    const session = this.session
+    if (session === null || !session.isLive()) {
+      return { sent: false, verified: false, state: this.status().state, target: this.status().target }
+    }
+    const result = await session.interrupt()
+    // V0.4.5: an out-of-band ^C ends the job's claim on the PTY. Only
+    // `activeJob` is dropped here — `stoppingJob` must keep guarding a
+    // concurrent stopJob() whose probe is still in flight.
+    this.activeJob = null
+    await this.audit({
+      operation: 'interrupt',
+      target: session.currentTarget,
+      hostname: session.currentHostname,
+      command: null,
+      risk: 'READ',
+      result: result.verified ? 'ok' : 'unverified',
+      exitCode: null,
+      durationMs: null,
+    })
+    return { sent: result.sent, verified: result.verified, state: result.state, target: session.currentTarget }
   }
 
   /**
@@ -288,6 +451,8 @@ export class SessionManager {
     } catch {
       /* stale session */
     }
+    // V0.4.5: the previous transport is gone; no job may keep claiming its PTY.
+    this.releasePtyOwnership()
     const observer = this.options.observer
     let prevState: SessionState | null = null
     const session = new JumpServerSession(toRuntimeConfig(cfg, password, this.options.wireFactory), {
@@ -316,10 +481,10 @@ export class SessionManager {
     return this.status()
   }
 
-  async enter(target: string, signal?: AbortSignal): Promise<ManagerStatus> {
+  async enter(target: string, accountIndex?: number, signal?: AbortSignal): Promise<ManagerStatus> {
     return this.queue(async () => {
       const session = this.requireLiveSession()
-      await session.enter(target, signal)
+      await session.enter(target, accountIndex, signal)
       await this.audit({ operation: 'enter', target, hostname: session.currentHostname, command: null, risk: 'READ', result: 'ok', exitCode: null, durationMs: null })
       return this.status()
     }, signal)
@@ -328,6 +493,7 @@ export class SessionManager {
   async exec(request: ExecRequest): Promise<{ status: ManagerStatus; outcome: ExecOutcome }> {
     return this.queue(async () => {
       const session = this.requireLiveSession()
+      this.assertNoActiveJob()
       if (session.status().state !== SessionState.ASSET_SHELL) {
         throw new JumpServerError('NOT_IN_ASSET', 'exec requires an entered (verified) asset shell')
       }
@@ -344,7 +510,10 @@ export class SessionManager {
         classification: request.classification,
         approvalRequired: request.approvalRequired,
         approvalResult: request.approvalResult,
-        result: outcome.executionState,
+        riskJudge: request.riskJudge,
+        toolCallId: request.toolCallId,
+        batchId: request.batchId,
+        result: outcome.commandStatus,
         exitCode: outcome.kind === 'completed' ? outcome.exitCode : null,
         durationMs,
       })
@@ -359,24 +528,32 @@ export class SessionManager {
         throw new JumpServerError('NOT_CONFIGURED', 'JumpServer is not configured')
       }
       const session = await this.ensureConnectedLocked(request.signal)
-      let st = session.status()
-      if (st.state === SessionState.ASSET_SHELL && st.target === request.target) {
-        // already there
-      } else {
-        if (st.state === SessionState.ASSET_SHELL) {
-          await session.leave(request.signal)
-          st = session.status()
+      this.assertNoActiveJob()
+      const st = await this.navigateToTarget(session, request.target, request.accountIndex, request.signal)
+      if (request.beforeExec !== undefined) {
+        try {
+          await request.beforeExec()
+        } catch (error) {
+          // V0.5.9: a command the human did not approve is audited as DENIED,
+          // then rethrown untouched — same contract as startJob.
+          if (error instanceof JumpServerError && error.code === 'COMMAND_APPROVAL_REQUIRED') {
+            await this.recordDenied({
+              operation: 'run',
+              target: st.target,
+              hostname: st.hostname,
+              command: request.command,
+              risk: request.classification?.risk ?? request.risk,
+              classification: request.classification,
+              reason: APPROVAL_DENIED_REASON,
+              kind: 'denied',
+              riskJudge: request.riskJudge,
+              toolCallId: request.toolCallId,
+              batchId: request.batchId,
+            })
+          }
+          throw error
         }
-        if (st.state === SessionState.UNKNOWN || st.state === SessionState.ERROR) {
-          throw new JumpServerError('UNKNOWN_STATE', 'current session state is not reliably navigable; reconnect and retry')
-        }
-        if (st.state !== SessionState.JUMPSERVER_MENU) {
-          throw new JumpServerError('NOT_AT_MENU', 'cannot navigate: session is in state ' + st.state)
-        }
-        await session.enter(request.target, request.signal)
-        st = session.status()
       }
-      if (request.beforeExec !== undefined) await request.beforeExec()
       const started = Date.now()
       const outcome = await session.exec(request.command, { timeoutMs: request.timeoutMs, signal: request.signal })
       const durationMs = Date.now() - started
@@ -390,12 +567,202 @@ export class SessionManager {
         classification: request.classification,
         approvalRequired: request.approvalRequired,
         approvalResult: request.approvalResult,
-        result: outcome.executionState,
+        riskJudge: request.riskJudge,
+        toolCallId: request.toolCallId,
+        batchId: request.batchId,
+        result: outcome.commandStatus,
         exitCode: outcome.kind === 'completed' ? outcome.exitCode : null,
         durationMs,
       })
       return { status: this.status(), outcome, target: st.target, hostname: st.hostname }
     }, request.signal)
+  }
+
+  /** Shared navigation: menu -> enter(target) -> verified status. */
+  private async navigateToTarget(session: JumpServerSession, target: string, accountIndex?: number, signal?: AbortSignal): Promise<SessionStatus> {
+    let st = session.status()
+    if (st.state === SessionState.ASSET_SHELL && st.target === target) return st
+    if (st.state === SessionState.ASSET_SHELL) {
+      await session.leave(signal)
+      st = session.status()
+      if (st.state !== SessionState.JUMPSERVER_MENU) {
+        throw new JumpServerError('UNKNOWN_STATE', 'not reliably at the JumpServer menu after leaving an asset')
+      }
+    }
+    // V0.5.6: a session parked on KoKo's `ID>` prompt for THIS target is live
+    // and answerable — `accountIndex` completes a navigation that already
+    // started, so the menu precondition does not apply. Every other state
+    // keeps the original fail-closed answer. (Before this, the caller's answer
+    // to the prompt was rejected here with NOT_AT_MENU / CONNECTION_LOST and
+    // the only way forward was a full reconnect.)
+    if (!session.canResumeAccountSelection(target, accountIndex)) {
+      if (st.state === SessionState.UNKNOWN || st.state === SessionState.ERROR) {
+        throw new JumpServerError('UNKNOWN_STATE', 'current session state is not reliably navigable; reconnect and retry')
+      }
+      if (st.state !== SessionState.JUMPSERVER_MENU) {
+        throw new JumpServerError('NOT_AT_MENU', 'cannot navigate: session is in state ' + st.state)
+      }
+    }
+    await session.enter(target, accountIndex, signal)
+    return session.status()
+  }
+
+  /**
+   * V0.4.0: start a streaming job (tail -f / journalctl -f / top / ping / tcpdump).
+   * Navigation happens inside the queue; the command is then written RAW (no
+   * completion marker) and its output is harvested from the observer stream by
+   * the job store. The job owns the PTY until it is stopped.
+   */
+  async startJob(request: {
+    jobId: string
+    target: string
+    command: string
+    signal?: AbortSignal
+    toolCallId?: string
+    /** V0.5.3: 0-based accountIndex to select a user on KoKo's `ID>` prompt
+     *  when the target has multiple authorised bastion users. */
+    accountIndex?: number
+    /** V0.4.3: real classification — the audit must NOT hardcode READ. */
+    classification?: { risk: string; reason?: string; ruleId?: string; confidence?: string; classifierVersion?: number; normalizedCommand?: string }
+    /** V0.4.3: approval outcome recorded in the audit. */
+    approvalRequired?: boolean
+    /** V0.4.3: ignored when beforeExec is supplied — the manager derives the
+     *  outcome from the gate run, not from a caller-provided string. */
+    approvalResult?: string
+    /** V0.5.8: audit line for the judge decision behind this job's command. */
+    riskJudge?: string
+    /**
+     * V0.4.4: deferred permission gate. Runs after navigation, BEFORE the
+     * remote writeLine. Throwing COMMAND_APPROVAL_REQUIRED aborts the start
+     * with a `denied` audit and the PTY is left untouched.
+     */
+    beforeExec?: () => Promise<void>
+  }): Promise<{ target: string | null; hostname: string | null; state: string; startSeq: number }> {
+    return this.queue(async () => {
+      this.assertNoActiveJob()
+      const cfg = this.options.getConfig()
+      if (cfg.enabled === false) throw new JumpServerError('DISABLED', 'JumpServer is disabled in settings')
+      if (!cfg.host || !cfg.username) throw new JumpServerError('NOT_CONFIGURED', 'JumpServer is not configured')
+      const session = await this.ensureConnectedLocked(request.signal)
+      const st = await this.navigateToTarget(session, request.target, request.accountIndex, request.signal)
+
+      // V0.4.4: gate runs AFTER navigateToTarget and BEFORE the PTY write.
+      // COMMAND_APPROVAL_REQUIRED is the only expected rejection — anything
+      // else is rethrown so the caller can react.
+      if (typeof request.beforeExec === 'function') {
+        try {
+          await request.beforeExec()
+        } catch (err) {
+          if (err instanceof JumpServerError && err.code === 'COMMAND_APPROVAL_REQUIRED') {
+            await this.audit({
+              operation: 'job-start',
+              target: st.target,
+              hostname: st.hostname,
+              command: request.command,
+              risk: request.classification?.risk ?? 'UNKNOWN',
+              classification: request.classification,
+              riskJudge: request.riskJudge,
+              actor: 'AGENT',
+              approvalRequired: request.approvalRequired ?? false,
+              approvalResult: 'denied',
+              refusalReason: APPROVAL_DENIED_REASON,
+              taskId: request.jobId,
+              toolCallId: request.toolCallId,
+              result: 'DENIED',
+              exitCode: null,
+              durationMs: null,
+            })
+            throw err
+          }
+          throw err
+        }
+      }
+
+      const startSeq = this.options.observer?.cursorSeq ?? 0
+      if (!session.writeLine(request.command)) {
+        throw new JumpServerError('CONNECTION_LOST', 'could not write the job command to the PTY')
+      }
+      this.activeJob = request.jobId
+      await this.audit({
+        operation: 'job-start',
+        target: st.target,
+        hostname: st.hostname,
+        command: request.command,
+        // V0.4.3: the streaming job is NOT automatically READ. Recording a
+        // hardcoded READ hid `rm -rf` behind a confirm:true from the audit.
+        risk: request.classification?.risk ?? 'UNKNOWN',
+        classification: request.classification,
+          actor: 'AGENT',
+        riskJudge: request.riskJudge,
+        approvalRequired: request.approvalRequired ?? false,
+        // V0.4.5: a READ job that never needed approval must not be audited as
+        // `approved` — that made every tail -f look like a human decision.
+        approvalResult: request.approvalRequired === true ? 'approved' : 'none',
+        taskId: request.jobId,
+        toolCallId: request.toolCallId,
+        result: 'RUNNING',
+        exitCode: null,
+        durationMs: null,
+      })
+      return { target: st.target, hostname: st.hostname, state: session.state, startSeq }
+    }, request.signal)
+  }
+
+  /**
+   * V0.4.0: stop a streaming job — Ctrl+C (out-of-band) and release the PTY.
+   * V0.4.3: after the interrupt, PROVE the shell came back. Reporting
+   * `state: 'ASSET_SHELL'` without probing let a wedged PTY masquerade as a
+   * usable session, so the next command typed into a dead shell.
+   * V0.4.4: stopJob now uses session.interruptAndVerify() so exactly one
+   * Ctrl+C is sent; activeJob is released only AFTER the probe resolves,
+   * which closes the V0.4.3 race where another exec/startJob could land
+   * while the shell was still mid-recovery.
+   */
+  async stopJob(jobId: string): Promise<{ sent: boolean; verified: boolean; state: string }> {
+    const session = this.session
+    if (this.activeJob !== null && this.activeJob !== jobId) {
+      throw new JumpServerError('SESSION_BUSY', 'another job (' + this.activeJob + ') owns this shell')
+    }
+    if (this.stoppingJob === jobId) {
+      throw new JumpServerError('SESSION_BUSY', 'this job is already being stopped; the previous call has not finished verifying yet')
+    }
+    // Mark the PTY as in-recovery BEFORE we touch the wire. activeJob stays
+    // set so the existing SESSION_BUSY guard still fires for any new caller.
+    this.stoppingJob = jobId
+    let sent = false
+    let verified = false
+    try {
+      if (session !== null) {
+        // Single combined call: one ^C + one probe + state transition. No
+        // double-Ctrl+C, no probe without an explicit interrupt.
+        const result = await session.interruptAndVerify().catch(() => ({ sent: false, verified: false, state: session.state }))
+        sent = result.sent
+        verified = result.verified
+        if (verified) {
+          session.setStateForVerification?.('ASSET_SHELL')
+        } else {
+          session.setStateForVerification?.('UNKNOWN')
+          this.options.onLog?.('job stopped but the shell could not be re-verified; session collapsed to UNKNOWN')
+        }
+      }
+    } finally {
+      // Release both fields together, regardless of probe outcome, so the
+      // next tool call never sees a half-cleared state.
+      this.activeJob = null
+      this.stoppingJob = null
+    }
+    await this.audit({
+      operation: 'job-stop',
+      target: session?.currentTarget ?? null,
+      hostname: session?.currentHostname ?? null,
+      command: null,
+      risk: 'READ',
+      taskId: jobId,
+      result: sent ? (verified ? 'STOPPED' : 'LOST') : 'not-sent',
+      exitCode: null,
+      durationMs: null,
+    })
+    return { sent, verified, state: this.status().state }
   }
 
   /**
@@ -407,6 +774,18 @@ export class SessionManager {
    * per command so one bad command cannot mask its neighbours' results.
    */
   async runTargetBatch(request: TargetBatchRequest): Promise<TargetBatchResult> {
+    // V0.4.3: maxSessions is enforced HERE, around the whole target turn, so
+    // it caps how many assets are entered simultaneously regardless of the
+    // caller's concurrency. Callers that never set a gate are unaffected.
+    const release = this.options.sessionGate !== undefined ? await this.options.sessionGate.acquire() : null
+    try {
+      return await this.runTargetBatchGated(request)
+    } finally {
+      release?.()
+    }
+  }
+
+  private async runTargetBatchGated(request: TargetBatchRequest): Promise<TargetBatchResult> {
     return this.queue(async () => {
       const cfg = this.options.getConfig()
       if (cfg.enabled === false) {
@@ -418,31 +797,15 @@ export class SessionManager {
       let session: JumpServerSession
       try {
         session = await this.ensureConnectedLocked(request.signal)
+        this.assertNoActiveJob()
       } catch (error) {
         return { target: request.target, hostname: null, error: this.errorDetail(error), commands: [] }
       }
-      let st = session.status()
+      let st: SessionStatus
       try {
-        if (st.state === SessionState.ASSET_SHELL) {
-          if (st.target === request.target) {
-            // already inside the requested asset
-          } else {
-            await session.leave(request.signal)
-            st = session.status()
-            if (st.state !== SessionState.JUMPSERVER_MENU) throw new JumpServerError('UNKNOWN_STATE', 'not reliably at the JumpServer menu after leaving an asset')
-            await session.enter(request.target, request.signal)
-            st = session.status()
-          }
-        } else if (st.state === SessionState.JUMPSERVER_MENU) {
-          await session.enter(request.target, request.signal)
-          st = session.status()
-        } else if (st.state === SessionState.UNKNOWN || st.state === SessionState.ERROR) {
-          throw new JumpServerError('UNKNOWN_STATE', 'current session state is not reliably navigable; reconnect and retry')
-        } else {
-          throw new JumpServerError('NOT_AT_MENU', 'cannot navigate: session is in state ' + st.state)
-        }
+        st = await this.navigateToTarget(session, request.target, request.accountIndex, request.signal)
       } catch (error) {
-        return { target: request.target, hostname: st?.hostname ?? null, error: this.errorDetail(error), commands: [] }
+        return { target: request.target, hostname: session.currentHostname, error: this.errorDetail(error), commands: [] }
       }
       const results: BatchCommandResult[] = []
       for (const item of request.commands) {
@@ -460,6 +823,7 @@ export class SessionManager {
           results.push({
             command: item.command,
             executionState: outcome.executionState,
+            commandStatus: outcome.commandStatus,
             exitCode: outcome.kind === 'completed' ? outcome.exitCode : null,
             output: outcome.output,
             truncated: outcome.kind === 'completed' || outcome.kind === 'timeout' ? outcome.truncated : false,
@@ -476,14 +840,22 @@ export class SessionManager {
             classification: item.classification,
             approvalRequired: item.approvalRequired,
             approvalResult: item.approvalResult,
-            result: outcome.executionState,
+            riskJudge: item.riskJudge,
+            toolCallId: item.toolCallId ?? request.toolCallId,
+            batchId: item.batchId ?? request.batchId,
+            batchIndex: item.batchIndex,
+            result: outcome.commandStatus,
             exitCode: outcome.kind === 'completed' ? outcome.exitCode : null,
             durationMs,
           })
         } catch (error) {
+          // V0.5.9: a refusal must be distinguishable from a failure — "was it
+          // stopped, or did it break?" has to be answerable from the audit.
+          const denied = error instanceof JumpServerError && error.code === 'COMMAND_APPROVAL_REQUIRED'
           results.push({
             command: item.command,
             executionState: 'ERROR',
+            commandStatus: 'UNKNOWN',
             exitCode: null,
             output: '',
             truncated: false,
@@ -498,9 +870,14 @@ export class SessionManager {
             risk: item.risk,
             actor: item.actor,
             classification: item.classification,
-            approvalRequired: item.approvalRequired,
-            approvalResult: item.approvalResult,
-            result: 'error',
+            approvalRequired: denied ? true : item.approvalRequired,
+            approvalResult: denied ? 'denied' : item.approvalResult,
+            riskJudge: item.riskJudge,
+            refusalReason: denied ? APPROVAL_DENIED_REASON : undefined,
+            toolCallId: item.toolCallId ?? request.toolCallId,
+            batchId: item.batchId ?? request.batchId,
+            batchIndex: item.batchIndex,
+            result: denied ? 'DENIED' : 'error',
             exitCode: null,
             durationMs: null,
           })
@@ -517,9 +894,18 @@ export class SessionManager {
     }, request.signal)
   }
 
-  private errorDetail(error: unknown): { code: string; message: string } {
+  /**
+   * V0.5.5: `detail` is now part of the projection. It used to be dropped
+   * here, so every multi-target tool (batch / runbook / inspect / compare /
+   * baseline) reported a bare `code: message` — the KoKo banner, the parsed
+   * account list and the retryAfterMs hint were all lost between the session
+   * and the model, which is precisely where the retry loop was fed.
+   */
+  private errorDetail(error: unknown): NestedFailure {
     if (error instanceof JumpServerError) {
-      return { code: error.code, message: error.message }
+      return error.detail === undefined
+        ? { code: error.code, message: error.message }
+        : { code: error.code, message: error.message, detail: error.detail }
     }
     return { code: 'FAILED', message: error instanceof Error ? error.message : String(error) }
   }
@@ -669,6 +1055,9 @@ export class SessionManager {
       this.cancelReconnect()
       // The PTY is gone; a stale asset capture must not survive a new session.
       this.assetCache = null
+      // V0.4.5: and neither must a stale job claim — the next connect() must
+      // not inherit a SESSION_BUSY ghost from the closed session.
+      this.releasePtyOwnership()
       const session = this.session
       this.session = null
       if (session !== null) {
@@ -736,6 +1125,10 @@ export class SessionManager {
 
   private onSessionLost(): void {
     if (this.disposed) return
+    // V0.4.5: the wire is gone, so any job that owned this PTY lost its shell
+    // right now — regardless of whether an auto-reconnect lands a second
+    // later. The JobStore reads activeJobId() and marks the job LOST.
+    this.releasePtyOwnership()
     const cfg = this.options.getConfig()
     if (!cfg.autoReconnect) return
     const session = this.session
@@ -778,6 +1171,54 @@ export class SessionManager {
     this.reconnectTimer = null
   }
 
+  /**
+   * V0.5.9: record a command that was REFUSED — either by the rule gate itself
+   * (`COMMAND_BLOCKED`) or because nobody approved it (`DENIED`).
+   *
+   * Why this exists: before V0.5.9 the audit trail only contained commands that
+   * actually ran, so "who tried to run what, and was stopped" was invisible —
+   * a compliance blind spot, not a cosmetic one.
+   *
+   * Best-effort by construction: audit() swallows sink failures, so a broken
+   * audit sink can never turn a refusal into an execution.
+   */
+  async recordDenied(input: {
+    operation: string
+    command: string | null
+    risk: string
+    classification?: { risk: string; reason?: string; ruleId?: string; confidence?: string; classifierVersion?: number; normalizedCommand?: string }
+    /** Why it was refused — the gate's own reason, not the classifier's. */
+    reason: string
+    /** 'blocked' = the rules refused it outright; 'denied' = no human approval. */
+    kind: 'blocked' | 'denied'
+    target?: string | null
+    hostname?: string | null
+    riskJudge?: string
+    toolCallId?: string
+    batchId?: string
+    batchIndex?: number
+  }): Promise<void> {
+    const session = this.session
+    await this.audit({
+      operation: input.operation,
+      target: input.target === undefined ? (session?.currentTarget ?? null) : input.target,
+      hostname: input.hostname === undefined ? (session?.currentHostname ?? null) : input.hostname,
+      command: input.command,
+      risk: input.risk,
+      classification: input.classification,
+      approvalRequired: input.kind === 'denied',
+      approvalResult: input.kind === 'denied' ? 'denied' : 'none',
+      riskJudge: input.riskJudge,
+      refusalReason: input.reason,
+      toolCallId: input.toolCallId,
+      batchId: input.batchId,
+      batchIndex: input.batchIndex,
+      result: input.kind === 'denied' ? 'DENIED' : 'BLOCKED',
+      exitCode: null,
+      durationMs: null,
+    })
+  }
+
   private async audit(partial: {
     operation: string
     target?: string | null
@@ -788,6 +1229,16 @@ export class SessionManager {
     classification?: { risk: string; reason?: string; ruleId?: string; confidence?: string; classifierVersion?: number; normalizedCommand?: string }
     approvalRequired?: boolean
     approvalResult?: string
+    /** V0.5.8: one-line judge record (AUTO_ALLOWED / ADVISORY) — see AuditRecord. */
+    riskJudge?: string
+    /** V0.5.9: why a refused command was refused (BLOCKED / DENIED records). */
+    refusalReason?: string
+    /** V0.4.0: MCP request id / batch id / job id (AI task correlation). */
+    toolCallId?: string
+    batchId?: string
+    taskId?: string
+    /** V0.4.0: index of this command inside its batch (audit ordering). */
+    batchIndex?: number
     risk: string
     result: string
     exitCode?: number | null
@@ -819,6 +1270,13 @@ export class SessionManager {
         : undefined,
       approvalRequired: partial.approvalRequired ?? false,
       approvalResult: partial.approvalResult ?? 'none',
+      riskJudge: partial.riskJudge,
+      refusalReason: partial.refusalReason,
+      toolCallId: partial.toolCallId,
+      batchId: partial.batchId,
+      taskId: partial.taskId,
+      sequence: ++auditSequence,
+      batchIndex: partial.batchIndex,
       permissionMode: cfg.permissionMode,
       result: partial.result,
       exitCode: partial.exitCode ?? null,
