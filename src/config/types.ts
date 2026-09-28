@@ -51,6 +51,14 @@ export interface JumpServerConfig {
    * a match is still recorded there for visibility.
    */
   knownHostsPath?: string
+  /**
+   * V0.4.0 multi-account: named bastion identities selectable from the
+   * settings card. The selected profile wins over host/port/username above,
+   * field by field; its password is still a credential-ref.
+   */
+  profiles?: ConnectionProfile[]
+  /** Selected profile id, or empty/absent to use the settings card values. */
+  activeProfileId?: string
   /** Connect timeout in seconds (default 15) */
   connectTimeout: number
   /** Per-command default timeout in seconds (default 60) */
@@ -458,5 +466,62 @@ export function resolveConcurrency(cfg: Pick<JumpServerConfig, 'batchConcurrency
   return {
     batchConcurrency: clamp(cfg.batchConcurrency, DEFAULT_BATCH_CONCURRENCY, MAX_BATCH_CONCURRENCY),
     maxSessions: clamp(cfg.maxSessions, DEFAULT_MAX_SESSIONS, MAX_SESSIONS_CEILING),
+  }
+}
+
+/**
+ * V0.4.0 (WorkBuddy) / multi-account in the DSH port: one named bastion
+ * identity. A selected profile supplies the whole connection four-tuple and
+ * takes precedence over the settings card; the password itself is still only
+ * ever a credential-ref, never stored here.
+ */
+export interface ConnectionProfile {
+  id: string
+  label?: string
+  host?: string
+  port?: number
+  username?: string
+  passwordEnv?: string
+}
+
+export interface ResolvedConnection {
+  host: string
+  port: number
+  username: string
+  passwordEnv: string
+  /** Where the effective identity came from, for jumpserver_status / the settings card. */
+  source: 'profile' | 'settings'
+  /** The selected profile id, when one was applied. */
+  profileId?: string
+  profileLabel?: string
+}
+
+/**
+ * Resolve the effective bastion identity.
+ *
+ * Precedence: the selected profile wins over the settings card, field by
+ * field — so a profile that only overrides the username still inherits the
+ * configured host. A malformed/absent profile degrades to the settings card
+ * instead of failing: an account problem must never be the reason a
+ * connection cannot be made.
+ */
+export function resolveConnection(cfg: Pick<JumpServerConfig, 'host' | 'port' | 'username' | 'passwordEnv' | 'profiles' | 'activeProfileId'>): ResolvedConnection {
+  const raw = Array.isArray(cfg.profiles) ? cfg.profiles : []
+  const profiles = raw.filter((p): p is ConnectionProfile => p !== null && typeof p === 'object' && typeof (p as ConnectionProfile).id === 'string' && (p as ConnectionProfile).id.length > 0)
+  const active = typeof cfg.activeProfileId === 'string' && cfg.activeProfileId.length > 0
+    ? profiles.find((p) => p.id === cfg.activeProfileId)
+    : undefined
+  const use = (value: unknown, fallback: string): string =>
+    typeof value === 'string' && value.trim().length > 0 ? value.trim() : fallback
+  const port = typeof active?.port === 'number' && Number.isFinite(active.port) && active.port > 0 && active.port <= 65535
+    ? Math.floor(active.port)
+    : cfg.port
+  return {
+    host: use(active?.host, cfg.host),
+    port,
+    username: use(active?.username, cfg.username),
+    passwordEnv: use(active?.passwordEnv, cfg.passwordEnv),
+    source: active !== undefined ? 'profile' : 'settings',
+    ...(active !== undefined ? { profileId: active.id, profileLabel: active.label } : {}),
   }
 }
