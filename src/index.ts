@@ -23,6 +23,7 @@ import { JobStore } from './runtime/job-store.js'
 import { BaselineStore } from './runtime/baseline-store.js'
 import { jumpHomeBaselines, jumpHomeKnownHosts } from './runtime/paths.js'
 import { interruptSession } from './runtime/interrupt.js'
+import { startConsoleServer, type ConsoleHandle } from './runtime/console.js'
 import { OpsCaseRegistry } from './ops/evidence.js'
 import { manualPolicyOf, resolveConcurrency, resolveConnection } from './config/types.js'
 import { Semaphore } from './jumpserver/concurrency.js'
@@ -151,6 +152,10 @@ export function apply(ctx: Context, config: JumpServerConfig): void {
   // V0.4.0: streaming jobs (tail -f / journalctl -f / tcpdump) own the PTY
   // until stopped; output is harvested from the conversation's observer.
   const jobs = new JobStore(registry)
+  // V0.4.0: the loopback console URL of a conversation. Assigned once the
+  // console has actually bound its port; before that (and when disabled) the
+  // accessor returns undefined and jumpserver_status simply omits the field.
+  let consoleUrlFor: (sessionId: string) => string | undefined = () => undefined
   // V0.4.1: named baseline snapshots for drift detection.
   const baselines = new BaselineStore(jumpHomeBaselines())
 
@@ -246,6 +251,7 @@ export function apply(ctx: Context, config: JumpServerConfig): void {
         // V0.5.9: the conversation's own audit ring (including BLOCKED/DENIED
         // refusals) is what jumpserver_audit and the sidebar audit tab read.
         (sessionId) => recentAudits.get(sessionId) ?? [],
+        (sessionId) => consoleUrlFor(sessionId),
       )
       // V0.3.0: ops investigation tools (triage/compare/case/remediate) share the
       // same grant boundary and the per-conversation case registry.
@@ -558,6 +564,38 @@ export function apply(ctx: Context, config: JumpServerConfig): void {
       return { ...result, ok: result.sent, sessionId }
     },
   }
+
+  // V0.4.0: the desktop-friendly console. It needs no client plugin and no
+  // webServer route, so it starts whenever the plugin does; the sidebar tab
+  // (which needs dsh-better-sidebar) stays optional and independent of it.
+  ctx.effect(
+    () => {
+      if (getConfig().consoleEnabled === false) return () => undefined
+      let disposed = false
+      let handle: ConsoleHandle | undefined
+      void startConsoleServer(bridgeServices, { port: getConfig().consolePort ?? 0 })
+        .then((started) => {
+          if (disposed) {
+            void started.close()
+            return
+          }
+          handle = started
+          consoleUrlFor = (sessionId: string) => started.urlFor(sessionId)
+          ctx.logger.warn(
+            '[dsh-jumpserver] console: ' + started.urlFor(undefined) + ' (append &session=<conversationId>, or read consoleUrl from jumpserver_status)',
+          )
+        })
+        .catch((error) => {
+          ctx.logger.warn('[dsh-jumpserver] console unavailable: ' + String(error))
+        })
+      return () => {
+        disposed = true
+        consoleUrlFor = () => undefined
+        void handle?.close()
+      }
+    },
+    'jumpserver.console',
+  )
 
   ctx.inject(['webServer'], (webCtx) => {
     const webServer = webCtx.get('webServer')

@@ -80,8 +80,14 @@ if (typeof materialized?.apply !== 'function') {
   console.error('BUNDLE_SMOKE_FAIL: exports.apply is not a function', Object.keys(materialized ?? {}))
   process.exit(1)
 }
-if (!Array.isArray(materialized.inject) || !materialized.inject.includes('slots') || !materialized.inject.includes('betterSidebar')) {
-  console.error('BUNDLE_SMOKE_FAIL: exports.inject must include slots + betterSidebar')
+if (!Array.isArray(materialized.inject) || !materialized.inject.includes('slots') || !materialized.inject.includes('settingsScope')) {
+  console.error('BUNDLE_SMOKE_FAIL: exports.inject must include slots + settingsScope')
+  process.exit(1)
+}
+// V0.4.0: betterSidebar is a SEPARATE plugin and must never be a hard inject —
+// requiring it meant a desktop install without it activated nothing at all.
+if (materialized.inject.includes('betterSidebar')) {
+  console.error('BUNDLE_SMOKE_FAIL: betterSidebar must stay optional (it is not part of the DSH base)')
   process.exit(1)
 }
 
@@ -255,6 +261,43 @@ for (const cleanup of effectCleanups) {
 }
 
 console.log('BUNDLE_SMOKE_PASS')
+// ---- V0.4.0: desktop / no-better-sidebar degradation ----------------------
+{
+  const soloRegistrations = []
+  let soloTabs = 0
+  const soloCtx = {
+    effect: (fn) => { const result = fn(); return () => { if (typeof result === 'function') result() } },
+    get: ctx.get,
+    locale: ctx.locale,
+    settingsScope: ctx.settingsScope,
+    slots: {
+      inject(name, callback) {
+        soloRegistrations.push(name)
+        callback?.()
+        return () => undefined
+      },
+      register() { return () => undefined },
+    },
+    // no betterSidebar ⇒ no tab service at all
+  }
+  try {
+    const cleanup = materialized.apply(soloCtx)
+    if (typeof cleanup === 'function') cleanup()
+  } catch (error) {
+    console.error('BUNDLE_SMOKE_FAIL: apply() must not throw without dsh-better-sidebar:', error)
+    process.exit(1)
+  }
+  if (!soloRegistrations.includes('settings.plugin.item')) {
+    console.error('BUNDLE_SMOKE_FAIL: the settings card must still register without dsh-better-sidebar')
+    process.exit(1)
+  }
+  if (soloTabs !== 0) {
+    console.error('BUNDLE_SMOKE_FAIL: no sidebar tab may be registered without the service')
+    process.exit(1)
+  }
+  console.log('no-sidebar   = settings card registered, terminal tab skipped (console covers it)')
+}
+
 console.log('inject       =', JSON.stringify(materialized.inject))
 console.log('slots        =', injected.join(', '))
 console.log('legacy gone  = conversation.session.header.utilities, shell.overlay')

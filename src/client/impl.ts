@@ -10,10 +10,18 @@ import { injectStyles } from './styles.js'
 import { fetchStatus } from './api.js'
 import { JumpServerSettingsCard } from './settings-card.js'
 import { JumpServerSidebarTab, TAB_ID, TAB_ORDER, terminalIcon, type JumpServerSettingsScope } from './terminal-tab.js'
-import type { BrowserCtx } from './context.js'
+import type { BetterSidebarService, BrowserCtx } from './context.js'
 
-/** Services the loader must have up before this browser half activates. */
-export const inject = ['slots', 'locale', 'settingsScope', 'connection', 'betterSidebar']
+/**
+ * Services the loader must have up before this browser half activates.
+ *
+ * V0.4.0: `betterSidebar` is deliberately NOT in this list. It is a separate
+ * plugin, and requiring it meant a DSH install without dsh-better-sidebar (for
+ * example the desktop app) activated NOTHING — not even the settings card. A
+ * missing sidebar now only skips the terminal tab; the loopback console
+ * reported by jumpserver_status covers the terminal use case.
+ */
+export const inject = ['slots', 'locale', 'settingsScope', 'connection']
 
 /** locale bind() -> plain object snapshot (re-read at every render, never stale). */
 function tMap(bind: (key: string) => string): Record<string, string> {
@@ -53,13 +61,20 @@ export function apply(ctx: BrowserCtx): void {
     }, JumpServerSettingsCard),
   )
 
+  // Everything below is the optional better-sidebar integration.
+  const sidebar = ctx.betterSidebar ?? (ctx.get('betterSidebar') as BetterSidebarService | undefined)
+  if (sidebar === undefined) {
+    ctx.effect(() => () => undefined, 'jumpserver: no dsh-better-sidebar — terminal tab skipped (use the loopback console)')
+    return
+  }
+
   // The React key is deliberately the Better Sidebar conversation id. A tab
   // descriptor is global, so without this key React may reuse one component
   // instance when the active conversation changes, carrying its old terminal
   // buffer/cursor/status into the new conversation. Remounting makes the
   // browser lifecycle match the Host's one-bundle-per-conversation lifecycle.
   ctx.effect(() => {
-    const dispose = ctx.betterSidebar.registerTab({
+    const dispose = sidebar.registerTab({
       id: TAB_ID,
       title: () => t('tabTitle'),
       icon: (size: number) => terminalIcon(size),
@@ -81,7 +96,7 @@ export function apply(ctx: BrowserCtx): void {
   // /jumpserver. Opening the terminal itself must not imply JumpServer use —
   // the grant is what unlocks the tools, and the tab is only a mirror.
   ctx.effect(() => {
-    const sessionIdOf = (): string | undefined => (ctx.betterSidebar.getSnapshot() as { sessionId?: string })?.sessionId
+    const sessionIdOf = (): string | undefined => (sidebar.getSnapshot() as { sessionId?: string })?.sessionId
     const maybeOpen = (sessionId: string): void => {
       if (autoOpenedFor.has(sessionId)) return
       if (getAutoOpen() !== true) return
@@ -90,7 +105,7 @@ export function apply(ctx: BrowserCtx): void {
           if (autoOpenedFor.has(sessionId)) return
           if (data?.granted === true) {
             autoOpenedFor.add(sessionId)
-            ctx.betterSidebar.openTab({ type: TAB_ID }, { sessionId })
+            sidebar.openTab({ type: TAB_ID }, { sessionId })
           }
         })
         .catch(() => undefined)
@@ -100,7 +115,7 @@ export function apply(ctx: BrowserCtx): void {
       if (sessionId !== undefined) maybeOpen(sessionId)
     }
     notify()
-    const unsubscribe = ctx.betterSidebar.subscribeState(notify)
+    const unsubscribe = sidebar.subscribeState(notify)
     const poll = setInterval(notify, 2500)
     return () => {
       unsubscribe()
