@@ -289,23 +289,35 @@ export function apply(ctx: Context, config: JumpServerConfig): void {
       }, 30000)
       const cfgAtBoot = getConfig()
       ctx.logger.warn('[dsh-jumpserver] started: gateway=' + cfgAtBoot.host + ':' + cfgAtBoot.port + ' mode=' + cfgAtBoot.permissionMode)
-      const disposers = registerJumpServerTools(
-        ctx,
-        registry,
-        getConfig,
-        grants,
-        terminateConversationJumpServer,
-        // V0.5.9: the conversation's own audit ring (including BLOCKED/DENIED
-        // refusals) is what jumpserver_audit and the sidebar audit tab read.
-        (sessionId) => recentAudits.get(sessionId) ?? [],
-        (sessionId) => consoleUrlFor(sessionId),
-      )
-      // V0.3.0: ops investigation tools (triage/compare/case/remediate) share the
-      // same grant boundary and the per-conversation case registry.
-      const opsDisposers = registerOpsTools(ctx, registry, getConfig, grants, cases)
-      const jobDisposers = registerJobTools(ctx, registry, getConfig, grants, jobs)
-      const collectDisposers = registerCollectionTools(ctx, registry, getConfig, grants, baselines)
-      const disposeCommand = registerJumpServerCommand(ctx, registry, getConfig, grants, terminateConversationJumpServer)
+      // Each group is registered inside its own guard: the real ctx.tools.register
+      // VALIDATES a tool definition and throws on a bad schema (the mock context used
+      // by the local smoke does not), so one rejected tool used to abort the whole
+      // plugin — no tools, no console, and no error anyone could see.
+      const disposers: Array<() => void> = []
+      const opsDisposers: Array<() => void> = []
+      const jobDisposers: Array<() => void> = []
+      const collectDisposers: Array<() => void> = []
+      let disposeCommand: (() => void) | null | undefined
+      mark('tools:core')
+      safe('tools:core', () => {
+        disposers.push(...registerJumpServerTools(
+          ctx,
+          registry,
+          getConfig,
+          grants,
+          terminateConversationJumpServer,
+          (sessionId) => recentAudits.get(sessionId) ?? [],
+          (sessionId) => consoleUrlFor(sessionId),
+        ))
+      })
+      mark('tools:ops')
+      safe('tools:ops', () => { opsDisposers.push(...registerOpsTools(ctx, registry, getConfig, grants, cases)) })
+      mark('tools:jobs')
+      safe('tools:jobs', () => { jobDisposers.push(...registerJobTools(ctx, registry, getConfig, grants, jobs)) })
+      mark('tools:collect')
+      safe('tools:collect', () => { collectDisposers.push(...registerCollectionTools(ctx, registry, getConfig, grants, baselines)) })
+      mark('tools:command')
+      safe('tools:command', () => { disposeCommand = registerJumpServerCommand(ctx, registry, getConfig, grants, terminateConversationJumpServer) })
       return () => {
         jobs.dispose()
         stopIdle()
