@@ -67,6 +67,7 @@ const OPS_SCHEMA = {
     ok: { type: 'boolean', required: true },
     code: { type: 'string' },
     message: { type: 'string' },
+    consoleUrl: { type: 'string' },
     target: { type: 'string' },
     hostname: { type: 'string' },
     caseId: { type: 'string' },

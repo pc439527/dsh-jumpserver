@@ -38,6 +38,7 @@ const JOB_SCHEMA = {
     jobId: { type: 'string' },
     jobState: { type: 'string' },
     riskJudge: { type: 'string' },
+    consoleUrl: { type: 'string' },
     jobsStopped: { type: 'integer' },
     interrupted: { type: 'boolean' },
     verified: { type: 'boolean' },

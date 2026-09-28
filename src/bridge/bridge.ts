@@ -42,6 +42,8 @@ export interface BridgeServices {
   }
   /** Whether the conversation currently holds a JumpServer Session Grant. */
   grantedFor: (sessionId: string | undefined) => boolean
+  /** V0.4.1: loopback console URL for this conversation (token embedded). */
+  consoleUrlFor?: (sessionId: string | undefined) => string | undefined
   /** Explicitly end SSH and revoke this conversation grant. */
   terminateFor?: (sessionId: string) => Promise<unknown>
   observerFor: (sessionId: string | undefined) => TerminalObserver | null
@@ -68,6 +70,13 @@ export interface BridgeServices {
    * The route enforces a live conversation grant before reaching this service.
    */
   manualExec: (sessionId: string, command: string, signal?: AbortSignal, confirmed?: boolean, confirmToken?: string) => Promise<Record<string, unknown>>
+  /**
+   * Browser-half activation telemetry. The renderer cannot write files, so
+   * "why is my settings card missing" is otherwise unanswerable from the Host:
+   * the client posts short events here and the Host appends them to
+   * <dsh home>/jumpserver/client-trace.jsonl.
+   */
+  diagFor?: (event: string, detail?: Record<string, unknown>) => void
   /** V0.4.0: streaming jobs of one conversation (never another's). */
   jobsFor?: (sessionId: string) => Promise<Array<Record<string, unknown>>>
   /** V0.4.5: idempotent job stop (one Ctrl+C, shared verdict). */
@@ -129,6 +138,9 @@ function statusPayload(services: BridgeServices, sessionId: string | undefined):
     manualPolicy: manualPolicyOf(cfg),
     granted: services.grantedFor(sessionId),
     connectionSource: st.connectionSource,
+    // V0.4.1: the page can open the console itself once the conversation is
+    // granted — the Host cannot raise UI, so the browser half does it.
+    consoleUrl: services.consoleUrlFor?.(sessionId),
     connectionComplete: Boolean(cfg.host && cfg.username),
     connectionMissing: cfg.host ? (cfg.username ? [] : ['username']) : (cfg.username ? ['host'] : ['host', 'username']),
     lastSeq: observer?.cursorSeq ?? 0,
@@ -296,6 +308,25 @@ export function registerBridgeRoutes(webServer: {
         } catch (error) {
           json(res, 500, { ok: false, code: 'MANUAL_EXEC_FAILED', message: error instanceof Error ? error.message : String(error) })
         }
+      })()
+    },
+  }))
+
+  disposers.push(webServer.register({
+    kind: 'exact',
+    path: '/api/jumpserver.diag',
+    handler: (req, res) => {
+      if (!requirePost(req, res)) return
+      void (async () => {
+        const body = await readJsonBody(req)
+        const event = typeof body.event === 'string' ? body.event.slice(0, 120) : ''
+        if (event.length > 0 && services.diagFor !== undefined) {
+          const detail = body.detail !== null && typeof body.detail === 'object' && !Array.isArray(body.detail)
+            ? (body.detail as Record<string, unknown>)
+            : undefined
+          try { services.diagFor(event, detail) } catch { /* telemetry must never break the page */ }
+        }
+        json(res, 200, { ok: true })
       })()
     },
   }))

@@ -51,8 +51,30 @@ interface CredentialsApi {
 /** Sessions that already auto-opened the tab (per page load; a reload resets). */
 const autoOpenedFor = new Set<string>()
 
+/** Fire-and-forget activation trace -> <dsh home>/jumpserver/client-trace.jsonl. */
+function diag(event: string, detail?: Record<string, unknown>): void {
+  try {
+    void fetch('/api/jumpserver.diag', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ event, detail }),
+    }).catch(() => undefined)
+  } catch {
+    /* telemetry must never break the page */
+  }
+}
+
+/** Used when no settings backend is reachable: the card still exists and says so. */
+const UNAVAILABLE_SCOPE = {
+  getSnapshot: () => ({ status: 'unavailable', writable: false }),
+  subscribe: () => () => undefined,
+  set: async () => false,
+  unset: async () => false,
+} as unknown as JumpServerSettingsScope
+
 export function apply(ctx: BrowserCtx): void {
   injectStyles()
+  diag('apply:enter', { svc: Object.keys(ctx as unknown as Record<string, unknown>) })
 
   // ---- optional: i18n -----------------------------------------------------
   const locale = ctx.get('locale') as BrowserCtx['locale'] | undefined
@@ -69,24 +91,31 @@ export function apply(ctx: BrowserCtx): void {
     scope = new NamespaceSettingsScope(connectionApi as SettingsApiFace, NS)
   }
 
-  if (scope !== undefined) {
-    const api = { credentials: connectionApi?.credentials } as unknown
-    ctx.slots.inject('settings.plugin.item', () =>
-      ctx.slots.register({
-        name: 'settings.plugin.item',
-        key: NS,
-        locale: NS,
-        inject: () => ({ t: tMap(t), scope, api }),
-      }, JumpServerSettingsCard),
-    )
-  }
+  // V0.4.1: the card is registered UNCONDITIONALLY. Skipping it when the
+  // settings backend looked unreachable is how "the plugin page has no settings
+  // form at all" happened — a silent hole is worse than a card that says its
+  // backend is unavailable.
+  const cardScope = scope ?? UNAVAILABLE_SCOPE
+  const api = { credentials: connectionApi?.credentials } as unknown
+  diag('slot:inject:start', { scope: scope !== undefined ? 'ready' : 'unavailable' })
+  ctx.slots.inject('settings.plugin.item', () => {
+    diag('slot:inject:fired')
+    return ctx.slots.register({
+      name: 'settings.plugin.item',
+      key: NS,
+      locale: NS,
+      inject: () => ({ t: tMap(t), scope: cardScope, api }),
+    }, JumpServerSettingsCard)
+  })
 
   // ---- optional: better-sidebar terminal tab ------------------------------
+  diag('services', { locale: locale !== undefined, connection: connection !== undefined, settingsApi: scope !== undefined })
   const sidebar = ctx.get('betterSidebar') as BetterSidebarService | undefined
   if (sidebar === undefined) {
     // No sidebar plugin installed (a plain desktop install): nothing else to
     // register here. The Host's loopback console is the terminal for this
     // install, and jumpserver_status hands out its URL.
+    diag('sidebar:absent')
     ctx.effect(() => () => undefined, 'jumpserver: no dsh-better-sidebar — terminal tab skipped (use the loopback console)')
     return
   }
@@ -96,6 +125,7 @@ export function apply(ctx: BrowserCtx): void {
   // instance when the active conversation changes, carrying its old terminal
   // buffer/cursor/status into the new conversation. Remounting makes the
   // browser lifecycle match the Host's one-bundle-per-conversation lifecycle.
+  diag('sidebar:present')
   ctx.effect(() => {
     const dispose = sidebar.registerTab({
       id: TAB_ID,
@@ -108,7 +138,7 @@ export function apply(ctx: BrowserCtx): void {
           key: props.scope.sessionId,
           ...props,
           t,
-          settingsScope: scope as JumpServerSettingsScope,
+          settingsScope: cardScope,
         }),
     })
     return dispose
@@ -122,8 +152,7 @@ export function apply(ctx: BrowserCtx): void {
     const sessionIdOf = (): string | undefined => (sidebar.getSnapshot() as { sessionId?: string })?.sessionId
     const maybeOpen = (sessionId: string): void => {
       if (autoOpenedFor.has(sessionId)) return
-      if (scope === undefined) return
-      if ((scope.getSnapshot().value ?? {})['autoOpenTerminal'] !== true) return
+      if ((cardScope.getSnapshot().value ?? {})['autoOpenTerminal'] !== true) return
       void fetchStatus(sessionId, undefined)
         .then((data) => {
           if (autoOpenedFor.has(sessionId)) return
@@ -143,8 +172,7 @@ export function apply(ctx: BrowserCtx): void {
     // Settings arrive asynchronously over the connection, so "autoOpenTerminal
     // just became true" must re-run the decision immediately instead of waiting
     // for the next poll tick.
-    const settingsScope = scope
-    const unsubscribeScope = settingsScope === undefined ? () => undefined : settingsScope.subscribe(() => notify())
+    const unsubscribeScope = cardScope.subscribe(() => notify())
     const poll = setInterval(notify, 2500)
     return () => {
       unsubscribe()
