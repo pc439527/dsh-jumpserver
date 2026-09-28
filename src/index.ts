@@ -76,7 +76,25 @@ export function apply(ctx: Context, config: JumpServerConfig): void {
   // V0.4.1: written BEFORE anything else can fail. If this file never appears
   // after a restart, the Host half did not activate at all — a fact that
   // separates "not mounted" from "mounted but the console failed".
-  writeStateFile(jumpHomeBootMarker(), { pid: process.pid, hostBuild: hostBuild(), startedAt: new Date().toISOString() })
+  // A phase trace, not just a boot flag: if apply() aborts halfway, the last
+  // step recorded says exactly where, and any caught failure carries its
+  // message. Diagnosing "it is installed but does nothing" cost several
+  // restart cycles without this.
+  const trace: string[] = []
+  const failures: string[] = []
+  const mark = (step: string): void => {
+    trace.push(step)
+    writeStateFile(jumpHomeBootMarker(), { pid: process.pid, hostBuild: hostBuild(), steps: trace, failures })
+  }
+  const safe = (step: string, fn: () => void): void => {
+    try {
+      fn()
+    } catch (error) {
+      failures.push(step + ': ' + (error instanceof Error ? error.message : String(error)))
+      writeStateFile(jumpHomeBootMarker(), { pid: process.pid, hostBuild: hostBuild(), steps: trace, failures })
+    }
+  }
+  writeStateFile(jumpHomeBootMarker(), { pid: process.pid, hostBuild: hostBuild(), startedAt: new Date().toISOString(), steps: ['boot'], failures })
   let source: () => Config = () => config
   let auditDomain: { close(): Promise<void> } | undefined
   let auditTable: { put(key: string, value: unknown): Promise<void> } | undefined
@@ -197,6 +215,7 @@ export function apply(ctx: Context, config: JumpServerConfig): void {
   // Live settings seam; supports current provider API and the legacy helper.
   ctx.effect(
     async () => {
+      mark('settings:start')
       const settings = (ctx as unknown as { get?: (name: string) => unknown }).get?.('settings') as
         | { installSection?: (...args: unknown[]) => void }
         | undefined
@@ -232,6 +251,7 @@ export function apply(ctx: Context, config: JumpServerConfig): void {
   // Audit sink via the DSH-native storage domain.
   ctx.effect(
     async () => {
+      mark('audit:start')
       const facility = ctx.get('storageDomain')
       if (getConfig().enableAudit && facility !== undefined) {
         try {
@@ -256,6 +276,7 @@ export function apply(ctx: Context, config: JumpServerConfig): void {
   // Tool registration + idle maintenance are registry-scoped.
   ctx.effect(
     () => {
+      mark('tools:start')
       // JobStore owns its own unref'd 1 s pump timer (ensureTimer) — the plugin
       // must not run a second one.
       const stopIdle = ctx.timer.interval(() => {
@@ -305,6 +326,7 @@ export function apply(ctx: Context, config: JumpServerConfig): void {
   // guess IPs or read an empty parse as "no assets").
   ctx.effect(
     () => {
+      mark('prompt:start')
       const services = jumpHostServices(ctx)
       if (services.systemPrompt !== undefined) {
         const disposeSection = services.systemPrompt.section({
@@ -596,7 +618,8 @@ export function apply(ctx: Context, config: JumpServerConfig): void {
   // (which needs dsh-better-sidebar) stays optional and independent of it.
   ctx.effect(
     () => {
-      if (getConfig().consoleEnabled === false) return () => undefined
+      mark('console:start')
+      if (getConfig().consoleEnabled === false) { mark('console:disabled'); return () => undefined }
       let disposed = false
       let handle: ConsoleHandle | undefined
       void startConsoleServer(bridgeServices, { port: getConfig().consolePort ?? 0 })
@@ -606,6 +629,7 @@ export function apply(ctx: Context, config: JumpServerConfig): void {
             return
           }
           handle = started
+          mark('console:bound:' + String(started.port))
           consoleUrlFor = (sessionId: string) => started.urlFor(sessionId)
           writeStateFile(jumpHomeConsole(), { port: started.port, token: started.token, url: started.urlFor(undefined) })
           ctx.logger.warn(
@@ -613,6 +637,8 @@ export function apply(ctx: Context, config: JumpServerConfig): void {
           )
         })
         .catch((error) => {
+          failures.push('console: ' + (error instanceof Error ? error.message : String(error)))
+          mark('console:failed')
           ctx.logger.warn('[dsh-jumpserver] console unavailable: ' + String(error))
         })
       return () => {
