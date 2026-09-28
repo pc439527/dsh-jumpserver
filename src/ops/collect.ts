@@ -152,21 +152,7 @@ export async function runProfileSweep(manager: SessionManager, target: string, o
   return { commands: [...first, ...second], detected, profilesUsed, hostname, error: null }
 }
 
-// ---------- light metric parsers + findings ----------
-
-export interface NodeMetrics {
-  hostname: string | null
-  load1: number | null
-  memPct: number | null
-  diskRootPct: number | null
-  procCount: number | null
-  errorCount: number | null
-}
-
-function firstInt(text: string): number | null {
-  const m = /(\d+)/.exec(text.trim())
-  return m !== null ? Number(m[1]) : null
-}
+// ---------- light parsers + findings ----------
 
 export function parseUptime(text: string): { load1: number | null; load5: number | null; load15: number | null } {
   const m = /load average:\s*([\d.]+),\s*([\d.]+),\s*([\d.]+)/.exec(text)
@@ -233,33 +219,3 @@ export function deriveFindings(commands: CollectedCommand[]): string[] {
   return [...new Set(findings)]
 }
 
-/** The compact metric command set jumpserver_compare runs per target. */
-export function compareCommands(since: string): ProfileCommand[] {
-  return [
-    { command: 'hostname', category: 'identity' },
-    { command: 'uptime', category: 'identity' },
-    { command: 'free -m', category: 'cpu-mem' },
-    { command: 'df -h', category: 'disk' },
-    { command: 'ps -eo cmd | grep -Ec "[j]ava|[n]ginx|[r]esin|[t]omcat|[m]ysqld"', category: 'process', label: 'app process count' },
-    { command: 'journalctl -p err --since ' + since + ' --no-pager | wc -l', category: 'errors', label: 'error lines' },
-  ]
-}
-
-export function metricsOf(commands: CollectedCommand[]): NodeMetrics {
-  let hostname: string | null = null
-  let load1: number | null = null
-  let memPct: number | null = null
-  let diskRootPct: number | null = null
-  let procCount: number | null = null
-  let errorCount: number | null = null
-  for (const c of commands) {
-    const out = c.output
-    if (c.command === 'hostname') hostname = out.trim() || null
-    else if (c.command === 'uptime') load1 = parseUptime(out).load1
-    else if (c.command === 'free -m') memPct = parseFreeMem(out).usedPct
-    else if (c.command === 'df -h') diskRootPct = parseDfRoot(out)
-    else if (c.label === 'app process count') procCount = firstInt(out)
-    else if (c.label === 'error lines') errorCount = firstInt(out)
-  }
-  return { hostname, load1, memPct, diskRootPct, procCount, errorCount }
-}
