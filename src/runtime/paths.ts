@@ -30,6 +30,16 @@ export function jumpHomeKnownHosts(): string {
   return join(jumpHomeRoot(), 'known_hosts.json')
 }
 
+/** Console discovery file: written at boot so the port/token are findable. */
+export function jumpHomeConsole(): string {
+  return join(jumpHomeRoot(), 'console.json')
+}
+
+/** Boot marker: proves the Host half activated, even if the console later fails. */
+export function jumpHomeBootMarker(): string {
+  return join(jumpHomeRoot(), 'boot.json')
+}
+
 /** Directory holding named baselines (<name>.json). */
 export function jumpHomeBaselines(): string {
   return join(jumpHomeRoot(), 'baselines')

@@ -1,6 +1,8 @@
 import { Context } from '@deepseek-ai/cordis'
 import '@deepseek-ai/cordis-plugin-timer'
 import { createHash, randomUUID } from 'node:crypto'
+import { mkdirSync, writeFileSync } from 'node:fs'
+import { dirname } from 'node:path'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { defineDomain, domainTable } from '@deepseek-ai/dsh-storage-domain'
 import { Config } from './config/schema.js'
@@ -16,12 +18,13 @@ import { jumpHostServices } from './commands/service-runtime.js'
 import { SessionGrant } from './security/grant.js'
 import { JUMPSERVER_SECTION_NAME, JUMPSERVER_SECTION_ORDER, JUMPSERVER_SOP } from './system-prompt.js'
 import { registerJumpServerTools } from './tools/definitions.js'
+import { hostBuild } from './version.js'
 import { registerOpsTools } from './tools/ops.js'
 import { registerJobTools } from './tools/jobs.js'
 import { registerCollectionTools } from './tools/inspection.js'
 import { JobStore } from './runtime/job-store.js'
 import { BaselineStore } from './runtime/baseline-store.js'
-import { jumpHomeBaselines, jumpHomeKnownHosts } from './runtime/paths.js'
+import { jumpHomeBaselines, jumpHomeBootMarker, jumpHomeConsole, jumpHomeKnownHosts } from './runtime/paths.js'
 import { interruptSession } from './runtime/interrupt.js'
 import { startConsoleServer, type ConsoleHandle } from './runtime/console.js'
 import { OpsCaseRegistry } from './ops/evidence.js'
@@ -31,7 +34,16 @@ import { requireTargetAllowed } from './security/target-scope.js'
 import { classifyManual, manualGate, menuManualKind } from './security/manual-policy.js'
 
 export const name = 'dsh-jumpserver'
-export const inject = ['tools', 'timer', 'commands', 'systemPrompt'] as const
+/**
+ * ONLY services the base composition always mounts.
+ *
+ * V0.4.1: an unsatisfied inject is not an error — cordis simply never activates
+ * the entry, which looked exactly like "the plugin is installed but does
+ * nothing". `commands` / `systemPrompt` are therefore resolved through
+ * `ctx.get` by jumpHostServices(), which degrades (no /jumpserver command, no
+ * SOP section) instead of blocking the whole plugin.
+ */
+export const inject = ['tools', 'timer'] as const
 export { Config }
 export type { JumpServerConfig as PluginConfig }
 
@@ -50,7 +62,21 @@ const JS_AUDIT_DOMAIN = defineDomain({
  * sidebar mirror/manual input all resolve the same authoritative SessionId,
  * while different conversations never share manager/mutex/target/observer.
  */
+/** Best-effort discovery write: never let a state file break activation. */
+function writeStateFile(target: string, body: Record<string, unknown>): void {
+  try {
+    mkdirSync(dirname(target), { recursive: true })
+    writeFileSync(target, JSON.stringify({ ...body, updatedAt: new Date().toISOString() }, null, 2), 'utf8')
+  } catch {
+    /* the plugin must load even when its state directory is not writable */
+  }
+}
+
 export function apply(ctx: Context, config: JumpServerConfig): void {
+  // V0.4.1: written BEFORE anything else can fail. If this file never appears
+  // after a restart, the Host half did not activate at all — a fact that
+  // separates "not mounted" from "mounted but the console failed".
+  writeStateFile(jumpHomeBootMarker(), { pid: process.pid, hostBuild: hostBuild(), startedAt: new Date().toISOString() })
   let source: () => Config = () => config
   let auditDomain: { close(): Promise<void> } | undefined
   let auditTable: { put(key: string, value: unknown): Promise<void> } | undefined
@@ -581,6 +607,7 @@ export function apply(ctx: Context, config: JumpServerConfig): void {
           }
           handle = started
           consoleUrlFor = (sessionId: string) => started.urlFor(sessionId)
+          writeStateFile(jumpHomeConsole(), { port: started.port, token: started.token, url: started.urlFor(undefined) })
           ctx.logger.warn(
             '[dsh-jumpserver] console: ' + started.urlFor(undefined) + ' (append &session=<conversationId>, or read consoleUrl from jumpserver_status)',
           )
