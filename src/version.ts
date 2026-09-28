@@ -21,7 +21,7 @@ export const PLUGIN_VERSION = '0.3.1'
  * Event-stream / bridge protocol version. Bump whenever the browser<->host
  * snapshot shape or the observer event vocabulary changes incompatibly.
  */
-export const PROTOCOL_VERSION = 3
+export const PROTOCOL_VERSION = 4
 
 let cachedHostBuild: string | null = null
 

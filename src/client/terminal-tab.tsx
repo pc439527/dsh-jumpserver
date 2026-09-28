@@ -11,7 +11,7 @@
  * a slim single-line header with an info popover, and windowed row rendering.
  */
 import * as React from 'react'
-import { fetchAssets, fetchAudit, fetchSnapshot, fetchStatus, sendManualCommand, terminateJumpServer, type StatusResponse } from './api.js'
+import { fetchAssets, fetchAudit, fetchJobs, fetchSnapshot, fetchStatus, interruptSession, sendManualCommand, stopJob, terminateJumpServer, type JobEntry, type StatusResponse } from './api.js'
 import { applySnapshot, clearBuffer, createTerminalBuffer, setScrollback, type TerminalBuffer, type TerminalRow } from './terminal-view.js'
 import { downloadAudit } from './audit-export.js'
 import { CLIENT_BUILD, CLIENT_VERSION } from './version.js'
@@ -26,7 +26,7 @@ const ROW_H = 20
 const OVERSCAN = 20
 const AUDIT_TIME_ZONE = 'Asia/Shanghai'
 
-type AuditFilter = 'ALL' | 'READ' | 'UNKNOWN' | 'MODIFY' | 'DANGEROUS' | 'FAILED'
+type AuditFilter = 'ALL' | 'READ' | 'UNKNOWN' | 'MODIFY' | 'DANGEROUS' | 'FAILED' | 'REFUSED'
 
 function followIcon(size = 14): React.ReactNode {
   return h('svg', { width: size, height: size, viewBox: '0 0 16 16', fill: 'none', stroke: 'currentColor', strokeWidth: 1.4, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true },
@@ -92,7 +92,21 @@ function auditEventLabel(record: Record<string, unknown>): string {
   }
 }
 
-function auditFailed(record: Record<string, unknown>): boolean {
+/** V0.5.9: a refusal is the policy working, not a crash — never render it red. */
+export function auditRefused(record: Record<string, unknown>): boolean {
+  const result = String(record['result'] ?? '')
+  return result === 'BLOCKED' || result === 'DENIED' || String(record['refusalReason'] ?? '').length > 0
+}
+
+/** Why a refused command was refused (the gate's own reason). */
+export function auditRefusalLabel(record: Record<string, unknown>): string {
+  const why = String(record['refusalReason'] ?? '')
+  const denied = String(record['result'] ?? '') === 'DENIED'
+  return (denied ? '未批准' : '已拦截') + (why.length > 0 ? '：' + why : '')
+}
+
+export function auditFailed(record: Record<string, unknown>): boolean {
+  if (auditRefused(record)) return false
   const result = String(record['result'] ?? '')
   const exit = record['exitCode']
   return (result !== 'ok' && result !== 'COMPLETED' && result !== 'ASSET_LIST_EMPTY') || (typeof exit === 'number' && exit !== 0)
@@ -178,7 +192,7 @@ export function JumpServerSidebarTab(props: JumpServerSidebarTabProps): React.Re
   const [follow, setFollow] = React.useState(true)
   const [networkError, setNetworkError] = React.useState<string | null>(null)
   const [status, setStatus] = React.useState<StatusInfo>({})
-  const [tab, setTab] = React.useState<'term' | 'assets' | 'audit'>('term')
+  const [tab, setTab] = React.useState<'term' | 'assets' | 'jobs' | 'audit'>('term')
   const [infoOpen, setInfoOpen] = React.useState(false)
   const [notice, setNotice] = React.useState<string | null>(null)
   const [manualCommand, setManualCommand] = React.useState('')
@@ -194,6 +208,10 @@ export function JumpServerSidebarTab(props: JumpServerSidebarTabProps): React.Re
   })
   const [audit, setAudit] = React.useState<{ records: Array<Record<string, unknown>>; filter: AuditFilter; search: string; loading: boolean }>({
     records: [], filter: 'ALL', search: '', loading: false,
+  })
+  // V0.4.0: streaming jobs of this conversation (the 任务 tab).
+  const [jobs, setJobs] = React.useState<{ rows: JobEntry[]; loading: boolean; error: string | null; notice: string | null }>({
+    rows: [], loading: false, error: null, notice: null,
   })
 
   const manualAbortRef = React.useRef<AbortController | null>(null)
@@ -435,6 +453,52 @@ export function JumpServerSidebarTab(props: JumpServerSidebarTabProps): React.Re
     if (audit.records.length === 0) void refreshAudit()
   }, [audit.records.length])
 
+  const loadJobs = React.useCallback(async (): Promise<void> => {
+    if (sessionId.length === 0) return
+    setJobs((prev) => ({ ...prev, loading: prev.rows.length === 0 }))
+    try {
+      const data = await fetchJobs(sessionId)
+      setJobs((prev) => ({ ...prev, loading: false, error: null, rows: data.jobs ?? [] }))
+    } catch (error) {
+      setJobs((prev) => ({ ...prev, loading: false, error: error instanceof Error ? error.message : String(error) }))
+    }
+  }, [sessionId])
+
+  const openJobsTab = React.useCallback((): void => {
+    setTab('jobs')
+    void loadJobs()
+  }, [loadJobs])
+
+  // Poll only while the tab is open AND visible: a backgrounded sidebar must
+  // not keep asking the host for a job list (V0.5.2).
+  React.useEffect(() => {
+    if (!visible || tab !== 'jobs' || sessionId.length === 0) return
+    const timer = setInterval(() => { void loadJobs() }, 2000)
+    return () => clearInterval(timer)
+  }, [visible, tab, sessionId, loadJobs])
+
+  const stopJobFromUi = React.useCallback(async (jobId: string): Promise<void> => {
+    if (sessionId.length === 0) return
+    try {
+      const result = await stopJob(sessionId, jobId)
+      setJobs((prev) => ({ ...prev, notice: result.ok === true ? '已停止任务 ' + jobId : '停止失败：' + String(result.message ?? result.code ?? '?') }))
+    } catch (error) {
+      setJobs((prev) => ({ ...prev, notice: '停止失败：' + (error instanceof Error ? error.message : String(error)) }))
+    }
+    await loadJobs()
+  }, [sessionId, loadJobs])
+
+  const interruptFromUi = React.useCallback(async (): Promise<void> => {
+    if (sessionId.length === 0) return
+    try {
+      const result = await interruptSession(sessionId)
+      setJobs((prev) => ({ ...prev, notice: result.message ?? (result.ok === true ? '中断信号已发送' : '没有可中断的任务') }))
+    } catch (error) {
+      setJobs((prev) => ({ ...prev, notice: '中断失败：' + (error instanceof Error ? error.message : String(error)) }))
+    }
+    await loadJobs()
+  }, [sessionId, loadJobs])
+
   const refreshAudit = React.useCallback(async (): Promise<void> => {
     if (sessionId.length === 0) return
     setAudit((prev) => ({ ...prev, loading: true }))
@@ -502,10 +566,11 @@ export function JumpServerSidebarTab(props: JumpServerSidebarTabProps): React.Re
   const auditFiltered = audit.records.filter((r) => {
     const risk = String(r['risk'] ?? '')
     const eventType = auditEventType(r)
+    if (audit.filter === 'REFUSED' && !auditRefused(r)) return false
     if (audit.filter === 'FAILED' && !auditFailed(r)) return false
     if (audit.filter === 'MODIFY' && risk !== 'MODIFY' && risk !== 'DANGEROUS') return false
     if (audit.filter !== 'ALL' && audit.filter !== 'FAILED' && audit.filter !== 'MODIFY' && risk !== audit.filter) return false
-    if (audit.filter !== 'ALL' && audit.filter !== 'FAILED' && eventType !== 'COMMAND') return false
+    if (audit.filter !== 'ALL' && audit.filter !== 'FAILED' && audit.filter !== 'MODIFY' && eventType !== 'COMMAND') return false
     const term = audit.search.trim().toLowerCase()
     if (term.length > 0) {
       const haystack = [
@@ -525,6 +590,7 @@ export function JumpServerSidebarTab(props: JumpServerSidebarTabProps): React.Re
       acc['EVENT'] = (acc['EVENT'] ?? 0) + 1
     }
     if (auditFailed(record)) acc['FAILED'] = (acc['FAILED'] ?? 0) + 1
+    if (auditRefused(record)) acc['REFUSED'] = (acc['REFUSED'] ?? 0) + 1
     return acc
   }, {})
 
@@ -554,9 +620,11 @@ export function JumpServerSidebarTab(props: JumpServerSidebarTabProps): React.Re
         : h('span', { className: 'js-term-auditEventBadge' }, 'EVENT'),
       h('span', { className: 'js-term-auditTarget', title: target }, target),
       h('span', { className: 'js-term-auditCmd', title: displayCommand }, displayCommand),
-      h('span', { className: 'js-term-auditMeta' }, isCommand
-        ? 'rc=' + String(r['exitCode'] ?? '?') + ' ' + String(r['durationMs'] ?? '?') + 'ms'
-        : result + (r['durationMs'] !== null && r['durationMs'] !== undefined ? ' · ' + String(r['durationMs']) + 'ms' : '')),
+      auditRefused(r)
+        ? h('span', { className: 'js-term-auditRefusal', title: String(r['refusalReason'] ?? '') }, auditRefusalLabel(r))
+        : h('span', { className: 'js-term-auditMeta' }, isCommand
+            ? 'rc=' + String(r['exitCode'] ?? '?') + ' ' + String(r['durationMs'] ?? '?') + 'ms'
+            : result + (r['durationMs'] !== null && r['durationMs'] !== undefined ? ' · ' + String(r['durationMs']) + 'ms' : '')),
       expanded
         ? h('div', { className: 'js-term-auditDetail' },
             isCommand
@@ -664,6 +732,7 @@ export function JumpServerSidebarTab(props: JumpServerSidebarTabProps): React.Re
     h('div', { className: 'js-term-tabs' },
       h('button', { type: 'button', className: 'js-term-tab' + (tab === 'term' ? ' js-term-tabActive' : ''), onClick: () => setTab('term') }, '终端'),
       h('button', { type: 'button', className: 'js-term-tab' + (tab === 'assets' ? ' js-term-tabActive' : ''), onClick: openAssetsTab }, '资产'),
+      h('button', { type: 'button', className: 'js-term-tab' + (tab === 'jobs' ? ' js-term-tabActive' : ''), onClick: openJobsTab }, '任务' + (jobs.rows.length > 0 ? ' ' + String(jobs.rows.length) : '')),
       h('button', { type: 'button', className: 'js-term-tab' + (tab === 'audit' ? ' js-term-tabActive' : ''), onClick: openAuditTab }, '审计'),
     ),
     tab === 'assets'
@@ -698,6 +767,27 @@ export function JumpServerSidebarTab(props: JumpServerSidebarTabProps): React.Re
                 )
           ),
         )
+      : tab === 'jobs'
+        ? h('div', { className: 'js-term-jobs' },
+            h('div', { className: 'js-term-searchRow' },
+              h('span', { className: 'js-term-hint' }, jobs.rows.length === 0 ? '本对话没有流式任务' : '本对话任务 ' + String(jobs.rows.length) + ' 个'),
+              h('button', { type: 'button', className: 'js-term-btn js-term-btnDanger', disabled: status.granted !== true, title: '向远端 Shell 发送一次 Ctrl+C（若有流式任务则走任务路径，只发一次）', onClick: () => void interruptFromUi() }, '中断'),
+              h('button', { type: 'button', className: 'js-term-iconBtn', title: '刷新', onClick: () => void loadJobs() }, '↻'),
+            ),
+            jobs.notice !== null ? h('div', { className: 'js-term-manualError', role: 'status', onClick: () => setJobs((prev) => ({ ...prev, notice: null })) }, jobs.notice) : null,
+            jobs.error !== null ? h('div', { className: 'js-term-manualError', role: 'status' }, jobs.error) : null,
+            jobs.loading && jobs.rows.length === 0 ? h('div', { className: 'js-term-empty' }, '加载中…') : (
+              jobs.rows.length === 0
+                ? h('div', { className: 'js-term-empty' }, '用 jumpserver_job_start 启动 tail -f / journalctl -f / tcpdump 后，在这里查看与停止')
+                : h('div', { className: 'js-term-jobList' }, jobs.rows.map((job) => h('div', { className: 'js-term-jobRow', key: job.id },
+                    h('span', { className: 'js-term-jobState', 'data-state': job.state }, job.state),
+                    h('span', { className: 'js-term-jobTarget', title: job.target }, job.target + (job.hostname !== null ? ' / ' + job.hostname : '')),
+                    h('span', { className: 'js-term-jobCmd', title: job.command }, job.command),
+                    h('span', { className: 'js-term-jobMeta' }, String(Math.round(job.bytes / 1024)) + ' KB' + (job.stoppedAt !== null ? ' · ' + String(Math.round((job.stoppedAt - job.startedAt) / 1000)) + 's' : '')),
+                    h('button', { type: 'button', className: 'js-term-btn', disabled: job.state !== 'RUNNING' || status.granted !== true, onClick: () => void stopJobFromUi(job.id) }, '停止'),
+                  )))
+            ),
+          )
       : tab === 'audit'
         ? h('div', { className: 'js-term-audit' },
             h('div', { className: 'js-term-auditSummary' },
@@ -707,6 +797,7 @@ export function JumpServerSidebarTab(props: JumpServerSidebarTabProps): React.Re
               auditChip('MODIFY', '修改', (auditCounts['MODIFY'] ?? 0) + (auditCounts['DANGEROUS'] ?? 0)),
               auditChip('DANGEROUS', '高危', auditCounts['DANGEROUS'] ?? 0),
               auditChip('FAILED', '失败', auditCounts['FAILED'] ?? 0),
+              auditChip('REFUSED', '已拦截', auditCounts['REFUSED'] ?? 0),
               h('span', { className: 'js-term-auditSummaryChip js-term-auditTimezone' }, 'UTC+8'),
             ),
             h('div', { className: 'js-term-searchRow' },
