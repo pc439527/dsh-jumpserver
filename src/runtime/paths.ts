@@ -40,6 +40,11 @@ export function jumpHomeBootMarker(): string {
   return join(jumpHomeRoot(), 'boot.json')
 }
 
+/** Browser-half activation trace (JSON lines). */
+export function jumpHomeClientTrace(): string {
+  return join(jumpHomeRoot(), 'client-trace.jsonl')
+}
+
 /** Directory holding named baselines (<name>.json). */
 export function jumpHomeBaselines(): string {
   return join(jumpHomeRoot(), 'baselines')

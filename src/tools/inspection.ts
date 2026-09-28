@@ -41,6 +41,7 @@ const COLLECT_SCHEMA = {
     ok: { type: 'boolean', required: true },
     code: { type: 'string' },
     message: { type: 'string' },
+    consoleUrl: { type: 'string' },
     detail: { type: 'string' },
     targets: { type: 'integer' },
     reachable: { type: 'integer' },

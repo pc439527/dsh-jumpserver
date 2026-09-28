@@ -64,6 +64,8 @@ export interface StatusResponse {
   protocolVersion?: number
   /** V0.2.7: manual terminal input policy as resolved by the host. */
   manualPolicy?: string
+  /** V0.4.1: loopback console URL for this conversation (token embedded). */
+  consoleUrl?: string
 }
 
 export interface TestResponse {
