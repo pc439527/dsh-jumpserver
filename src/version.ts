@@ -15,7 +15,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 /** Plugin semantic version — MUST match package.json + package-lock.json (enforced by tests/version-consistency.test.ts). */
-export const PLUGIN_VERSION = '0.3.1'
+export const PLUGIN_VERSION = '0.4.0'
 
 /**
  * Event-stream / bridge protocol version. Bump whenever the browser<->host
