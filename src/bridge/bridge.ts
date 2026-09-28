@@ -37,6 +37,8 @@ export interface BridgeServices {
     configured: boolean
     permissionMode: string
     granted: boolean
+    /** V0.5.11: where the live identity came from (never a value). */
+    connectionSource?: { source: string; profileId?: string; profileLabel?: string }
   }
   /** Whether the conversation currently holds a JumpServer Session Grant. */
   grantedFor: (sessionId: string | undefined) => boolean
@@ -116,6 +118,9 @@ function statusPayload(services: BridgeServices, sessionId: string | undefined):
     permissionMode: st.permissionMode,
     manualPolicy: manualPolicyOf(cfg),
     granted: services.grantedFor(sessionId),
+    connectionSource: st.connectionSource,
+    connectionComplete: Boolean(cfg.host && cfg.username),
+    connectionMissing: cfg.host ? (cfg.username ? [] : ['username']) : (cfg.username ? ['host'] : ['host', 'username']),
     lastSeq: observer?.cursorSeq ?? 0,
     pluginVersion: PLUGIN_VERSION,
     hostBuild: hostBuild(),

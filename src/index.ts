@@ -18,7 +18,10 @@ import { JUMPSERVER_SECTION_NAME, JUMPSERVER_SECTION_ORDER, JUMPSERVER_SOP } fro
 import { registerJumpServerTools } from './tools/definitions.js'
 import { registerOpsTools } from './tools/ops.js'
 import { OpsCaseRegistry } from './ops/evidence.js'
-import { manualPolicyOf } from './config/types.js'
+import { manualPolicyOf, resolveConcurrency, resolveConnection } from './config/types.js'
+import { Semaphore } from './jumpserver/concurrency.js'
+import { requireTargetAllowed } from './security/target-scope.js'
+import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import { classifyManual, manualGate, menuManualKind } from './security/manual-policy.js'
 
 export const name = 'dsh-jumpserver'
@@ -46,7 +49,32 @@ export function apply(ctx: Context, config: JumpServerConfig): void {
   let auditDomain: { close(): Promise<void> } | undefined
   let auditTable: { put(key: string, value: unknown): Promise<void> } | undefined
 
-  const getConfig = (): Config => source()
+  // V0.5.0/V0.5.11: the effective connection is resolved per call so a
+  // settings change (or a different selected profile) takes effect on the next
+  // connect without restarting the Host. The profile wins field by field.
+  const getConfig = (): Config => {
+    const cfg = source()
+    const conn = resolveConnection(cfg)
+    const knownHostsPath = typeof cfg.knownHostsPath === 'string' && cfg.knownHostsPath.length > 0
+      ? cfg.knownHostsPath
+      : dshHomePath('jumpserver', 'known_hosts.json')
+    return { ...cfg, host: conn.host, port: conn.port, username: conn.username, passwordEnv: conn.passwordEnv, knownHostsPath }
+  }
+
+  /** Where the live identity comes from (never the value itself). */
+  const connectionSource = (): { source: string; profileId?: string; profileLabel?: string } => {
+    const conn = resolveConnection(source())
+    return {
+      source: conn.source,
+      ...(conn.profileId !== undefined ? { profileId: conn.profileId } : {}),
+      ...(conn.profileLabel !== undefined ? { profileLabel: conn.profileLabel } : {}),
+    }
+  }
+
+  // V0.4.1: one process-wide session-pool cap (maxSessions). A single
+  // conversation still owns exactly one PTY; this only bounds how many may be
+  // inside an asset at once. A changed value applies after the Host restarts.
+  const sessionGate = new Semaphore(resolveConcurrency(getConfig()).maxSessions)
 
   /**
    * Resolve password per connection; never cache or log it.
@@ -101,6 +129,7 @@ export function apply(ctx: Context, config: JumpServerConfig): void {
         },
         onLog: (message) => ctx.logger.debug('[jumpserver:' + sessionId + '] ' + message),
         scheduleTimeout: (fn, ms) => ctx.timer.timeout(fn, ms),
+        sessionGate,
       })
       observer.recordState(SessionState.DISCONNECTED, null)
       return { manager, observer, lastUsedAt: Date.now() }
@@ -277,6 +306,7 @@ export function apply(ctx: Context, config: JumpServerConfig): void {
         configured: st.configured,
         permissionMode: st.permissionMode,
         granted: grants.isGranted(sessionId ?? ''),
+        connectionSource: connectionSource(),
       }
     },
     observerFor: (sessionId: string | undefined) => {
@@ -333,6 +363,8 @@ export function apply(ctx: Context, config: JumpServerConfig): void {
         }
         if (kind === 'enter') {
           try {
+            // V0.4.2: a denied / out-of-scope target never gets navigated to.
+            requireTargetAllowed(getConfig(), command.trim())
             await bundle.manager.enter(command.trim(), undefined, signal)
             const after = bundle.manager.status()
             return { ok: true, kind: 'enter', state: after.state, target: after.target, hostname: after.hostname, sessionId }
