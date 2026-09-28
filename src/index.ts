@@ -17,6 +17,8 @@ import { SessionGrant } from './security/grant.js'
 import { JUMPSERVER_SECTION_NAME, JUMPSERVER_SECTION_ORDER, JUMPSERVER_SOP } from './system-prompt.js'
 import { registerJumpServerTools } from './tools/definitions.js'
 import { registerOpsTools } from './tools/ops.js'
+import { registerJobTools } from './tools/jobs.js'
+import { JobStore } from './runtime/job-store.js'
 import { OpsCaseRegistry } from './ops/evidence.js'
 import { manualPolicyOf, resolveConcurrency, resolveConnection } from './config/types.js'
 import { Semaphore } from './jumpserver/concurrency.js'
@@ -143,6 +145,10 @@ export function apply(ctx: Context, config: JumpServerConfig): void {
     },
   })
 
+  // V0.4.0: streaming jobs (tail -f / journalctl -f / tcpdump) own the PTY
+  // until stopped; output is harvested from the conversation's observer.
+  const jobs = new JobStore(registry)
+
   /** One authoritative end-and-lock lifecycle for every explicit close path. */
   const terminateConversationJumpServer = async (sessionId: string) => {
     grants.revoke(sessionId)
@@ -214,6 +220,8 @@ export function apply(ctx: Context, config: JumpServerConfig): void {
   // Tool registration + idle maintenance are registry-scoped.
   ctx.effect(
     () => {
+      // JobStore owns its own unref'd 1 s pump timer (ensureTimer) — the plugin
+      // must not run a second one.
       const stopIdle = ctx.timer.interval(() => {
         registry.tickIdle()
         // A grant whose conversation bundle was detached must not linger.
@@ -228,12 +236,15 @@ export function apply(ctx: Context, config: JumpServerConfig): void {
       // V0.3.0: ops investigation tools (triage/compare/case/remediate) share the
       // same grant boundary and the per-conversation case registry.
       const opsDisposers = registerOpsTools(ctx, registry, getConfig, grants, cases)
+      const jobDisposers = registerJobTools(ctx, registry, getConfig, grants, jobs)
       const disposeCommand = registerJumpServerCommand(ctx, registry, getConfig, grants, terminateConversationJumpServer)
       return () => {
+        jobs.dispose()
         stopIdle()
         disposeCommand?.()
         for (const dispose of disposers) dispose()
         for (const dispose of opsDisposers) dispose()
+        for (const dispose of jobDisposers) dispose()
         grants.revokeAll()
         registry.dispose()
       }
