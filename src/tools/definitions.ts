@@ -3,7 +3,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { resolveConnection, type JumpServerConfig } from '../config/types.js'
 import { AbortRequestedError, JumpServerError } from '../jumpserver/errors.js'
 import type { SessionRegistry } from '../jumpserver/session-registry.js'
-import { gateCommand, gateCommandForNavigation, gateCommandsForNavigation, type GateServices } from '../security/permission-gate.js'
+import { gateCommand, gateCommandForNavigation, gateCommandsForNavigation, judgeAutoAllowNote, type GateServices } from '../security/permission-gate.js'
 import { requireTargetAllowed } from '../security/target-scope.js'
 import { JUMPSERVER_NOT_ARMED, NOT_ARMED_MESSAGE, type SessionGrant } from '../security/grant.js'
 import type { BatchCommandRequest, TargetBatchResult } from '../jumpserver/session-manager.js'
@@ -242,9 +242,13 @@ export function registerJumpServerTools(ctx: Context, registry: SessionRegistry,
               classification: gated.classification,
               approvalRequired: gated.approvalRequired,
               approvalResult: gated.approvalRequired ? 'approved' : 'none',
+              // V0.5.8: record WHO decided this ran — an auto-allowed command
+              // must be visible in the audit and in the result.
+              riskJudge: gated.judgeNote,
               signal: exec.signal,
             })
-            return execOutcomeToValue(status, outcome)
+            const value = execOutcomeToValue(status, outcome)
+            return gated.judgeNote !== undefined ? { ...value, riskJudge: gated.judgeNote } : value
           })
         },
       }),
@@ -285,13 +289,19 @@ export function registerJumpServerTools(ctx: Context, registry: SessionRegistry,
               classification: gated.classification,
               approvalRequired: gated.approvalRequired,
               approvalResult: gated.approvalRequired ? 'approved' : 'none',
+              riskJudge: gated.judgeNote,
               signal: exec.signal,
               beforeExec: gated.beforeExec,
               accountIndex: typeof args.accountIndex === 'number' ? args.accountIndex : undefined,
             })
             const { target, hostname, status, outcome } = result
             const value = execOutcomeToValue(status, outcome)
-            return { ...value, target, hostname }
+            return {
+              ...value,
+              target,
+              hostname,
+              ...(gated.judgeNote !== undefined ? { riskJudge: gated.judgeNote } : {}),
+            }
           })
         },
       }),
@@ -344,6 +354,7 @@ export function registerJumpServerTools(ctx: Context, registry: SessionRegistry,
               return { ok: false, code: 'INVALID_BATCH', message: 'jumpserver_batch requires at least one task with a target and commands' }
             }
             const executed: TargetBatchResult[] = []
+            const autoAllowNotes: string[] = []
             for (const task of tasks) {
               if (exec.signal.aborted === true) throw new AbortRequestedError()
               const target = String(task['target'] ?? '')
@@ -365,6 +376,8 @@ export function registerJumpServerTools(ctx: Context, registry: SessionRegistry,
                 // commands stay prompt-free; 2-10 approval-required commands can
                 // share one explicit prompt that lists every command.
                 const gated = await gateCommandsForNavigation(services, exec, commands)
+                const autoNote = judgeAutoAllowNote(gated)
+                if (autoNote !== undefined) autoAllowNotes.push(autoNote)
                 const taskTimeout = task['timeout']
                 const timeoutMs = typeof taskTimeout === 'number' && Number.isFinite(taskTimeout) ? Math.max(1, taskTimeout) * 1000 : undefined
 
@@ -380,6 +393,7 @@ export function registerJumpServerTools(ctx: Context, registry: SessionRegistry,
                     classification: g.classification,
                     approvalRequired: g.approvalRequired,
                     approvalResult: g.approvalRequired ? 'pending' : 'none',
+                    riskJudge: g.judgeNote,
                   }
                   if (g.beforeExec !== undefined) {
                     const before = g.beforeExec
@@ -413,7 +427,10 @@ export function registerJumpServerTools(ctx: Context, registry: SessionRegistry,
                 })
               }
             }
-            return renderBatchResult(executed)
+            const batchValue = renderBatchResult(executed)
+            return autoAllowNotes.length > 0
+              ? { ...batchValue, riskJudge: autoAllowNotes.join(' | ') }
+              : batchValue
           })
         },
       }),

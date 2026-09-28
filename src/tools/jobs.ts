@@ -37,6 +37,7 @@ const JOB_SCHEMA = {
     ...RESULT_SCHEMA.properties,
     jobId: { type: 'string' },
     jobState: { type: 'string' },
+    riskJudge: { type: 'string' },
     jobsStopped: { type: 'integer' },
     interrupted: { type: 'boolean' },
     verified: { type: 'boolean' },
@@ -196,6 +197,9 @@ export function registerJobTools(
                 normalizedCommand: gated.classification.normalizedCommand,
               },
               approvalRequired: gated.approvalRequired,
+              // V0.5.8: the audit must show not just what ran but who let it
+              // run unattended.
+              riskJudge: gated.judgeNote,
               beforeExec: gated.beforeExec,
             })
             return {
@@ -205,6 +209,7 @@ export function registerJobTools(
               ...(job.hostname !== null ? { hostname: job.hostname } : {}),
               jobState: job.state,
               maxDurationMs: job.maxDurationMs,
+              ...(gated.judgeNote !== undefined ? { riskJudge: gated.judgeNote } : {}),
               message: 'job started: 用 jumpserver_job_read(jobId="' + job.id + '") 读取增量输出，jumpserver_job_stop(jobId="' + job.id + '") 结束。',
             }
           })
