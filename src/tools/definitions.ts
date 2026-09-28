@@ -112,7 +112,7 @@ function renderAudit(_args: Record<string, unknown>, value: ResultValue): Array<
  * exec.agent.session.id, so 对话 A and 对话 B never share a PTY/mutex/
  * terminal stream. V0.2.3 P1 adds jumpserver_assets (KoKo 'p' -> local filter).
  */
-export function registerJumpServerTools(ctx: Context, registry: SessionRegistry, getConfig: () => JumpServerConfig, grants: SessionGrant, terminateConversation?: (sessionId: string) => Promise<unknown>, auditFor?: (sessionId: string) => Array<Record<string, unknown>>): Array<() => void> {
+export function registerJumpServerTools(ctx: Context, registry: SessionRegistry, getConfig: () => JumpServerConfig, grants: SessionGrant, terminateConversation?: (sessionId: string) => Promise<unknown>, auditFor?: (sessionId: string) => Array<Record<string, unknown>>, consoleUrlFor?: (sessionId: string) => string | undefined): Array<() => void> {
   const disposers: Array<() => void> = []
 
   disposers.push(
@@ -149,6 +149,12 @@ export function registerJumpServerTools(ctx: Context, registry: SessionRegistry,
                   : {}),
               hostSource: conn.source,
               usernameSource: conn.source,
+              // V0.4.0: the desktop-friendly way in — a loopback console URL
+              // scoped to THIS conversation (the sidebar tab needs a separate
+              // client plugin; the console needs nothing).
+              ...(consoleUrlFor !== undefined && consoleUrlFor(sessionIdOf(exec)) !== undefined
+                ? { consoleUrl: consoleUrlFor(sessionIdOf(exec)) as string }
+                : {}),
             }
           })
         },
