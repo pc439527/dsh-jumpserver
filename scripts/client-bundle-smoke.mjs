@@ -80,14 +80,13 @@ if (typeof materialized?.apply !== 'function') {
   console.error('BUNDLE_SMOKE_FAIL: exports.apply is not a function', Object.keys(materialized ?? {}))
   process.exit(1)
 }
-if (!Array.isArray(materialized.inject) || !materialized.inject.includes('slots') || !materialized.inject.includes('settingsScope')) {
-  console.error('BUNDLE_SMOKE_FAIL: exports.inject must include slots + settingsScope')
-  process.exit(1)
-}
-// V0.4.0: betterSidebar is a SEPARATE plugin and must never be a hard inject —
-// requiring it meant a desktop install without it activated nothing at all.
-if (materialized.inject.includes('betterSidebar')) {
-  console.error('BUNDLE_SMOKE_FAIL: betterSidebar must stay optional (it is not part of the DSH base)')
+// V0.4.1: a pending entry on an unsatisfied service ABORTS the web boot, so
+// the inject list may hold ONLY services the shell always provides. Every other
+// service must be resolved with ctx.get() and degrade.
+const REQUIRED_INJECT = ['slots']
+if (!Array.isArray(materialized.inject) || materialized.inject.length !== REQUIRED_INJECT.length || !REQUIRED_INJECT.every((n) => materialized.inject.includes(n))) {
+  console.error('BUNDLE_SMOKE_FAIL: exports.inject must be exactly ' + JSON.stringify(REQUIRED_INJECT) + ', got ' + JSON.stringify(materialized.inject))
+  console.error('  (settingsScope/locale/connection/betterSidebar are resolved with ctx.get — injecting them can abort the boot)')
   process.exit(1)
 }
 
@@ -131,7 +130,19 @@ const ctx = {
     return cleanup
   },
   get: (name) => {
-    if (name === 'connection') return { api: { credentials: { describe: async () => ({ result: { ok: true, value: { credentials: {} } } }), set: async () => ({}) } } }
+    if (name === 'connection') {
+      return {
+        api: {
+          settings: {
+            describe: async () => ({ result: { writable: true, namespaces: [{ ns: 'jumpserver', value: { autoOpenTerminal: true, terminalScrollback: 300 }, base: {}, user: {}, revision: 1 }] } }),
+            mutate: async () => ({ result: { ns: 'jumpserver', value: {}, base: {}, user: {}, revision: 2 } }),
+          },
+          credentials: { describe: async () => ({ result: { ok: true, value: { credentials: {} } } }), set: async () => ({}) },
+        },
+      }
+    }
+    if (name === 'locale') return ctx.locale
+    if (name === 'betterSidebar') return betterSidebar
     return undefined
   },
   locale: {
@@ -170,7 +181,7 @@ try {
     console.error('got:', JSON.stringify(openCalls))
     process.exit(1)
   }
-  await new Promise((resolve) => setTimeout(resolve, 50))
+  await new Promise((resolve) => setTimeout(resolve, 300))
   applyCleanup()
 } catch (error) {
   console.error('BUNDLE_SMOKE_FAIL: apply() threw:', error)
@@ -264,12 +275,17 @@ console.log('BUNDLE_SMOKE_PASS')
 // ---- V0.4.0: desktop / no-better-sidebar degradation ----------------------
 {
   const soloRegistrations = []
-  let soloTabs = 0
+  const soloCleanups = []
   const soloCtx = {
-    effect: (fn) => { const result = fn(); return () => { if (typeof result === 'function') result() } },
-    get: ctx.get,
+    effect: (fn) => {
+      const result = fn()
+      const cleanup = () => { if (typeof result === 'function') result() }
+      soloCleanups.push(cleanup)
+      return cleanup
+    },
+    // everything except the sidebar registry: this is a plain desktop install
+    get: (name) => (name === 'betterSidebar' ? undefined : ctx.get(name)),
     locale: ctx.locale,
-    settingsScope: ctx.settingsScope,
     slots: {
       inject(name, callback) {
         soloRegistrations.push(name)
@@ -291,9 +307,12 @@ console.log('BUNDLE_SMOKE_PASS')
     console.error('BUNDLE_SMOKE_FAIL: the settings card must still register without dsh-better-sidebar')
     process.exit(1)
   }
-  if (soloTabs !== 0) {
-    console.error('BUNDLE_SMOKE_FAIL: no sidebar tab may be registered without the service')
-    process.exit(1)
+  for (const cleanup of soloCleanups) {
+    try {
+      cleanup()
+    } catch {
+      /* already disposed */
+    }
   }
   console.log('no-sidebar   = settings card registered, terminal tab skipped (console covers it)')
 }
@@ -304,3 +323,4 @@ console.log('legacy gone  = conversation.session.header.utilities, shell.overlay
 console.log('sidebar tab  =', descriptor.id, '(order ' + descriptor.order + ', single ' + descriptor.single + ')')
 console.log('auto-open    ->', 'grant-gated; opened after granted:true for', openCalls[0].scope.sessionId)
 console.log('ctx boundary = poisoned sidebar ctx render OK (no ctx.* reads)')
+process.exit(0)

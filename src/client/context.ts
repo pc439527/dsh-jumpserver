@@ -15,6 +15,7 @@ export type { BetterSidebarService } from 'dsh-better-sidebar/src/client/service
 export interface BrowserCtx {
   effect(fn: () => unknown | (() => void) | Promise<unknown>, label?: string): unknown
   get(name: string): unknown
+  /** The ONE injected service: the client runtime's slot registry. */
   slots: {
     inject(name: string, cb: () => unknown): unknown
     register(options: Record<string, unknown>, component: unknown): () => void
