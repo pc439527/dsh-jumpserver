@@ -148,3 +148,23 @@ npm run build && npm run smoke:client && node scripts/sync-profile.mjs
 ## 7. 已知验证边界
 
 `scripts/plugin-load-smoke.mjs` 无法在本工作区独立运行：它需要宿主提供的 `@deepseek-ai/*` peer（如 `@deepseek-ai/dsh-storage`，被 `dsh-storage-domain` 依赖），这些在 DSH 应用内由宿主解析、workspace 中不存在。因此本轮的验证是：仓库侧 typecheck / 403 用例 / build / client bundle smoke / 工具表预算全绿，加上部署副本与构建产物的逐字节一致性；"应用真正装载"这一步需要重启后由 `jumpserver_status` 确认 `pluginVersion 0.4.0`。
+
+## 8. desktop 适配调研与内置控制台（V0.4.0）
+
+**调研问题**：desktop 版 DSH 如何接入侧边栏？
+
+**结论**：
+1. **desktop 与 web 跑的是同一套客户端运行时** —— desktop profile 的 `dsh.profile.bundles` 里就是 `@deepseek-ai/dsh-web-app`，带 `dsh.client.platform: web` 的客户端插件在 desktop 上同样生效；不存在 desktop 专用的 UI 接口。
+2. **`dsh-better-sidebar` 是独立可安装的第三方插件，不是 desktop 专属** —— 它自己的 `dsh.client.inject` 是核心服务 `['slots','sessions','workspaces','locale','modules']`，并往 `settings.section` / `conversation.chat.turnTail` 注册，再 `ctx.provide('betterSidebar', service)` 供别的插件使用。
+3. **真正的缺陷在插件这一侧**：浏览器半边把 `betterSidebar` 写进了必需的 `inject` 列表。没装 better-sidebar 时 cordis 不会激活这个客户端模块，于是**连设置卡片都不出现**——这正是"插件适配未 desktop"的观感来源。
+
+**已修**：`betterSidebar` 变为**可选**。设置卡片只依赖核心服务（`slots/locale/settingsScope/connection`），终端标签与授权后自动打开只在服务存在时注册；缺 better-sidebar 只降级，不再整体失效。
+
+**新增内置控制台**（"改为控制台"路线，desktop 无需任何客户端插件）：
+- `src/runtime/console.ts`（服务）+ `src/runtime/console-page.ts`（自带页面，无 CDN/框架）；
+- 只绑定 `127.0.0.1`；每进程随机令牌（页面 URL + `x-console-token` 头，常量时间比较）；未注册路径一律 404；CSP 不含任何远程来源；
+- API 直接挂载插件**现有的 bridge 路由**（`registerBridgeRoutes`），所以会话授权、状态机、人工输入的一次性确认挑战、审计行为与侧栏完全一致；
+- 页面含 **终端 / 资产 / 任务 / 审计** 四个标签，拒绝记录显示为「已拦截 / 未批准 + 原因」；
+- 配置 `consoleEnabled`（默认 true）/ `consolePort`（默认 0 = 随机回环端口）；`jumpserver_status` 返回本对话的 `consoleUrl`，Host 启动日志打印基础地址。
+
+**若仍想用侧栏**：装与插件 peer 范围匹配的版本 —— `dsh plugin --profile desktop add dsh-better-sidebar@0.18.0-alpha.0`（npm 上存在；插件 peer 为 `^0.18.0-alpha.0`，仓库内提取的也是这一版）。npm 的 `alpha` 标签目前是 0.21.0-rc.1（主版本已跨过 0.18，超出 peer 范围），`latest` 是 0.22.0，两者都可能要求更新的 DSH 内核。
