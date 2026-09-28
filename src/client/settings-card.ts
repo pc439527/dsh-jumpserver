@@ -268,6 +268,29 @@ export function JumpServerSettingsCard({ t, scope, api }: SettingsCardProps): Re
           if (!ok) errors.push('assetGroups: 保存失败')
         }
       }
+      if ('profiles' in drafts || 'riskJudge' in drafts || 'activeProfileId' in drafts) {
+        for (const [name, expect] of [['profiles', 'array'], ['riskJudge', 'object']] as const) {
+          if (!(name in drafts)) continue
+          snapshotField(name)
+          const text = (drafts[name] ?? '').trim()
+          if (text === '') {
+            if (overridden(name)) { const ok = await scope.unset(name); mark(name, ok); if (!ok) errors.push(name + ': 重置失败') }
+            continue
+          }
+          const parsed = parseJsonValue(text, expect)
+          if (!parsed.ok) { errors.push(name + ': ' + parsed.error); continue }
+          const ok = await scope.set(name, parsed.value)
+          mark(name, ok)
+          if (!ok) errors.push(name + ': 保存失败')
+        }
+        if ('activeProfileId' in drafts) {
+          snapshotField('activeProfileId')
+          const id = (drafts['activeProfileId'] ?? '').trim()
+          const ok = id === '' ? await scope.unset('activeProfileId') : await scope.set('activeProfileId', id)
+          mark('activeProfileId', ok)
+          if (!ok) errors.push('activeProfileId: 保存失败')
+        }
+      }
       for (const name of ['enabled', 'autoReconnect', 'enableAudit', 'autoOpenTerminal']) {
         if (!(name in bools)) continue
         snapshotField(name)
@@ -407,6 +430,93 @@ export function JumpServerSettingsCard({ t, scope, api }: SettingsCardProps): Re
       input(name, label, hint, false),
     )
 
+  /** JSON fields are rendered as text, so String(current) would print [object Object]. */
+  const jsonText = (name: string): string => {
+    if (name in drafts) return drafts[name]!
+    const current = resolved[name]
+    if (current === undefined || current === null) return ''
+    try {
+      return JSON.stringify(current, null, 2)
+    } catch {
+      return ''
+    }
+  }
+
+  const parseJsonValue = (
+    text: string,
+    expect: 'object' | 'array',
+  ): { ok: true; value: unknown } | { ok: false; error: string } => {
+    try {
+      const value = JSON.parse(text) as unknown
+      if (expect === 'array' && !Array.isArray(value)) return { ok: false, error: '应为 JSON 数组' }
+      if (expect === 'object' && (value === null || typeof value !== 'object' || Array.isArray(value))) {
+        return { ok: false, error: '应为 JSON 对象' }
+      }
+      return { ok: true, value }
+    } catch (error) {
+      return { ok: false, error: 'JSON 解析失败：' + (error instanceof Error ? error.message : String(error)) }
+    }
+  }
+
+  /** Account ids parsed out of the profiles draft, for the primary-account picker. */
+  const profileIds = (): string[] => {
+    const raw = jsonText('profiles')
+    if (raw.trim().length === 0) return []
+    try {
+      const parsed = JSON.parse(raw) as unknown
+      if (!Array.isArray(parsed)) return []
+      return parsed
+        .map((entry) => (entry !== null && typeof entry === 'object' ? String((entry as Record<string, unknown>)['id'] ?? '') : ''))
+        .filter((id) => id.length > 0)
+    } catch {
+      return []
+    }
+  }
+
+  /** Append a blank account template (the WB "添加账号" flow). */
+  const addProfile = (): void => {
+    let list: Array<Record<string, unknown>> = []
+    try {
+      const parsed = JSON.parse(jsonText('profiles')) as unknown
+      if (Array.isArray(parsed)) list = parsed as Array<Record<string, unknown>>
+    } catch {
+      list = []
+    }
+    const used = new Set(list.map((entry) => String(entry?.['id'] ?? '')))
+    let index = list.length + 1
+    while (used.has('account' + String(index))) index += 1
+    list.push({ id: 'account' + String(index), label: '', host: '', port: 2222, username: '', passwordEnv: '' })
+    edit('profiles', JSON.stringify(list, null, 2))
+  }
+
+  /** Remove the account the primary-account picker points at. */
+  const removeProfile = (id: string): void => {
+    let list: Array<Record<string, unknown>> = []
+    try {
+      const parsed = JSON.parse(jsonText('profiles')) as unknown
+      if (Array.isArray(parsed)) list = parsed as Array<Record<string, unknown>>
+    } catch {
+      return
+    }
+    edit('profiles', JSON.stringify(list.filter((entry) => String(entry?.['id'] ?? '') !== id), null, 2))
+    if (drafts['activeProfileId'] === id) edit('activeProfileId', '')
+  }
+
+  /** Jev (TypeSafe System One) defaults, so the section is usable without a doc lookup. */
+  const fillRiskJudge = (): void => {
+    edit('riskJudge', JSON.stringify({
+      enabled: true,
+      endpoint: 'https://api.typesafe.ai/v1/systemone',
+      apiKeyEnv: 'TYPESAFE_API_KEY',
+      apiKeyFile: '',
+      model: 'jev-latest',
+      timeoutMs: 1500,
+      cacheTtlSeconds: 3600,
+      redactNetwork: true,
+      autoAllow: { enabled: false, minReadOnly: 0.9, minConfidence: 0.7, maxRiskScore: 1, minSafeProbability: 0.85 },
+    }, null, 2))
+  }
+
   return h('li', { className: 'js-term-card' },
     h('button', { type: 'button', className: 'js-term-cardHeader', 'aria-expanded': open, onClick: () => setOpen(!open) },
       h('span', { className: 'js-term-cardHeadText' },
@@ -507,6 +617,54 @@ export function JumpServerSettingsCard({ t, scope, api }: SettingsCardProps): Re
               onChange: (event: React.ChangeEvent<HTMLTextAreaElement>) => edit('assetGroups', event.target.value),
             }),
             h('p', { className: 'js-term-cardHint' }, '组名 -> 关键词 JSON；jumpserver_assets(group="OA") 与资产选择器按关键词 OR 匹配'),
+          ),
+
+          h('div', { className: 'js-term-cardField', key: 'profiles' },
+            h('div', { className: 'js-term-cardHead' },
+              h('label', { className: 'js-term-cardLabel' }, t.profiles ?? '多账号（profiles）'),
+              overridden('profiles') ? h('span', { className: 'js-term-badge' }, t.overridden) : null,
+              h('button', { type: 'button', className: 'js-term-btn', disabled: !writable, onClick: addProfile }, '+ 添加账号'),
+            ),
+            h('textarea', {
+              id: 'js-card-profiles', rows: 6, spellCheck: false,
+              value: jsonText('profiles'), disabled: !writable,
+              placeholder: '[ { "id": "main", "label": "主账号", "host": "203.0.113.10", "port": 2222, "username": "ops", "passwordEnv": "JS_OPS_PASSWORD" } ]',
+              onChange: (event: React.ChangeEvent<HTMLTextAreaElement>) => edit('profiles', event.target.value),
+            }),
+            h('div', { className: 'js-term-cardRow' },
+              h('div', { className: 'js-term-cardField', key: 'activeProfileId' },
+                h('div', { className: 'js-term-cardHead' }, h('label', { className: 'js-term-cardLabel', htmlFor: 'js-card-activeProfileId' }, t.activeProfile ?? '主账号（activeProfileId）')),
+                h('select', {
+                  id: 'js-card-activeProfileId', value: field('activeProfileId'), disabled: !writable,
+                  onChange: (event: React.ChangeEvent<HTMLSelectElement>) => edit('activeProfileId', event.target.value),
+                },
+                  h('option', { value: '' }, '（不使用多账号，用上面的 host/username）'),
+                  ...profileIds().map((id) => h('option', { key: id, value: id }, id)),
+                ),
+                h('div', { className: 'js-term-cardHead' },
+                  h('button', {
+                    type: 'button', className: 'js-term-btn', disabled: !writable || field('activeProfileId').length === 0,
+                    onClick: () => removeProfile(field('activeProfileId')),
+                  }, '删除该账号'),
+                ),
+                h('p', { className: 'js-term-cardHint' }, '选中的账号优先于上面的 host/username；密码按该账号的 passwordEnv 从环境变量读取'),
+              ),
+            ),
+          ),
+
+          h('div', { className: 'js-term-cardField', key: 'riskJudge' },
+            h('div', { className: 'js-term-cardHead' },
+              h('label', { className: 'js-term-cardLabel' }, t.riskJudge ?? 'Jev 裁决（riskJudge）'),
+              overridden('riskJudge') ? h('span', { className: 'js-term-badge' }, t.overridden) : null,
+              h('button', { type: 'button', className: 'js-term-btn', disabled: !writable, onClick: fillRiskJudge }, '填入默认模板'),
+            ),
+            h('textarea', {
+              id: 'js-card-riskJudge', rows: 6, spellCheck: false,
+              value: jsonText('riskJudge'), disabled: !writable,
+              placeholder: '{ "enabled": false, "endpoint": "https://api.typesafe.ai/v1/systemone", "apiKeyEnv": "TYPESAFE_API_KEY", "model": "jev-latest", "timeoutMs": 1500 }',
+              onChange: (event: React.ChangeEvent<HTMLTextAreaElement>) => edit('riskJudge', event.target.value),
+            }),
+            h('p', { className: 'js-term-cardHint' }, 'TypeSafe System One（Jev）对 UNKNOWN 级命令给出裁决；enabled=false 时完全不外发请求。API Key 只放环境变量名或文件路径，不写进配置'),
           ),
 
           h('div', { className: 'js-term-cardFooter' },
