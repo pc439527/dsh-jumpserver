@@ -1,7 +1,7 @@
 import { Context } from '@deepseek-ai/cordis'
 import '@deepseek-ai/cordis-plugin-timer'
 import { createHash, randomUUID } from 'node:crypto'
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { defineDomain, domainTable } from '@deepseek-ai/dsh-storage-domain'
@@ -18,13 +18,14 @@ import { jumpHostServices } from './commands/service-runtime.js'
 import { SessionGrant } from './security/grant.js'
 import { JUMPSERVER_SECTION_NAME, JUMPSERVER_SECTION_ORDER, JUMPSERVER_SOP } from './system-prompt.js'
 import { registerJumpServerTools } from './tools/definitions.js'
+import { setConsoleUrlResolver } from './tools/common.js'
 import { hostBuild } from './version.js'
 import { registerOpsTools } from './tools/ops.js'
 import { registerJobTools } from './tools/jobs.js'
 import { registerCollectionTools } from './tools/inspection.js'
 import { JobStore } from './runtime/job-store.js'
 import { BaselineStore } from './runtime/baseline-store.js'
-import { jumpHomeBaselines, jumpHomeBootMarker, jumpHomeConsole, jumpHomeKnownHosts } from './runtime/paths.js'
+import { jumpHomeBaselines, jumpHomeBootMarker, jumpHomeClientTrace, jumpHomeConsole, jumpHomeKnownHosts } from './runtime/paths.js'
 import { interruptSession } from './runtime/interrupt.js'
 import { startConsoleServer, type ConsoleHandle } from './runtime/console.js'
 import { OpsCaseRegistry } from './ops/evidence.js'
@@ -196,6 +197,8 @@ export function apply(ctx: Context, config: JumpServerConfig): void {
   // V0.4.0: streaming jobs (tail -f / journalctl -f / tcpdump) own the PTY
   // until stopped; output is harvested from the conversation's observer.
   const jobs = new JobStore(registry)
+  // V0.4.1: every tool result carries the console URL once the console binds.
+  setConsoleUrlResolver((sessionId) => consoleUrlFor(sessionId))
   // V0.4.0: the loopback console URL of a conversation. Assigned once the
   // console has actually bound its port; before that (and when disabled) the
   // accessor returns undefined and jumpserver_status simply omits the field.
@@ -593,6 +596,14 @@ export function apply(ctx: Context, config: JumpServerConfig): void {
       }
 
       return { ok: false, code: 'NOT_NAVIGABLE', message: '会话状态 ' + st.state + ' 下无法执行人工输入（先连接并进入服务器）', state: st.state, sessionId }
+    },
+    consoleUrlFor: (sessionId) => (sessionId === undefined || sessionId.length === 0 ? consoleUrlFor('') : consoleUrlFor(sessionId)),
+    diagFor: (event, detail) => {
+      try {
+        appendFileSync(jumpHomeClientTrace(), JSON.stringify({ at: new Date().toISOString(), event, detail }) + '\n', 'utf8')
+      } catch {
+        /* telemetry must never break the plugin */
+      }
     },
     // V0.4.5: the sidebar's 任务/中断 buttons go through the SAME entry points as
     // the tools, so the UI can never interrupt a job twice or reach another

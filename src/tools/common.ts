@@ -216,9 +216,33 @@ export function execOutcomeToValue(status: SessionStatus & { configured: boolean
   }
 }
 
+/**
+ * V0.4.1: the conversation's loopback console URL, injected into EVERY tool
+ * result. The Host cannot raise UI, so "open the console when a jumpserver tool
+ * runs" is delivered as a clickable link in the result the human already reads
+ * — no popup blocker, no extra round trip.
+ */
+let consoleUrlResolver: ((sessionId: string) => string | undefined) | undefined
+
+export function setConsoleUrlResolver(resolver: (sessionId: string) => string | undefined): void {
+  consoleUrlResolver = resolver
+}
+
+/** Attach consoleUrl when the plugin has one for this conversation. */
+function withConsoleUrl(value: ResultValue, exec: ToolRunContext): ResultValue {
+  if (consoleUrlResolver === undefined || typeof value['consoleUrl'] === 'string') return value
+  try {
+    const url = consoleUrlResolver(sessionIdOf(exec))
+    if (url !== undefined && url.length > 0) return { ...value, consoleUrl: url }
+  } catch {
+    /* a missing console must never affect a tool result */
+  }
+  return value
+}
+
 export async function guardValue(exec: ToolRunContext, fn: () => Promise<ResultValue>): Promise<ResultValue> {
   try {
-    return toLosslessJsonValue(await fn())
+    return toLosslessJsonValue(withConsoleUrl(await fn(), exec))
   } catch (error) {
     if (error instanceof AbortRequestedError || exec.signal.aborted === true) {
       throw new HarnessError('tool call aborted', TOOL_ABORTED)
@@ -249,6 +273,7 @@ function redactSecret(text: string): string {
 export function renderResult(_args: Record<string, unknown>, value: ResultValue): Array<{ type: 'text'; text: string }> {
   const lines: string[] = []
   if (value.ok === true) lines.push('ok')
+  if (typeof value['consoleUrl'] === 'string' && value['consoleUrl'].length > 0) lines.push('console: ' + String(value['consoleUrl']))
   if (value.code !== undefined) lines.push('code: ' + String(value.code))
   if (value.message !== undefined) lines.push(String(value.message))
   // V0.5.3.2: JumpServerError.detail carries the structured diagnostic (parsed
