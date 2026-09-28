@@ -23,7 +23,7 @@ import { injectStyles } from './styles.js'
 import { fetchStatus } from './api.js'
 import { JumpServerSettingsCard } from './settings-card.js'
 import { JumpServerSidebarTab, TAB_ID, TAB_ORDER, terminalIcon, type JumpServerSettingsScope } from './terminal-tab.js'
-import { NamespaceSettingsScope, type SettingsApiFace } from './settings-adapter.js'
+import { BridgeSettingsScope, NamespaceSettingsScope, type SettingsApiFace } from './settings-adapter.js'
 import type { BetterSidebarService, BrowserCtx } from './context.js'
 
 /**
@@ -86,17 +86,26 @@ export function apply(ctx: BrowserCtx): void {
   // ---- optional: settings + credentials over the connection seam ----------
   const connection = ctx.get('connection') as { api?: unknown } | undefined
   const connectionApi = (connection?.api ?? undefined) as (SettingsApiFace & Partial<CredentialsApi>) | undefined
-  let scope: JumpServerSettingsScope | undefined
+  // Prefer DSH's own settings seam when it is reachable; the desktop build does
+  // not expose it (trace: settingsApi:false), so the plugin's own bridge-backed
+  // scope is the real backend there — the Host merges the file it writes into
+  // the effective configuration, so the card is fully functional either way.
+  let scope: JumpServerSettingsScope = new BridgeSettingsScope()
+  let credentialWriter: ((ref: string, value: string) => Promise<boolean>) | undefined
   if (connectionApi !== undefined && typeof connectionApi.settings?.describe === 'function') {
     scope = new NamespaceSettingsScope(connectionApi as SettingsApiFace, NS)
+  } else {
+    credentialWriter = (ref, value) => (scope as BridgeSettingsScope).setCredential(ref, value)
   }
 
   // V0.4.1: the card is registered UNCONDITIONALLY. Skipping it when the
   // settings backend looked unreachable is how "the plugin page has no settings
   // form at all" happened — a silent hole is worse than a card that says its
   // backend is unavailable.
-  const cardScope = scope ?? UNAVAILABLE_SCOPE
-  const api = { credentials: connectionApi?.credentials } as unknown
+  const cardScope = scope
+  const api = credentialWriter !== undefined
+    ? { credentials: { set: async ({ ref, value }: { ref: string; value: string }) => ({ result: { ok: await credentialWriter!(ref, value) } }), describe: async () => ({ result: { ok: true, value: { credentials: {} } } }) } }
+    : { credentials: connectionApi?.credentials }
   // V0.4.1: the current settings shell exposes 'settings.section' (that is what
   // dsh-better-sidebar registers into). The old 'settings.plugin.item' name is
   // NOT declared in this build: the client trace proved its inject callback
