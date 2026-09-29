@@ -252,6 +252,19 @@ export function apply(ctx: Context, config: JumpServerConfig): void {
       } catch (error) {
         mark('settings:describe-failed')
       }
+      // describe() skips an entry whose fiber is not yet active (state !== 2),
+      // so a probe taken inside apply() can be a false negative. Re-probe once
+      // this fiber is certainly active to tell "not served" from "not yet".
+      const late = setTimeout(() => {
+        try {
+          const served = (typeof settings.describe === 'function' ? settings.describe() : []).map((d) => String(d.ns ?? ''))
+          mark('late:namespaces:' + served.join(','))
+          mark(served.includes(JS_SETTINGS_NAMESPACE) ? 'late:namespace-ok' : 'late:namespace-missing')
+        } catch {
+          mark('late:describe-failed')
+        }
+      }, 5000)
+      if (typeof late === 'object' && late !== null && 'unref' in late) late.unref()
       // The served namespaces are exactly the config-editor entry ids, so dump
       // those too: it distinguishes "entry absent" from "entry under another id".
       try {
