@@ -251,6 +251,19 @@ export function apply(ctx: Context, config: JumpServerConfig): void {
         mark(served.includes(JS_SETTINGS_NAMESPACE) ? 'settings:namespace-ok' : 'settings:namespace-missing')
       } catch (error) {
         mark('settings:describe-failed')
+      }
+      // The served namespaces are exactly the config-editor entry ids, so dump
+      // those too: it distinguishes "entry absent" from "entry under another id".
+      try {
+        const editor = (ctx as unknown as { get?: (n: string) => unknown }).get?.('configEditor') as
+          | { entries?: () => Array<{ options?: { id?: string; name?: string } }> }
+          | undefined
+        const rows = (typeof editor?.entries === 'function' ? editor.entries() : [])
+          .map((e) => String(e.options?.id ?? '?') + '(' + String(e.options?.name ?? '?') + ')')
+        mark('entries:' + rows.join(','))
+        mark(rows.some((row) => row.startsWith(JS_SETTINGS_NAMESPACE + '(')) ? 'entry:found' : 'entry:absent')
+      } catch (error) {
+        mark('entries:failed')
         ctx.logger.warn('[jumpserver] settings.describe() failed: ' + String(error))
       }
       return () => {
