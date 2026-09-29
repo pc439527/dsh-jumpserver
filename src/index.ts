@@ -263,6 +263,29 @@ export function apply(ctx: Context, config: JumpServerConfig): void {
         } catch {
           mark('late:describe-failed')
         }
+        // Evaluate describe()'s exact filter conditions for OUR entry, so the
+        // reason it is skipped is named instead of inferred.
+        try {
+          const editor = (ctx as unknown as { get?: (n: string) => unknown }).get?.('configEditor') as
+            | { entries?: () => Array<{ options?: { id?: string }; fiber?: { state?: number; runtime?: { Config?: unknown } | null } | null }> }
+            | undefined
+          const all = typeof editor?.entries === 'function' ? editor.entries() : []
+          const mine = all.find((e) => String(e.options?.id ?? '') === JS_SETTINGS_NAMESPACE)
+          mark('probe:in-entries:' + String(mine !== undefined))
+          const fiber = mine?.fiber
+          mark('probe:fiber:' + String(fiber !== undefined && fiber !== null))
+          mark('probe:state:' + String(fiber?.state))
+          mark('probe:runtime:' + String(fiber?.runtime === null ? 'null' : fiber?.runtime === undefined ? 'undefined' : 'present'))
+          const schema = fiber?.runtime?.Config as { toJSON?: unknown } | undefined
+          mark('probe:config:' + String(schema === undefined ? 'undefined' : schema === null ? 'null' : 'present'))
+          mark('probe:toJSON:' + String(typeof schema?.toJSON))
+          const withConfig = editor as unknown as { configuration?: () => Array<{ entry?: { options?: { id?: string } } }> } | undefined
+          const cfgRows = (typeof withConfig?.configuration === 'function' ? withConfig.configuration() : [])
+            .map((row) => String(row.entry?.options?.id ?? '?'))
+          mark('cfgcount:' + String(cfgRows.length) + ' hasmine:' + String(cfgRows.includes(JS_SETTINGS_NAMESPACE)))
+        } catch (error) {
+          mark('probe:failed:' + String(error).slice(0, 60))
+        }
       }, 5000)
       if (typeof late === 'object' && late !== null && 'unref' in late) late.unref()
       // The served namespaces are exactly the config-editor entry ids, so dump
