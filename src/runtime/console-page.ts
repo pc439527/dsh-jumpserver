@@ -2,12 +2,12 @@
  * The console page, shipped as a string by the Host.
  *
  * Deliberately dependency-free: no CDN, no build step, no framework, so the
- * page can never drift from the server that serves it. The access token and
- * the conversation id are injected at serve time (the URL already carries the
- * token, so embedding it adds no exposure the request itself did not have).
+ * page can never drift from the server that serves it. Authentication stays in
+ * an HttpOnly cookie, and conversation selection is read from the URL fragment,
+ * which is never sent to the Host.
  */
-export function consolePage(token: string, sessionId: string): string {
-  return PAGE.split('__TOKEN__').join(JSON.stringify(token)).split('__SESSION__').join(JSON.stringify(sessionId))
+export function consolePage(): string {
+  return PAGE
 }
 
 const PAGE = `<!doctype html>
@@ -91,8 +91,10 @@ const PAGE = `<!doctype html>
   </section>
 </main>
 <script>
-var TOKEN = '__TOKEN__';
-var SESSION = '__SESSION__';
+// Fragments never reach the Host, so the conversation id cannot leak into
+// access logs or the discovery file.
+var fragment = new URLSearchParams(location.hash.replace(/^#/, ''));
+var SESSION = fragment.get('session') || '';
 var sinceSeq = 0;
 var tab = 'term';
 var confirmReq = null;
@@ -113,7 +115,8 @@ function strip(s) {
 function api(path, body, method) {
   var init = {
     method: method || (body === undefined ? 'GET' : 'POST'),
-    headers: { 'x-console-token': TOKEN },
+    headers: {},
+    credentials: 'same-origin',
     cache: 'no-store'
   };
   if (body !== undefined) {

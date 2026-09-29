@@ -118,6 +118,12 @@ describe('SessionRegistry (one JumpServer per conversation)', () => {
     expect((b.observer as unknown as { scrollback: number }).scrollback).toBe(1200)
   })
 
+  it('refuses to create a shared anonymous bundle for an empty id', () => {
+    const { registry } = makeRegistry({ now: 1000 })
+    expect(() => registry.getOrCreate('')).toThrow('JUMPSERVER_SESSION_REQUIRED')
+    expect(registry.size).toBe(0)
+  })
+
   it('a fresh bundle records a DISCONNECTED state event so the tab has a baseline', () => {
     const { registry } = makeRegistry({ now: 1000 })
     const a = registry.getOrCreate('session-A')

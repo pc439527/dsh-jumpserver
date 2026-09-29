@@ -1,9 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { createElement } from 'react'
-import { renderToStaticMarkup } from 'react-dom/server'
 import { sessionIdOf } from '../src/tools/common.js'
 import { applySnapshot, createTerminalBuffer } from '../src/client/terminal-view.js'
-import { JumpServerSidebarTab } from '../src/client/terminal-tab.js'
 
 describe('V0.2.3 hotfix regressions', () => {
   it('keys JumpServer ownership by agent.session.header.id, never shared agent.id', () => {
@@ -20,6 +17,13 @@ describe('V0.2.3 hotfix regressions', () => {
     expect(sessionIdOf(a)).toBe('conversation-A')
     expect(sessionIdOf(b)).toBe('conversation-B')
     expect(sessionIdOf(a)).not.toBe(sessionIdOf(b))
+  })
+
+  it('fails closed instead of sharing one anonymous session', () => {
+    const noAgent = { agent: {} } as never
+    const emptyId = { agent: { session: { header: { id: '' } } } } as never
+    expect(() => sessionIdOf(noAgent)).toThrow('JUMPSERVER_SESSION_REQUIRED')
+    expect(() => sessionIdOf(emptyId)).toThrow('JUMPSERVER_SESSION_REQUIRED')
   })
 
   it('sanitizes the real KoKo connect/probe noise seen in production', () => {
@@ -59,25 +63,5 @@ describe('V0.2.3 hotfix regressions', () => {
     expect(text).not.toContain("printf 'P=%s")
     expect(text).not.toMatch(/^[HUP]=/m)
     expect(text).not.toContain("> '")
-  })
-
-  it('renders the manual command bar while leaving Better Sidebar chrome untouched', () => {
-    const settingsScope = {
-      getSnapshot: () => ({ status: 'ready', writable: true, value: { terminalScrollback: 500 }, base: {}, user: {}, revision: 1 }),
-      subscribe: () => () => undefined,
-    }
-    const html = renderToStaticMarkup(createElement(JumpServerSidebarTab, {
-      ctx: {},
-      scope: { sessionId: 'conversation-A' },
-      tab: { id: 'dsh-jumpserver:terminal', type: 'dsh-jumpserver:terminal', title: 'JumpServer' },
-      visible: false,
-      t: (key: string) => key,
-      settingsScope,
-    }))
-
-    expect(html).toContain('js-term-manual')
-    expect(html).toContain('manualUnavailable')
-    expect(html).toContain('js-term-actions')
-    expect(html).not.toContain('js-term-headerBtn')
   })
 })

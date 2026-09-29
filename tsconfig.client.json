@@ -17,10 +17,7 @@
     "skipLibCheck": true,
     "noEmit": true,
     "allowImportingTsExtensions": true,
-    "types": [],
-    "paths": {
-      "dsh-better-sidebar/src/*": ["./node_modules/dsh-better-sidebar/src/*"]
-    }
+    "types": []
   },
   "include": [
     "src/client/**/*.ts"

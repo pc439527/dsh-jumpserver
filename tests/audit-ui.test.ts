@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { serializeAudit } from '../src/client/audit-export.js'
-import { formatAuditTime } from '../src/client/terminal-tab.js'
+import { formatAuditTime } from '../src/client/audit-view.js'
 
 describe('audit UI helpers', () => {
   it('renders audit timestamps in UTC+8 instead of slicing UTC text', () => {
