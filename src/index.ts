@@ -1,6 +1,8 @@
 import { Context } from '@deepseek-ai/cordis'
 import '@deepseek-ai/cordis-plugin-timer'
 import { createHash, randomUUID } from 'node:crypto'
+import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs'
+import { dirname } from 'node:path'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { defineDomain, domainTable } from '@deepseek-ai/dsh-storage-domain'
 import { Config } from './config/schema.js'
@@ -16,13 +18,34 @@ import { jumpHostServices } from './commands/service-runtime.js'
 import { SessionGrant } from './security/grant.js'
 import { JUMPSERVER_SECTION_NAME, JUMPSERVER_SECTION_ORDER, JUMPSERVER_SOP } from './system-prompt.js'
 import { registerJumpServerTools } from './tools/definitions.js'
+import { setConsoleUrlResolver } from './tools/common.js'
+import { hostBuild } from './version.js'
 import { registerOpsTools } from './tools/ops.js'
+import { registerJobTools } from './tools/jobs.js'
+import { registerCollectionTools } from './tools/inspection.js'
+import { JobStore } from './runtime/job-store.js'
+import { BaselineStore } from './runtime/baseline-store.js'
+import { jumpHomeBaselines, jumpHomeBootMarker, jumpHomeClientTrace, jumpHomeConsole, jumpHomeKnownHosts } from './runtime/paths.js'
+import { readOverlay, writeOverlayPatch } from './runtime/config-store.js'
+import { interruptSession } from './runtime/interrupt.js'
+import { startConsoleServer, type ConsoleHandle } from './runtime/console.js'
 import { OpsCaseRegistry } from './ops/evidence.js'
-import { manualPolicyOf } from './config/types.js'
+import { manualPolicyOf, resolveConcurrency, resolveConnection } from './config/types.js'
+import { Semaphore } from './jumpserver/concurrency.js'
+import { requireTargetAllowed } from './security/target-scope.js'
 import { classifyManual, manualGate, menuManualKind } from './security/manual-policy.js'
 
 export const name = 'dsh-jumpserver'
-export const inject = ['tools', 'timer', 'commands', 'systemPrompt'] as const
+/**
+ * ONLY services the base composition always mounts.
+ *
+ * V0.4.1: an unsatisfied inject is not an error — cordis simply never activates
+ * the entry, which looked exactly like "the plugin is installed but does
+ * nothing". `commands` / `systemPrompt` are therefore resolved through
+ * `ctx.get` by jumpHostServices(), which degrades (no /jumpserver command, no
+ * SOP section) instead of blocking the whole plugin.
+ */
+export const inject = ['tools', 'timer'] as const
 export { Config }
 export type { JumpServerConfig as PluginConfig }
 
@@ -41,12 +64,97 @@ const JS_AUDIT_DOMAIN = defineDomain({
  * sidebar mirror/manual input all resolve the same authoritative SessionId,
  * while different conversations never share manager/mutex/target/observer.
  */
+/** Best-effort discovery write: never let a state file break activation. */
+function writeStateFile(target: string, body: Record<string, unknown>): void {
+  try {
+    mkdirSync(dirname(target), { recursive: true })
+    writeFileSync(target, JSON.stringify({ ...body, updatedAt: new Date().toISOString() }, null, 2), 'utf8')
+  } catch {
+    /* the plugin must load even when its state directory is not writable */
+  }
+}
+
 export function apply(ctx: Context, config: JumpServerConfig): void {
+  // V0.4.1: written BEFORE anything else can fail. If this file never appears
+  // after a restart, the Host half did not activate at all — a fact that
+  // separates "not mounted" from "mounted but the console failed".
+  // A phase trace, not just a boot flag: if apply() aborts halfway, the last
+  // step recorded says exactly where, and any caught failure carries its
+  // message. Diagnosing "it is installed but does nothing" cost several
+  // restart cycles without this.
+  const trace: string[] = []
+  const failures: string[] = []
+  const mark = (step: string): void => {
+    trace.push(step)
+    writeStateFile(jumpHomeBootMarker(), { pid: process.pid, hostBuild: hostBuild(), steps: trace, failures })
+  }
+  const safe = (step: string, fn: () => void): void => {
+    try {
+      fn()
+    } catch (error) {
+      failures.push(step + ': ' + (error instanceof Error ? error.message : String(error)))
+      writeStateFile(jumpHomeBootMarker(), { pid: process.pid, hostBuild: hostBuild(), steps: trace, failures })
+    }
+  }
+  writeStateFile(jumpHomeBootMarker(), { pid: process.pid, hostBuild: hostBuild(), startedAt: new Date().toISOString(), steps: ['boot'], failures })
   let source: () => Config = () => config
   let auditDomain: { close(): Promise<void> } | undefined
   let auditTable: { put(key: string, value: unknown): Promise<void> } | undefined
 
-  const getConfig = (): Config => source()
+  // V0.5.0/V0.5.11: the effective connection is resolved per call so a
+  // settings change (or a different selected profile) takes effect on the next
+  // connect without restarting the Host. The profile wins field by field.
+  const getConfig = (): Config => {
+    // V0.4.2: the settings card writes an explicit overlay file; it wins over
+    // the composed config so the UI can configure the plugin on any DSH build.
+    const cfg = { ...source(), ...readOverlay() } as Config
+    const conn = resolveConnection(cfg)
+    const knownHostsPath = typeof cfg.knownHostsPath === 'string' && cfg.knownHostsPath.length > 0
+      ? cfg.knownHostsPath
+      : jumpHomeKnownHosts()
+    return { ...cfg, host: conn.host, port: conn.port, username: conn.username, passwordEnv: conn.passwordEnv, knownHostsPath }
+  }
+
+  /** Store a credential value when the host's credential service supports it. */
+  const storeCredential = async (ref: string, value: string): Promise<boolean> => {
+    try {
+      const credentials = ctx.get('credentials') as
+        | { set?: (r: string, v: string) => unknown; write?: (r: string, v: string) => unknown; store?: (r: string, v: string) => unknown }
+        | undefined
+      const write = credentials?.set ?? credentials?.write ?? credentials?.store
+      if (typeof write !== 'function') return false
+      await Promise.resolve(write.call(credentials, ref, value))
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  /** The settings card's read view: effective values, secrets stripped. */
+  const configView = (): { value: Record<string, unknown>; user: Record<string, unknown>; secrets: string[] } => {
+    const cfg = getConfig() as unknown as Record<string, unknown>
+    const { password, ...rest } = cfg
+    return {
+      value: { ...rest, passwordConfigured: typeof password === 'string' && password.length > 0 },
+      user: readOverlay(),
+      secrets: ['password'],
+    }
+  }
+
+  /** Where the live identity comes from (never the value itself). */
+  const connectionSource = (): { source: string; profileId?: string; profileLabel?: string } => {
+    const conn = resolveConnection(source())
+    return {
+      source: conn.source,
+      ...(conn.profileId !== undefined ? { profileId: conn.profileId } : {}),
+      ...(conn.profileLabel !== undefined ? { profileLabel: conn.profileLabel } : {}),
+    }
+  }
+
+  // V0.4.1: one process-wide session-pool cap (maxSessions). A single
+  // conversation still owns exactly one PTY; this only bounds how many may be
+  // inside an asset at once. A changed value applies after the Host restarts.
+  const sessionGate = new Semaphore(resolveConcurrency(getConfig()).maxSessions)
 
   /**
    * Resolve password per connection; never cache or log it.
@@ -101,6 +209,7 @@ export function apply(ctx: Context, config: JumpServerConfig): void {
         },
         onLog: (message) => ctx.logger.debug('[jumpserver:' + sessionId + '] ' + message),
         scheduleTimeout: (fn, ms) => ctx.timer.timeout(fn, ms),
+        sessionGate,
       })
       observer.recordState(SessionState.DISCONNECTED, null)
       return { manager, observer, lastUsedAt: Date.now() }
@@ -114,6 +223,19 @@ export function apply(ctx: Context, config: JumpServerConfig): void {
     },
   })
 
+  // V0.4.0: streaming jobs (tail -f / journalctl -f / tcpdump) own the PTY
+  // until stopped; output is harvested from the conversation's observer.
+  mark('settings:done')
+  const jobs = new JobStore(registry)
+  // V0.4.1: every tool result carries the console URL once the console binds.
+  setConsoleUrlResolver((sessionId) => consoleUrlFor(sessionId))
+  // V0.4.0: the loopback console URL of a conversation. Assigned once the
+  // console has actually bound its port; before that (and when disabled) the
+  // accessor returns undefined and jumpserver_status simply omits the field.
+  let consoleUrlFor: (sessionId: string) => string | undefined = () => undefined
+  // V0.4.1: named baseline snapshots for drift detection.
+  const baselines = new BaselineStore(jumpHomeBaselines())
+
   /** One authoritative end-and-lock lifecycle for every explicit close path. */
   const terminateConversationJumpServer = async (sessionId: string) => {
     grants.revoke(sessionId)
@@ -126,6 +248,8 @@ export function apply(ctx: Context, config: JumpServerConfig): void {
   // Live settings seam; supports current provider API and the legacy helper.
   ctx.effect(
     async () => {
+      mark('settings:start')
+      mark('settings:resolve')
       const settings = (ctx as unknown as { get?: (name: string) => unknown }).get?.('settings') as
         | { installSection?: (...args: unknown[]) => void }
         | undefined
@@ -161,6 +285,7 @@ export function apply(ctx: Context, config: JumpServerConfig): void {
   // Audit sink via the DSH-native storage domain.
   ctx.effect(
     async () => {
+      mark('audit:start')
       const facility = ctx.get('storageDomain')
       if (getConfig().enableAudit && facility !== undefined) {
         try {
@@ -185,6 +310,9 @@ export function apply(ctx: Context, config: JumpServerConfig): void {
   // Tool registration + idle maintenance are registry-scoped.
   ctx.effect(
     () => {
+      mark('tools:start')
+      // JobStore owns its own unref'd 1 s pump timer (ensureTimer) — the plugin
+      // must not run a second one.
       const stopIdle = ctx.timer.interval(() => {
         registry.tickIdle()
         // A grant whose conversation bundle was detached must not linger.
@@ -195,16 +323,43 @@ export function apply(ctx: Context, config: JumpServerConfig): void {
       }, 30000)
       const cfgAtBoot = getConfig()
       ctx.logger.warn('[dsh-jumpserver] started: gateway=' + cfgAtBoot.host + ':' + cfgAtBoot.port + ' mode=' + cfgAtBoot.permissionMode)
-      const disposers = registerJumpServerTools(ctx, registry, getConfig, grants, terminateConversationJumpServer)
-      // V0.3.0: ops investigation tools (triage/compare/case/remediate) share the
-      // same grant boundary and the per-conversation case registry.
-      const opsDisposers = registerOpsTools(ctx, registry, getConfig, grants, cases)
-      const disposeCommand = registerJumpServerCommand(ctx, registry, getConfig, grants, terminateConversationJumpServer)
+      // Each group is registered inside its own guard: the real ctx.tools.register
+      // VALIDATES a tool definition and throws on a bad schema (the mock context used
+      // by the local smoke does not), so one rejected tool used to abort the whole
+      // plugin — no tools, no console, and no error anyone could see.
+      const disposers: Array<() => void> = []
+      const opsDisposers: Array<() => void> = []
+      const jobDisposers: Array<() => void> = []
+      const collectDisposers: Array<() => void> = []
+      let disposeCommand: (() => void) | null | undefined
+      mark('tools:core')
+      safe('tools:core', () => {
+        disposers.push(...registerJumpServerTools(
+          ctx,
+          registry,
+          getConfig,
+          grants,
+          terminateConversationJumpServer,
+          (sessionId) => recentAudits.get(sessionId) ?? [],
+          (sessionId) => consoleUrlFor(sessionId),
+        ))
+      })
+      mark('tools:ops')
+      safe('tools:ops', () => { opsDisposers.push(...registerOpsTools(ctx, registry, getConfig, grants, cases)) })
+      mark('tools:jobs')
+      safe('tools:jobs', () => { jobDisposers.push(...registerJobTools(ctx, registry, getConfig, grants, jobs)) })
+      mark('tools:collect')
+      safe('tools:collect', () => { collectDisposers.push(...registerCollectionTools(ctx, registry, getConfig, grants, baselines)) })
+      mark('tools:command')
+      safe('tools:command', () => { disposeCommand = registerJumpServerCommand(ctx, registry, getConfig, grants, terminateConversationJumpServer) })
       return () => {
+        jobs.dispose()
         stopIdle()
         disposeCommand?.()
         for (const dispose of disposers) dispose()
         for (const dispose of opsDisposers) dispose()
+        for (const dispose of jobDisposers) dispose()
+        for (const dispose of collectDisposers) dispose()
         grants.revokeAll()
         registry.dispose()
       }
@@ -217,6 +372,7 @@ export function apply(ctx: Context, config: JumpServerConfig): void {
   // guess IPs or read an empty parse as "no assets").
   ctx.effect(
     () => {
+      mark('prompt:start')
       const services = jumpHostServices(ctx)
       if (services.systemPrompt !== undefined) {
         const disposeSection = services.systemPrompt.section({
@@ -277,6 +433,7 @@ export function apply(ctx: Context, config: JumpServerConfig): void {
         configured: st.configured,
         permissionMode: st.permissionMode,
         granted: grants.isGranted(sessionId ?? ''),
+        connectionSource: connectionSource(),
       }
     },
     observerFor: (sessionId: string | undefined) => {
@@ -333,7 +490,9 @@ export function apply(ctx: Context, config: JumpServerConfig): void {
         }
         if (kind === 'enter') {
           try {
-            await bundle.manager.enter(command.trim(), signal)
+            // V0.4.2: a denied / out-of-scope target never gets navigated to.
+            requireTargetAllowed(getConfig(), command.trim())
+            await bundle.manager.enter(command.trim(), undefined, signal)
             const after = bundle.manager.status()
             return { ok: true, kind: 'enter', state: after.state, target: after.target, hostname: after.hostname, sessionId }
           } catch (error) {
@@ -469,7 +628,88 @@ export function apply(ctx: Context, config: JumpServerConfig): void {
 
       return { ok: false, code: 'NOT_NAVIGABLE', message: '会话状态 ' + st.state + ' 下无法执行人工输入（先连接并进入服务器）', state: st.state, sessionId }
     },
+    credentialWriteFor: storeCredential,
+    configReadFor: () => configView(),
+    configWriteFor: (patch) => {
+      writeOverlayPatch(patch as Record<string, unknown>)
+      registry.applyScrollback(Math.max(200, getConfig().terminalScrollback))
+      return configView()
+    },
+    consoleUrlFor: (sessionId) => (sessionId === undefined || sessionId.length === 0 ? consoleUrlFor('') : consoleUrlFor(sessionId)),
+    diagFor: (event, detail) => {
+      try {
+        appendFileSync(jumpHomeClientTrace(), JSON.stringify({ at: new Date().toISOString(), event, detail }) + '\n', 'utf8')
+      } catch {
+        /* telemetry must never break the plugin */
+      }
+    },
+    // V0.4.5: the sidebar's 任务/中断 buttons go through the SAME entry points as
+    // the tools, so the UI can never interrupt a job twice or reach another
+    // conversation's job.
+    jobsFor: async (sessionId) =>
+      jobs.list(sessionId).map((job) => ({
+        id: job.id,
+        target: job.target,
+        hostname: job.hostname,
+        command: job.command,
+        state: job.state,
+        startedAt: job.startedAt,
+        stoppedAt: job.stoppedAt,
+        bytes: job.bytes,
+        truncated: job.truncated,
+        error: job.error,
+      })),
+    jobStopFor: async (sessionId, jobId) => {
+      if (jobs.get(jobId, sessionId) === null) {
+        return { ok: false, code: 'UNKNOWN_JOB', message: 'no job with id ' + jobId + ' in this conversation', jobId }
+      }
+      const job = await jobs.stop(jobId, 'sidebar', sessionId)
+      return { ok: job.state === 'STOPPED', jobId: job.id, jobState: job.state, target: job.target, error: job.error, sessionId }
+    },
+    interruptFor: async (sessionId) => {
+      const bundle = registry.get(sessionId)
+      if (bundle === undefined) return { ok: false, code: 'NO_SESSION', message: 'this conversation has no JumpServer session', sessionId }
+      const result = await interruptSession(jobs, bundle.manager, sessionId)
+      return { ...result, ok: result.sent, sessionId }
+    },
   }
+
+  // V0.4.0: the desktop-friendly console. It needs no client plugin and no
+  // webServer route, so it starts whenever the plugin does; the sidebar tab
+  // (which needs dsh-better-sidebar) stays optional and independent of it.
+  ctx.effect(
+    () => {
+      mark('console:start')
+      if (getConfig().consoleEnabled === false) { mark('console:disabled'); return () => undefined }
+      let disposed = false
+      let handle: ConsoleHandle | undefined
+      void startConsoleServer(bridgeServices, { port: getConfig().consolePort ?? 0 })
+        .then((started) => {
+          if (disposed) {
+            void started.close()
+            return
+          }
+          handle = started
+          mark('console:bound:' + String(started.port))
+          consoleUrlFor = (sessionId: string) => started.urlFor(sessionId)
+          writeStateFile(jumpHomeConsole(), { port: started.port, token: started.token, url: started.urlFor(undefined) })
+          ctx.logger.warn(
+            '[dsh-jumpserver] console: ' + started.urlFor(undefined) + ' (append &session=<conversationId>, or read consoleUrl from jumpserver_status)',
+          )
+        })
+        .catch((error) => {
+          failures.push('console: ' + (error instanceof Error ? error.message : String(error)))
+          mark('console:failed')
+          ctx.logger.warn('[dsh-jumpserver] console unavailable: ' + String(error))
+        })
+      return () => {
+        disposed = true
+        consoleUrlFor = () => undefined
+        void handle?.close()
+      }
+    },
+    'jumpserver.console',
+  )
 
   ctx.inject(['webServer'], (webCtx) => {
     const webServer = webCtx.get('webServer')

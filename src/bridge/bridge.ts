@@ -37,9 +37,22 @@ export interface BridgeServices {
     configured: boolean
     permissionMode: string
     granted: boolean
+    /** V0.5.11: where the live identity came from (never a value). */
+    connectionSource?: { source: string; profileId?: string; profileLabel?: string }
   }
   /** Whether the conversation currently holds a JumpServer Session Grant. */
   grantedFor: (sessionId: string | undefined) => boolean
+  /** V0.4.1: loopback console URL for this conversation (token embedded). */
+  consoleUrlFor?: (sessionId: string | undefined) => string | undefined
+  /**
+   * V0.4.2: the plugin's own settings backend. The DSH browser settings seam is
+   * not reachable from this client context, so the settings card reads and
+   * writes the effective configuration through here instead.
+   */
+  configReadFor?: () => { value: Record<string, unknown>; user: Record<string, unknown>; secrets: string[] }
+  configWriteFor?: (patch: Record<string, unknown>) => { value: Record<string, unknown>; user: Record<string, unknown>; secrets: string[] }
+  /** V0.4.2: store one credential through the host credential seam. */
+  credentialWriteFor?: (ref: string, value: string) => Promise<boolean>
   /** Explicitly end SSH and revoke this conversation grant. */
   terminateFor?: (sessionId: string) => Promise<unknown>
   observerFor: (sessionId: string | undefined) => TerminalObserver | null
@@ -66,6 +79,23 @@ export interface BridgeServices {
    * The route enforces a live conversation grant before reaching this service.
    */
   manualExec: (sessionId: string, command: string, signal?: AbortSignal, confirmed?: boolean, confirmToken?: string) => Promise<Record<string, unknown>>
+  /**
+   * Browser-half activation telemetry. The renderer cannot write files, so
+   * "why is my settings card missing" is otherwise unanswerable from the Host:
+   * the client posts short events here and the Host appends them to
+   * <dsh home>/jumpserver/client-trace.jsonl.
+   */
+  diagFor?: (event: string, detail?: Record<string, unknown>) => void
+  /** V0.4.0: streaming jobs of one conversation (never another's). */
+  jobsFor?: (sessionId: string) => Promise<Array<Record<string, unknown>>>
+  /** V0.4.5: idempotent job stop (one Ctrl+C, shared verdict). */
+  jobStopFor?: (sessionId: string, jobId: string) => Promise<Record<string, unknown>>
+  /**
+   * V0.4.5: the ONE interrupt entry point. A streaming job is stopped through
+   * the JobStore; a bare shell gets the out-of-band Ctrl+C. Also used by the
+   * sidebar's 中断 button, so the two paths can never drift.
+   */
+  interruptFor?: (sessionId: string) => Promise<Record<string, unknown>>
 }
 
 const SNAPSHOT_HOLD_MS = 12000
@@ -116,6 +146,12 @@ function statusPayload(services: BridgeServices, sessionId: string | undefined):
     permissionMode: st.permissionMode,
     manualPolicy: manualPolicyOf(cfg),
     granted: services.grantedFor(sessionId),
+    connectionSource: st.connectionSource,
+    // V0.4.1: the page can open the console itself once the conversation is
+    // granted — the Host cannot raise UI, so the browser half does it.
+    consoleUrl: services.consoleUrlFor?.(sessionId),
+    connectionComplete: Boolean(cfg.host && cfg.username),
+    connectionMissing: cfg.host ? (cfg.username ? [] : ['username']) : (cfg.username ? ['host'] : ['host', 'username']),
     lastSeq: observer?.cursorSeq ?? 0,
     pluginVersion: PLUGIN_VERSION,
     hostBuild: hostBuild(),
@@ -280,6 +316,142 @@ export function registerBridgeRoutes(webServer: {
           }
         } catch (error) {
           json(res, 500, { ok: false, code: 'MANUAL_EXEC_FAILED', message: error instanceof Error ? error.message : String(error) })
+        }
+      })()
+    },
+  }))
+
+  disposers.push(webServer.register({
+    kind: 'exact',
+    path: '/api/jumpserver.config',
+    handler: (req, res) => {
+      if (!requirePost(req, res)) return
+      void (async () => {
+        try {
+          const body = await readJsonBody(req)
+          if (services.configReadFor === undefined) {
+            json(res, 501, { ok: false, code: 'NOT_SUPPORTED', message: 'configuration is unavailable' })
+            return
+          }
+          const credential = body.credential as { ref?: unknown; value?: unknown } | undefined
+          if (credential !== undefined && credential !== null && typeof credential === 'object') {
+            const ref = typeof credential.ref === 'string' ? credential.ref : ''
+            const value = typeof credential.value === 'string' ? credential.value : ''
+            const stored = services.credentialWriteFor !== undefined && ref.length > 0 ? await services.credentialWriteFor(ref, value) : false
+            json(res, stored ? 200 : 501, stored
+              ? { ok: true, credentialConfigured: true }
+              : { ok: false, code: 'CREDENTIAL_STORE_UNAVAILABLE', message: 'this host has no writable credential store; set passwordEnv instead' })
+            return
+          }
+          if (body.patch === undefined || body.patch === null || typeof body.patch !== 'object' || Array.isArray(body.patch)) {
+            json(res, 200, { ok: true, ...services.configReadFor() })
+            return
+          }
+          if (services.configWriteFor === undefined) {
+            json(res, 501, { ok: false, code: 'NOT_SUPPORTED', message: 'configuration is read-only' })
+            return
+          }
+          const next = services.configWriteFor(body.patch as Record<string, unknown>)
+          json(res, 200, { ok: true, ...next })
+        } catch (error) {
+          json(res, 500, { ok: false, code: 'CONFIG_FAILED', message: error instanceof Error ? error.message : String(error) })
+        }
+      })()
+    },
+  }))
+
+  disposers.push(webServer.register({
+    kind: 'exact',
+    path: '/api/jumpserver.diag',
+    handler: (req, res) => {
+      if (!requirePost(req, res)) return
+      void (async () => {
+        const body = await readJsonBody(req)
+        const event = typeof body.event === 'string' ? body.event.slice(0, 120) : ''
+        if (event.length > 0 && services.diagFor !== undefined) {
+          const detail = body.detail !== null && typeof body.detail === 'object' && !Array.isArray(body.detail)
+            ? (body.detail as Record<string, unknown>)
+            : undefined
+          try { services.diagFor(event, detail) } catch { /* telemetry must never break the page */ }
+        }
+        json(res, 200, { ok: true })
+      })()
+    },
+  }))
+
+  disposers.push(webServer.register({
+    kind: 'exact',
+    path: '/api/jumpserver.jobs',
+    handler: (req, res) => {
+      if (!requirePost(req, res)) return
+      void (async () => {
+        try {
+          const body = await readJsonBody(req)
+          const sessionId = validSessionId(body.sessionId)
+          if (sessionId === null) {
+            json(res, 400, { ok: false, code: 'INVALID_SESSION', message: 'valid sessionId is required' })
+            return
+          }
+          if (!requireGrant(services, sessionId, res)) return
+          const jobs = services.jobsFor !== undefined ? await services.jobsFor(sessionId) : []
+          json(res, 200, { ok: true, jobs, count: jobs.length, sessionId })
+        } catch (error) {
+          json(res, 500, { ok: false, code: 'JOBS_FAILED', message: error instanceof Error ? error.message : String(error) })
+        }
+      })()
+    },
+  }))
+
+  disposers.push(webServer.register({
+    kind: 'exact',
+    path: '/api/jumpserver.jobStop',
+    handler: (req, res) => {
+      if (!requirePost(req, res)) return
+      void (async () => {
+        try {
+          const body = await readJsonBody(req)
+          const sessionId = validSessionId(body.sessionId)
+          const jobId = typeof body.jobId === 'string' ? body.jobId.trim() : ''
+          if (sessionId === null || jobId.length === 0) {
+            json(res, 400, { ok: false, code: 'INVALID_REQUEST', message: 'valid sessionId and jobId are required' })
+            return
+          }
+          if (!requireGrant(services, sessionId, res)) return
+          if (services.jobStopFor === undefined) {
+            json(res, 501, { ok: false, code: 'NOT_SUPPORTED', message: 'job control is unavailable' })
+            return
+          }
+          const result = await services.jobStopFor(sessionId, jobId)
+          json(res, result.ok === false ? 409 : 200, result)
+        } catch (error) {
+          json(res, 500, { ok: false, code: 'JOB_STOP_FAILED', message: error instanceof Error ? error.message : String(error) })
+        }
+      })()
+    },
+  }))
+
+  disposers.push(webServer.register({
+    kind: 'exact',
+    path: '/api/jumpserver.interrupt',
+    handler: (req, res) => {
+      if (!requirePost(req, res)) return
+      void (async () => {
+        try {
+          const body = await readJsonBody(req)
+          const sessionId = validSessionId(body.sessionId)
+          if (sessionId === null) {
+            json(res, 400, { ok: false, code: 'INVALID_SESSION', message: 'valid sessionId is required' })
+            return
+          }
+          if (!requireGrant(services, sessionId, res)) return
+          if (services.interruptFor === undefined) {
+            json(res, 501, { ok: false, code: 'NOT_SUPPORTED', message: 'interrupt is unavailable' })
+            return
+          }
+          const result = await services.interruptFor(sessionId)
+          json(res, 200, result)
+        } catch (error) {
+          json(res, 500, { ok: false, code: 'INTERRUPT_FAILED', message: error instanceof Error ? error.message : String(error) })
         }
       })()
     },

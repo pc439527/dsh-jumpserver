@@ -6,7 +6,7 @@
  * bad require names, and gross wiring mistakes without a browser.
  *
  * V0.2.2 assertions:
- *  - settings.plugin.item       present  (settings card)
+ *  - settings.section           present  (settings card; V0.4.1 name)
  *  - conversation.session.header.utilities ABSENT  (legacy >_ JumpServer entry removed)
  *  - shell.overlay              ABSENT  (self-drawn drawer removed)
  *  - the terminal is registered through ctx.betterSidebar.registerTab with
@@ -80,8 +80,13 @@ if (typeof materialized?.apply !== 'function') {
   console.error('BUNDLE_SMOKE_FAIL: exports.apply is not a function', Object.keys(materialized ?? {}))
   process.exit(1)
 }
-if (!Array.isArray(materialized.inject) || !materialized.inject.includes('slots') || !materialized.inject.includes('betterSidebar')) {
-  console.error('BUNDLE_SMOKE_FAIL: exports.inject must include slots + betterSidebar')
+// V0.4.1: a pending entry on an unsatisfied service ABORTS the web boot, so
+// the inject list may hold ONLY services the shell always provides. Every other
+// service must be resolved with ctx.get() and degrade.
+const REQUIRED_INJECT = ['slots']
+if (!Array.isArray(materialized.inject) || materialized.inject.length !== REQUIRED_INJECT.length || !REQUIRED_INJECT.every((n) => materialized.inject.includes(n))) {
+  console.error('BUNDLE_SMOKE_FAIL: exports.inject must be exactly ' + JSON.stringify(REQUIRED_INJECT) + ', got ' + JSON.stringify(materialized.inject))
+  console.error('  (settingsScope/locale/connection/betterSidebar are resolved with ctx.get — injecting them can abort the boot)')
   process.exit(1)
 }
 
@@ -125,7 +130,19 @@ const ctx = {
     return cleanup
   },
   get: (name) => {
-    if (name === 'connection') return { api: { credentials: { describe: async () => ({ result: { ok: true, value: { credentials: {} } } }), set: async () => ({}) } } }
+    if (name === 'connection') {
+      return {
+        api: {
+          settings: {
+            describe: async () => ({ result: { writable: true, namespaces: [{ ns: 'jumpserver', value: { autoOpenTerminal: true, terminalScrollback: 300 }, base: {}, user: {}, revision: 1 }] } }),
+            mutate: async () => ({ result: { ns: 'jumpserver', value: {}, base: {}, user: {}, revision: 2 } }),
+          },
+          credentials: { describe: async () => ({ result: { ok: true, value: { credentials: {} } } }), set: async () => ({}) },
+        },
+      }
+    }
+    if (name === 'locale') return ctx.locale
+    if (name === 'betterSidebar') return betterSidebar
     return undefined
   },
   locale: {
@@ -164,7 +181,7 @@ try {
     console.error('got:', JSON.stringify(openCalls))
     process.exit(1)
   }
-  await new Promise((resolve) => setTimeout(resolve, 50))
+  await new Promise((resolve) => setTimeout(resolve, 300))
   applyCleanup()
 } catch (error) {
   console.error('BUNDLE_SMOKE_FAIL: apply() threw:', error)
@@ -173,9 +190,10 @@ try {
 
 const injected = registrations.filter((r) => r.kind === 'inject').map((r) => r.name)
 
-// 1) settings card present.
-if (!injected.includes('settings.plugin.item')) {
-  console.error('BUNDLE_SMOKE_FAIL: settings.plugin.item must be declared')
+// 1) settings card present. V0.4.1 registers under 'settings.section' — the
+// old 'settings.plugin.item' name is deliberately gone (its inject never fired).
+if (!injected.includes('settings.section')) {
+  console.error('BUNDLE_SMOKE_FAIL: settings.section must be declared')
   process.exit(1)
 }
 // 2) legacy entries ABSENT (V0.2.2: no >_ JumpServer button, no drawer).
@@ -255,9 +273,55 @@ for (const cleanup of effectCleanups) {
 }
 
 console.log('BUNDLE_SMOKE_PASS')
+// ---- V0.4.0: desktop / no-better-sidebar degradation ----------------------
+{
+  const soloRegistrations = []
+  const soloCleanups = []
+  const soloCtx = {
+    effect: (fn) => {
+      const result = fn()
+      const cleanup = () => { if (typeof result === 'function') result() }
+      soloCleanups.push(cleanup)
+      return cleanup
+    },
+    // everything except the sidebar registry: this is a plain desktop install
+    get: (name) => (name === 'betterSidebar' ? undefined : ctx.get(name)),
+    locale: ctx.locale,
+    slots: {
+      inject(name, callback) {
+        soloRegistrations.push(name)
+        callback?.()
+        return () => undefined
+      },
+      register() { return () => undefined },
+    },
+    // no betterSidebar ⇒ no tab service at all
+  }
+  try {
+    const cleanup = materialized.apply(soloCtx)
+    if (typeof cleanup === 'function') cleanup()
+  } catch (error) {
+    console.error('BUNDLE_SMOKE_FAIL: apply() must not throw without dsh-better-sidebar:', error)
+    process.exit(1)
+  }
+  if (!soloRegistrations.includes('settings.section')) {
+    console.error('BUNDLE_SMOKE_FAIL: the settings card must still register without dsh-better-sidebar')
+    process.exit(1)
+  }
+  for (const cleanup of soloCleanups) {
+    try {
+      cleanup()
+    } catch {
+      /* already disposed */
+    }
+  }
+  console.log('no-sidebar   = settings card registered, terminal tab skipped (console covers it)')
+}
+
 console.log('inject       =', JSON.stringify(materialized.inject))
 console.log('slots        =', injected.join(', '))
 console.log('legacy gone  = conversation.session.header.utilities, shell.overlay')
 console.log('sidebar tab  =', descriptor.id, '(order ' + descriptor.order + ', single ' + descriptor.single + ')')
 console.log('auto-open    ->', 'grant-gated; opened after granted:true for', openCalls[0].scope.sessionId)
 console.log('ctx boundary = poisoned sidebar ctx render OK (no ctx.* reads)')
+process.exit(0)

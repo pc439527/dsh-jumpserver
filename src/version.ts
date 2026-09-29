@@ -15,13 +15,13 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 /** Plugin semantic version — MUST match package.json + package-lock.json (enforced by tests/version-consistency.test.ts). */
-export const PLUGIN_VERSION = '0.3.1'
+export const PLUGIN_VERSION = '0.4.0'
 
 /**
  * Event-stream / bridge protocol version. Bump whenever the browser<->host
  * snapshot shape or the observer event vocabulary changes incompatibly.
  */
-export const PROTOCOL_VERSION = 3
+export const PROTOCOL_VERSION = 4
 
 let cachedHostBuild: string | null = null
 

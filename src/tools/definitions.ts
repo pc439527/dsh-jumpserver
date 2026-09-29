@@ -1,12 +1,14 @@
 import { defineTool, type ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { Context } from '@deepseek-ai/cordis'
-import type { JumpServerConfig } from '../config/types.js'
+import { resolveConnection, type JumpServerConfig } from '../config/types.js'
 import { AbortRequestedError, JumpServerError } from '../jumpserver/errors.js'
 import type { SessionRegistry } from '../jumpserver/session-registry.js'
-import { gateCommand, gateCommandForNavigation, gateCommandsForNavigation, type GateServices } from '../security/permission-gate.js'
+import { gateCommand, gateCommandForNavigation, gateCommandsForNavigation, judgeAutoAllowNote, type GateServices } from '../security/permission-gate.js'
+import { requireTargetAllowed } from '../security/target-scope.js'
 import { JUMPSERVER_NOT_ARMED, NOT_ARMED_MESSAGE, type SessionGrant } from '../security/grant.js'
 import type { BatchCommandRequest, TargetBatchResult } from '../jumpserver/session-manager.js'
 import { runtimeVersion } from '../version.js'
+import { formatAuditTime, resolveTimeZone } from '../runtime/time.js'
 import { assetsToValue, bundleFor, execOutcomeToValue, guardValue, renderAssetsResult, renderBatchResult, renderResult, RESULT_SCHEMA, sessionIdOf, statusToValue, type ResultValue } from './common.js'
 
 function thisJumpError(error: unknown): { code: string; message: string } {
@@ -30,6 +32,8 @@ export const ASSETS_SCHEMA = {
   additionalProperties: false,
   properties: {
     ok: { type: 'boolean', required: true },
+    /** V0.4.1: loopback console URL for this conversation (token embedded). */
+    consoleUrl: { type: 'string' },
     code: { type: 'string' },
     message: { type: 'string' },
     count: { type: 'integer' },
@@ -65,13 +69,54 @@ export const ASSETS_SCHEMA = {
   },
 } as const
 
+/** Canonical output schema for jumpserver_audit. */
+export const AUDIT_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    ok: { type: 'boolean', required: true },
+    /** V0.4.1: loopback console URL for this conversation (token embedded). */
+    consoleUrl: { type: 'string' },
+    code: { type: 'string' },
+    message: { type: 'string' },
+    detail: { type: 'string' },
+    /** How many entries matched (before the limit was applied). */
+    entries: { type: 'integer' },
+    /** How many were actually returned. */
+    showing: { type: 'integer' },
+    timeZone: { type: 'string' },
+    filtered: { type: 'boolean' },
+    refusalCount: { type: 'integer' },
+    output: { type: 'string' },
+  },
+} as const
+
+function renderAudit(_args: Record<string, unknown>, value: ResultValue): Array<{ type: 'text'; text: string }> {
+  const lines: string[] = []
+  if (value.ok === true) lines.push('ok')
+  if (value.code !== undefined) lines.push('code: ' + String(value.code))
+  if (value.message !== undefined) lines.push(String(value.message))
+  lines.push(
+    'audit entries=' + String(value.entries ?? 0) +
+      ' showing=' + String(value.showing ?? 0) +
+      (value.filtered === true ? ' (filtered)' : '') +
+      ' refusals=' + String(value.refusalCount ?? 0) +
+      ' tz=' + String(value.timeZone ?? '?'),
+  )
+  if (typeof value.output === 'string' && value.output.length > 0) {
+    lines.push('--- audit ---')
+    lines.push(value.output)
+  }
+  return [{ type: 'text', text: lines.join('\n') }]
+}
+
 /**
  * Register the jumpserver_* tools and return their disposers. V0.2.3 P0:
  * every tool routes through the conversation-scoped SessionRegistry using
  * exec.agent.session.id, so 对话 A and 对话 B never share a PTY/mutex/
  * terminal stream. V0.2.3 P1 adds jumpserver_assets (KoKo 'p' -> local filter).
  */
-export function registerJumpServerTools(ctx: Context, registry: SessionRegistry, getConfig: () => JumpServerConfig, grants: SessionGrant, terminateConversation?: (sessionId: string) => Promise<unknown>): Array<() => void> {
+export function registerJumpServerTools(ctx: Context, registry: SessionRegistry, getConfig: () => JumpServerConfig, grants: SessionGrant, terminateConversation?: (sessionId: string) => Promise<unknown>, auditFor?: (sessionId: string) => Array<Record<string, unknown>>, consoleUrlFor?: (sessionId: string) => string | undefined): Array<() => void> {
   const disposers: Array<() => void> = []
 
   disposers.push(
@@ -87,7 +132,34 @@ export function registerJumpServerTools(ctx: Context, registry: SessionRegistry,
             const blocked = requireGrant(grants, exec)
             if (blocked !== null) return blocked
             const bundle = bundleFor(exec, registry)
-            return { ...statusToValue(bundle.manager.status()), ...runtimeVersion() }
+            // V0.5.2/V0.5.11: "what is missing" and "where did this identity
+            // come from" must be answerable without reading a config file — and
+            // never by printing a credential value.
+            const cfg = getConfig()
+            const conn = resolveConnection(cfg)
+            const missing: string[] = []
+            if (!cfg.host) missing.push('host')
+            if (!cfg.username) missing.push('username')
+            return {
+              ...statusToValue(bundle.manager.status()),
+              ...runtimeVersion(),
+              connectionComplete: missing.length === 0,
+              connectionMissing: missing,
+              credentialSource: conn.source,
+              ...(conn.profileLabel !== undefined
+                ? { credentialSourceDetail: conn.profileLabel }
+                : conn.profileId !== undefined
+                  ? { credentialSourceDetail: conn.profileId }
+                  : {}),
+              hostSource: conn.source,
+              usernameSource: conn.source,
+              // V0.4.0: the desktop-friendly way in — a loopback console URL
+              // scoped to THIS conversation (the sidebar tab needs a separate
+              // client plugin; the console needs nothing).
+              ...(consoleUrlFor !== undefined && consoleUrlFor(sessionIdOf(exec)) !== undefined
+                ? { consoleUrl: consoleUrlFor(sessionIdOf(exec)) as string }
+                : {}),
+            }
           })
         },
       }),
@@ -123,6 +195,10 @@ export function registerJumpServerTools(ctx: Context, registry: SessionRegistry,
           'Enter a target asset THROUGH THE JumpServer menu for your conversation by its IP/name. Requires the conversation session to be at the JumpServer menu. Internally runs a target probe (hostname/whoami/pwd) and only reports the asset as entered after verification succeeds.',
         parameters: {
           target: { type: 'string', required: true, description: 'Target asset IP or name, e.g. 203.0.113.101' },
+          accountIndex: {
+            type: 'number',
+            description: 'V0.5.3: the account ID KoKo shows at its ID> prompt when the target has several authorised bastion users (use the exact number on screen, usually 1 or 2). Omit it and the call fails with ACCOUNT_SELECTION_REQUIRED carrying the parsed list, while the session stays live so the next call answers the SAME prompt without reconnecting.',
+          },
         },
         output: { schema: RESULT_SCHEMA, render: renderResult },
         async execute(args, exec) {
@@ -130,7 +206,11 @@ export function registerJumpServerTools(ctx: Context, registry: SessionRegistry,
             const blocked = requireGrant(grants, exec)
             if (blocked !== null) return blocked
             const bundle = bundleFor(exec, registry)
-            const status = await bundle.manager.enter(args.target, exec.signal)
+            // V0.4.2: scope check BEFORE navigation - a denied target must never
+            // get an SSH/PTY session opened against it.
+            requireTargetAllowed(getConfig(), args.target)
+            const accountIndex = typeof args.accountIndex === 'number' ? args.accountIndex : undefined
+            const status = await bundle.manager.enter(args.target, accountIndex, exec.signal)
             return statusToValue(status)
           })
         },
@@ -200,6 +280,9 @@ export function registerJumpServerTools(ctx: Context, registry: SessionRegistry,
             if (blocked !== null) return blocked
             const bundle = bundleFor(exec, registry)
             const services: GateServices = { getConfig, manager: bundle.manager, approval: ctx.get('approval') }
+            // V0.4.0: the scope guard also applies to commands run against an
+            // asset that was entered before the scope was narrowed.
+            requireTargetAllowed(getConfig(), bundle.manager.status().target ?? '')
             const gated = await gateCommand(services, exec, args.command)
             const timeoutMs = args.timeout !== undefined ? Math.max(1, args.timeout) * 1000 : undefined
             const { status, outcome } = await bundle.manager.exec({
@@ -209,9 +292,13 @@ export function registerJumpServerTools(ctx: Context, registry: SessionRegistry,
               classification: gated.classification,
               approvalRequired: gated.approvalRequired,
               approvalResult: gated.approvalRequired ? 'approved' : 'none',
+              // V0.5.8: record WHO decided this ran — an auto-allowed command
+              // must be visible in the audit and in the result.
+              riskJudge: gated.judgeNote,
               signal: exec.signal,
             })
-            return execOutcomeToValue(status, outcome)
+            const value = execOutcomeToValue(status, outcome)
+            return gated.judgeNote !== undefined ? { ...value, riskJudge: gated.judgeNote } : value
           })
         },
       }),
@@ -228,6 +315,10 @@ export function registerJumpServerTools(ctx: Context, registry: SessionRegistry,
           target: { type: 'string', required: true, description: 'Target asset IP or name, e.g. 203.0.113.101' },
           command: { type: 'string', required: true, description: 'Shell command to execute on the remote asset' },
           timeout: { type: 'number', description: 'Timeout in seconds for this command (default: configured command timeout, max 600)' },
+          accountIndex: {
+            type: 'number',
+            description: 'V0.5.3: the account ID KoKo shows at its ID> prompt when the target has several authorised bastion users. See jumpserver_enter.',
+          },
         },
         output: { schema: RESULT_SCHEMA, render: renderResult },
         timeoutMs: 605000,
@@ -236,6 +327,7 @@ export function registerJumpServerTools(ctx: Context, registry: SessionRegistry,
             const blocked = requireGrant(grants, exec)
             if (blocked !== null) return blocked
             const bundle = bundleFor(exec, registry)
+            requireTargetAllowed(getConfig(), args.target)
             const services: GateServices = { getConfig, manager: bundle.manager, approval: ctx.get('approval') }
             const gated = await gateCommandForNavigation(services, exec, args.command)
             const timeoutMs = args.timeout !== undefined ? Math.max(1, args.timeout) * 1000 : undefined
@@ -247,12 +339,19 @@ export function registerJumpServerTools(ctx: Context, registry: SessionRegistry,
               classification: gated.classification,
               approvalRequired: gated.approvalRequired,
               approvalResult: gated.approvalRequired ? 'approved' : 'none',
+              riskJudge: gated.judgeNote,
               signal: exec.signal,
               beforeExec: gated.beforeExec,
+              accountIndex: typeof args.accountIndex === 'number' ? args.accountIndex : undefined,
             })
             const { target, hostname, status, outcome } = result
             const value = execOutcomeToValue(status, outcome)
-            return { ...value, target, hostname }
+            return {
+              ...value,
+              target,
+              hostname,
+              ...(gated.judgeNote !== undefined ? { riskJudge: gated.judgeNote } : {}),
+            }
           })
         },
       }),
@@ -276,6 +375,10 @@ export function registerJumpServerTools(ctx: Context, registry: SessionRegistry,
               additionalProperties: false,
               properties: {
                 target: { type: 'string', required: true, description: 'Target asset IP or name, e.g. 203.0.113.101' },
+                accountIndex: {
+                  type: 'number',
+                  description: 'V0.5.3: per-task account ID for KoKo multi-user assets (see jumpserver_enter).',
+                },
                 commands: {
                   type: 'array',
                   required: true,
@@ -301,6 +404,7 @@ export function registerJumpServerTools(ctx: Context, registry: SessionRegistry,
               return { ok: false, code: 'INVALID_BATCH', message: 'jumpserver_batch requires at least one task with a target and commands' }
             }
             const executed: TargetBatchResult[] = []
+            const autoAllowNotes: string[] = []
             for (const task of tasks) {
               if (exec.signal.aborted === true) throw new AbortRequestedError()
               const target = String(task['target'] ?? '')
@@ -315,10 +419,15 @@ export function registerJumpServerTools(ctx: Context, registry: SessionRegistry,
                 continue
               }
               try {
+                // V0.4.2: a denied / out-of-scope target is refused before any
+                // navigation, exactly like the single-target tools.
+                requireTargetAllowed(getConfig(), target)
                 // V0.3.2: classify the whole target batch together. Routine READ
                 // commands stay prompt-free; 2-10 approval-required commands can
                 // share one explicit prompt that lists every command.
                 const gated = await gateCommandsForNavigation(services, exec, commands)
+                const autoNote = judgeAutoAllowNote(gated)
+                if (autoNote !== undefined) autoAllowNotes.push(autoNote)
                 const taskTimeout = task['timeout']
                 const timeoutMs = typeof taskTimeout === 'number' && Number.isFinite(taskTimeout) ? Math.max(1, taskTimeout) * 1000 : undefined
 
@@ -334,6 +443,7 @@ export function registerJumpServerTools(ctx: Context, registry: SessionRegistry,
                     classification: g.classification,
                     approvalRequired: g.approvalRequired,
                     approvalResult: g.approvalRequired ? 'pending' : 'none',
+                    riskJudge: g.judgeNote,
                   }
                   if (g.beforeExec !== undefined) {
                     const before = g.beforeExec
@@ -354,6 +464,7 @@ export function registerJumpServerTools(ctx: Context, registry: SessionRegistry,
                   target,
                   commands: commandRequests,
                   signal: exec.signal,
+                  accountIndex: typeof task['accountIndex'] === 'number' ? (task['accountIndex'] as number) : undefined,
                 })
                 executed.push(result)
               } catch (error) {
@@ -366,7 +477,10 @@ export function registerJumpServerTools(ctx: Context, registry: SessionRegistry,
                 })
               }
             }
-            return renderBatchResult(executed)
+            const batchValue = renderBatchResult(executed)
+            return autoAllowNotes.length > 0
+              ? { ...batchValue, riskJudge: autoAllowNotes.join(' | ') }
+              : batchValue
           })
         },
       }),
@@ -417,5 +531,83 @@ export function registerJumpServerTools(ctx: Context, registry: SessionRegistry,
     ),
   )
 
+  disposers.push(
+    ctx.tools.register(
+      defineTool({
+        name: 'jumpserver_audit',
+        description:
+          'Read the audit trail of YOUR conversation in chat: recent audited events (local time, operation, target asset, redacted command, risk, result) plus the REASON on every refusal. Use it when the user asks what the AI actually ran through JumpServer, or what was blocked/denied. Purely local — it never touches the bastion, needs no live session, and returns no credential: commands are stored redacted. It still requires the conversation grant, so a locked conversation cannot read session history.',
+        parameters: {
+          limit: { type: 'number', description: 'How many recent entries to return (default 20, max 200, oldest first)' },
+          filter: {
+            type: 'string',
+            description: 'Optional case-insensitive substring matched against each entry (an IP, a command fragment, an operation name)',
+          },
+          refusalsOnly: {
+            type: 'boolean',
+            description: 'Only entries that were refused — BLOCKED (the rules said no) or DENIED (no human approval). Answers "what was stopped".',
+          },
+        },
+        output: { schema: AUDIT_SCHEMA, render: renderAudit },
+        async execute(args, exec) {
+          return guardValue(exec, async () => {
+            const blocked = requireGrant(grants, exec)
+            if (blocked !== null) return blocked
+            const all = auditFor !== undefined ? auditFor(sessionIdOf(exec)) : []
+            const q = typeof args.filter === 'string' && args.filter.length > 0 ? args.filter.toLowerCase() : null
+            const refusalsOnly = args.refusalsOnly === true
+            const filtered = all.filter((entry) => {
+              if (refusalsOnly && !isRefusal(entry)) return false
+              if (q === null) return true
+              return JSON.stringify(entry).toLowerCase().includes(q)
+            })
+            const limit = typeof args.limit === 'number' && Number.isFinite(args.limit)
+              ? Math.min(200, Math.max(1, Math.floor(args.limit)))
+              : 20
+            const picked = filtered.slice(-limit)
+            const timeZone = resolveTimeZone(getConfig().timeZone)
+            const lines = picked.map((entry) => auditLine(entry, timeZone))
+            const refusalCount = all.filter(isRefusal).length
+            return {
+              ok: true,
+              entries: filtered.length,
+              showing: picked.length,
+              timeZone,
+              filtered: q !== null || refusalsOnly,
+              refusalCount,
+              output: lines.length > 0 ? lines.join('\n') : '(no audited command in this conversation yet)',
+            }
+          })
+        },
+      }),
+    ),
+  )
+
   return disposers
+}
+
+/** V0.5.9: a refused entry is BLOCKED (the rules) or DENIED (no approval). */
+function isRefusal(entry: Record<string, unknown>): boolean {
+  const result = String(entry['result'] ?? '')
+  return result === 'BLOCKED' || result === 'DENIED' || typeof entry['refusalReason'] === 'string'
+}
+
+/** One audit line; the refusal reason is appended only when there is one. */
+function auditLine(entry: Record<string, unknown>, timeZone: string): string {
+  const parts = [
+    formatAuditTime(entry['timestamp'], timeZone),
+    String(entry['operation'] ?? '-'),
+    String(entry['target'] ?? entry['hostname'] ?? '-'),
+    '[' + String(entry['risk'] ?? '?') + ']',
+    String(entry['result'] ?? '?'),
+  ]
+  if (entry['toolCallId'] !== undefined) parts.push('call=' + String(entry['toolCallId']))
+  if (entry['batchId'] !== undefined) parts.push('batch=' + String(entry['batchId']))
+  parts.push('actor=' + String(entry['actor'] ?? 'AGENT'))
+  const why = entry['refusalReason']
+  if (why !== undefined && why !== null && String(why).length > 0) parts.push('why=' + String(why))
+  const judge = entry['riskJudge']
+  if (judge !== undefined && judge !== null && String(judge).length > 0) parts.push('judge=' + String(judge))
+  parts.push(String(entry['redactedCommand'] ?? entry['command'] ?? '-'))
+  return parts.join(' | ')
 }

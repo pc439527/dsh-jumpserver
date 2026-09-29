@@ -1,6 +1,8 @@
 import { HarnessError } from '@deepseek-ai/dsh-llm'
 import { TOOL_ABORTED, type ToolRunContext } from '@deepseek-ai/dsh-tools'
-import { AbortRequestedError, JumpServerError, errorCodeOf } from '../jumpserver/errors.js'
+import { AbortRequestedError, JumpServerError, UNREACHABLE_STOP_LINE, errorCodeOf } from '../jumpserver/errors.js'
+import { commandStatusToError } from '../jumpserver/command-status.js'
+import { redactCommandSecrets } from '../security/command-redaction.js'
 import type { ExecOutcome, SessionStatus } from '../jumpserver/session.js'
 import type { TargetBatchResult } from '../jumpserver/session-manager.js'
 import type { SessionBundle } from '../jumpserver/session-registry.js'
@@ -16,6 +18,20 @@ export const RESULT_SCHEMA = {
     ok: { type: 'boolean', required: true },
     code: { type: 'string' },
     message: { type: 'string' },
+    /** V0.5.3.2: structured diagnostic (parsed account list, detector tail, host-key reason). */
+    detail: { type: 'string' },
+    /** V0.4.3: what happened to the COMMAND, independent of the exchange state. */
+    commandStatus: { type: 'string' },
+    /** V0.5.8: the semantic judge's verdict when it decided (or tried to decide). */
+    riskJudge: { type: 'string' },
+    /** V0.5.2: deferred connection completeness (CONFIG_INCOMPLETE reporting). */
+    connectionComplete: { type: 'boolean' },
+    connectionMissing: { type: 'array', items: { type: 'string' } },
+    /** V0.5.11: where the live credential/host came from — never the value itself. */
+    credentialSource: { type: 'string' },
+    credentialSourceDetail: { type: 'string' },
+    hostSource: { type: 'string' },
+    usernameSource: { type: 'string' },
     connected: { type: 'boolean' },
     configured: { type: 'boolean' },
     gateway: { type: 'string' },
@@ -35,6 +51,8 @@ export const RESULT_SCHEMA = {
     pluginVersion: { type: 'string' },
     hostBuild: { type: 'string' },
     protocolVersion: { type: 'integer' },
+    /** V0.4.1: loopback console URL for this conversation (token embedded). */
+    consoleUrl: { type: 'string' },
   },
 } as const
 
@@ -134,6 +152,19 @@ export function statusToValue(status: SessionStatus & { configured: boolean; per
   })
 }
 
+/**
+ * V0.4.5: a COMPLETED exchange with a non-SUCCESS commandStatus becomes a
+ * structured failure. Derived from the shared commandStatus mapping so exec,
+ * batch and compare can never report the same status with two different codes.
+ */
+function completedFailure(outcome: { commandStatus: string; exitCode: number; executionState: string }): { code?: string; message?: string } {
+  const failure = commandStatusToError(outcome.commandStatus, {
+    exitCode: outcome.exitCode,
+    executionState: outcome.executionState,
+  })
+  return failure === null ? {} : { code: failure.code, message: failure.message }
+}
+
 export function execOutcomeToValue(status: SessionStatus & { configured: boolean; permissionMode: string }, outcome: ExecOutcome): ResultValue {
   const base = {
     ok: true as boolean,
@@ -147,17 +178,24 @@ export function execOutcomeToValue(status: SessionStatus & { configured: boolean
     case 'completed':
       return dropNulls({
         ...base,
+        // V0.4.3: a COMPLETED exchange is not a SUCCESSFUL command. `jps -lv`
+        // exiting 127 must NOT be reported as ok=true.
+        ok: outcome.commandStatus === 'SUCCESS',
         completed: true,
         executionState: 'COMPLETED',
+        commandStatus: outcome.commandStatus,
         exitCode: outcome.exitCode,
         output: outcome.output,
         truncated: outcome.truncated,
+        // V0.4.5: one shared decode of commandStatus -> error code/message.
+        ...completedFailure(outcome),
       } as unknown as Record<string, unknown>) as unknown as ResultValue
     case 'timeout':
       return dropNulls({
         ...base,
         ok: false,
         code: 'COMMAND_TIMEOUT',
+        commandStatus: outcome.commandStatus,
         message:
           outcome.executionState === 'TIMEOUT'
             ? 'command timed out; the shell was interrupted (Ctrl+C) and re-verified - it remains usable'
@@ -172,6 +210,7 @@ export function execOutcomeToValue(status: SessionStatus & { configured: boolean
         ...base,
         ok: false,
         code: 'CONNECTION_LOST',
+        commandStatus: outcome.commandStatus,
         message: 'SSH connection lost during command execution',
         completed: false,
         executionState: 'UNKNOWN',
@@ -179,15 +218,49 @@ export function execOutcomeToValue(status: SessionStatus & { configured: boolean
   }
 }
 
+/**
+ * V0.4.1: the conversation's loopback console URL, injected into EVERY tool
+ * result. The Host cannot raise UI, so "open the console when a jumpserver tool
+ * runs" is delivered as a clickable link in the result the human already reads
+ * — no popup blocker, no extra round trip.
+ */
+let consoleUrlResolver: ((sessionId: string) => string | undefined) | undefined
+
+export function setConsoleUrlResolver(resolver: (sessionId: string) => string | undefined): void {
+  consoleUrlResolver = resolver
+}
+
+/** Attach consoleUrl when the plugin has one for this conversation. */
+function withConsoleUrl(value: ResultValue, exec: ToolRunContext): ResultValue {
+  if (consoleUrlResolver === undefined || typeof value['consoleUrl'] === 'string') return value
+  try {
+    const url = consoleUrlResolver(sessionIdOf(exec))
+    if (url !== undefined && url.length > 0) return { ...value, consoleUrl: url }
+  } catch {
+    /* a missing console must never affect a tool result */
+  }
+  return value
+}
+
 export async function guardValue(exec: ToolRunContext, fn: () => Promise<ResultValue>): Promise<ResultValue> {
   try {
-    return toLosslessJsonValue(await fn())
+    return toLosslessJsonValue(withConsoleUrl(await fn(), exec))
   } catch (error) {
     if (error instanceof AbortRequestedError || exec.signal.aborted === true) {
       throw new HarnessError('tool call aborted', TOOL_ABORTED)
     }
     if (error instanceof JumpServerError) {
-      const value: ResultValue = { ok: false, code: error.code, message: redactSecret(error.message) }
+      // V0.5.3.2: JumpServerError.detail is the structured diagnostic the
+      // session layer attaches to ASSET_ENTER_TIMEOUT / ACCOUNT_SELECTION_REQUIRED
+      // / HOST_KEY_MISMATCH (parsed-account list, detector tail, fingerprint
+      // reason). renderResult is a whitelist, so it MUST be propagated here or
+      // the model can only guess why an enter() timed out.
+      const value: ResultValue = dropNulls({
+        ok: false,
+        code: error.code,
+        message: redactSecret(error.message),
+        detail: error.detail,
+      })
       return value
     }
     throw new HarnessError(redactSecret(error instanceof Error ? error.message : String(error)), errorCodeOf(error))
@@ -202,8 +275,39 @@ function redactSecret(text: string): string {
 export function renderResult(_args: Record<string, unknown>, value: ResultValue): Array<{ type: 'text'; text: string }> {
   const lines: string[] = []
   if (value.ok === true) lines.push('ok')
+  if (typeof value['consoleUrl'] === 'string' && value['consoleUrl'].length > 0) lines.push('console: ' + String(value['consoleUrl']))
   if (value.code !== undefined) lines.push('code: ' + String(value.code))
   if (value.message !== undefined) lines.push(String(value.message))
+  // V0.5.3.2: JumpServerError.detail carries the structured diagnostic (parsed
+  // account list, detector tail, host-key reason). renderResult is a whitelist,
+  // so an unlisted field is invisible no matter what the tool returned.
+  if (typeof value.detail === 'string' && value.detail.length > 0) lines.push('detail: ' + value.detail)
+  // V0.5.8: a command that ran WITHOUT a human prompt because the semantic judge
+  // allowed it must say so — otherwise "no confirm dialog appeared" is
+  // indistinguishable from "the gate did not ask".
+  if (typeof value.riskJudge === 'string' && value.riskJudge.length > 0) lines.push('riskJudge: ' + value.riskJudge)
+  // V0.5.5: the one sentence that stops the retry loop on a dead asset.
+  if (value.code === 'ASSET_UNREACHABLE') lines.push(UNREACHABLE_STOP_LINE)
+  // V0.5.2: completeness is the whole point of the deferred refusal.
+  if (value.connectionComplete !== undefined) {
+    const missing = Array.isArray(value.connectionMissing) ? value.connectionMissing.map((item) => String(item)) : []
+    lines.push(missing.length === 0 ? 'connection: complete' : 'connection: INCOMPLETE — missing ' + missing.join(', '))
+  }
+  // V0.5.11: WHERE the live connection comes from. Only the explicit source
+  // fields are rendered — never the password view, whose future fields must not
+  // leak by default.
+  if (value.credentialSource !== undefined) {
+    const from = typeof value.credentialSourceDetail === 'string' && value.credentialSourceDetail.length > 0
+      ? '（' + value.credentialSourceDetail + '）'
+      : ''
+    lines.push('credential: from ' + String(value.credentialSource) + from)
+  }
+  if (value.hostSource !== undefined || value.usernameSource !== undefined) {
+    const parts: string[] = []
+    if (value.hostSource !== undefined) parts.push('host: from ' + String(value.hostSource))
+    if (value.usernameSource !== undefined) parts.push('username: from ' + String(value.usernameSource))
+    lines.push('connection ' + parts.join(' / '))
+  }
   if (value.state !== undefined) lines.push('state: ' + String(value.state))
   if (value.gateway !== undefined) lines.push('gateway: ' + String(value.gateway))
   if (value.target !== undefined) lines.push('target: ' + String(value.target))
@@ -230,18 +334,27 @@ export function renderBatchResult(tasks: TargetBatchResult[]): ResultValue {
     totalDurationMs += durationMs
     if (task.error !== null) failed += 1
     for (const cmd of task.commands) {
-      if (cmd.error !== null) failed += 1
+      // V0.4.3: a non-zero exit / timeout is a FAILURE, not a completed command.
+      if (cmd.error !== null || (cmd.exitCode !== null && cmd.exitCode !== 0)) failed += 1
     }
     lines.push('target=' + task.target + ' hostname=' + (task.hostname ?? '?') + ' commands=' + task.commands.length)
-    if (task.error !== null) lines.push('  error=' + task.error.code + ': ' + task.error.message)
+    if (task.error !== null) {
+      lines.push('  error=' + task.error.code + ': ' + task.error.message)
+      // V0.5.12: a nested failure's detail is the whole diagnostic (parsed
+      // account list, detector tail, host-key reason).
+      if (typeof task.error.detail === 'string' && task.error.detail.length > 0) lines.push('    detail: ' + task.error.detail)
+      if (task.error.code === 'ASSET_UNREACHABLE') lines.push('    ' + UNREACHABLE_STOP_LINE)
+    }
     for (const cmd of task.commands) {
       const rc = cmd.exitCode !== null ? String(cmd.exitCode) : '?'
-      lines.push('  $ ' + cmd.command)
+      lines.push('  $ ' + redactCommandSecrets(cmd.command))
       if (cmd.error !== null) {
         lines.push('    error=' + cmd.error.code + ': ' + cmd.error.message)
+        if (typeof cmd.error.detail === 'string' && cmd.error.detail.length > 0) lines.push('      detail: ' + cmd.error.detail)
+        if (cmd.error.code === 'ASSET_UNREACHABLE') lines.push('      ' + UNREACHABLE_STOP_LINE)
         continue
       }
-      lines.push('    exitCode=' + rc + ' state=' + cmd.executionState + ' durationMs=' + cmd.durationMs)
+      lines.push('    exitCode=' + rc + ' status=' + cmd.commandStatus + ' state=' + cmd.executionState + ' durationMs=' + cmd.durationMs)
       const out = cmd.output.trim()
       if (out.length > 0) {
         lines.push('    --- output ---')
@@ -261,6 +374,19 @@ export function renderBatchResult(tasks: TargetBatchResult[]): ResultValue {
 function indent(text: string, spaces: number): string {
   const pad = ' '.repeat(spaces)
   return text.split('\n').map((l) => pad + l).join('\n')
+}
+
+/**
+ * V0.5.3: per-target KoKo account id, e.g. {"192.168.79.10": 1}. Unknown or
+ * non-integer entries are dropped rather than guessed.
+ */
+export function accountMap(raw: unknown): Record<string, number> | undefined {
+  if (raw === null || typeof raw !== 'object') return undefined
+  const out: Record<string, number> = {}
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof value === 'number' && Number.isInteger(value) && value >= 0) out[key] = value
+  }
+  return Object.keys(out).length > 0 ? out : undefined
 }
 
 /** Upper bound for the optional rawText passthrough (keeps model context slim). */
