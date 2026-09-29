@@ -1,3 +1,31 @@
+import { isVolatile } from '@deepseek-ai/cosmokit'
+
+/**
+ * Unwrap DSH volatile config references into plain values.
+ *
+ * Every field in schema.ts is declared `.volatile()` so the Host's settings
+ * service will serve this plugin's namespace at all. A volatile field's parsed
+ * value is a REFERENCE (cosmokit's Volatile) exposing get(), so reading it
+ * directly yields `[object Object]` instead of the configured value. The Host
+ * unwraps internally (plainConfig); plugin code must do it explicitly or every
+ * scalar read is wrong.
+ */
+export function unwrapConfig<T>(value: T): T {
+  return unwrapValue(value) as T
+}
+
+/** Recursively replace Volatile references with their current snapshots. */
+function unwrapValue(value: unknown): unknown {
+  if (isVolatile(value)) return unwrapValue(value.get())
+  if (Array.isArray(value)) return value.map(unwrapValue)
+  if (value !== null && typeof value === 'object') {
+    const out: Record<string, unknown> = {}
+    for (const [key, child] of Object.entries(value)) out[key] = unwrapValue(child)
+    return out
+  }
+  return value
+}
+
 /** Runtime configuration of the JumpServer connector (V0.1). */
 export type PermissionMode = 'READ_ONLY' | 'AUTO' | 'FULL_ACCESS'
 
