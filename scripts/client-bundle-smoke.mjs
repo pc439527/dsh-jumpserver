@@ -111,8 +111,11 @@ for (const cleanup of cleanups) {
   }
 }
 
-if (!registrations.includes('plugins.item')) {
-  throw new Error('BUNDLE_SMOKE_FAIL: native settings slot missing')
+if (!registrations.includes('settings.section')) {
+  throw new Error('BUNDLE_SMOKE_FAIL: settings.section slot missing (the card belongs on the Settings page)')
+}
+if (registrations.includes('plugins.item')) {
+  throw new Error('BUNDLE_SMOKE_FAIL: the settings card must not register into the Plugins page')
 }
 for (const name of OPTIONAL) {
   if (!injected.includes(name)) throw new Error('BUNDLE_SMOKE_FAIL: ctx.inject did not request ' + name)

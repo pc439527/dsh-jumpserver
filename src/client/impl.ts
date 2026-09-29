@@ -84,16 +84,19 @@ export function apply(ctx: BrowserCtx): void {
   const api = credentialsFace(ctx)
   diag('form:bound', { snapshot: form.getSnapshot()?.status ?? 'none', writable: form.getSnapshot()?.writable })
 
+  // `settings.section` is the Settings page's own section slot - the one that
+  // renders entries like "OpenCode Go" in the left navigation. `plugins.item`
+  // would instead drop the card onto the separate Plugins page.
   ctx.effect(() => ctx.configForms.whileServed([NS], (served: Set<string>) => {
     diag('whileServed:fired', { served: Array.from(served ?? []) })
-    return ctx.slots.inject('plugins.item', () => ctx.slots.register({
-    name: 'plugins.item',
-    id: NS,
-    order: 100,
-    label: () => t('tabTitle'),
-    locale: NS,
-    inject: () => ({ t: tMap(t), scope, api }),
-  }, JumpServerSettingsCard))
+    return ctx.slots.inject('settings.section', () => ctx.slots.register({
+      name: 'settings.section',
+      id: NS,
+      order: 30,
+      label: () => t('tabTitle'),
+      locale: NS,
+      inject: () => ({ t: tMap(t), scope, api }),
+    }, JumpServerSettingsCard))
   }), 'jumpserver: native settings page')
 
   // The right column is optional: without it the Host tools and the loopback
