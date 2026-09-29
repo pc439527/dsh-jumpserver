@@ -15,8 +15,23 @@ export interface NativeConfigForm {
   unset(field: string): Promise<unknown>
 }
 
+/** The right-column services, resolved through ctx.inject rather than declared. */
+export interface SidebarFace {
+  sidebarRightTabs: { get(kind: string): unknown }
+  sidebarRight: { openTab(kind: string, options: { params: { url: string } }): void }
+  uiSession: {
+    adapter: {
+      current: {
+        getSnapshot(): { key?: string }
+        subscribe(listener: () => void): () => void
+      }
+    }
+  }
+}
+
 export interface BrowserCtx {
   effect(fn: () => unknown | (() => void) | Promise<unknown>, label?: string): unknown
+  inject(names: string[], cb: (scope: SidebarFace) => unknown): () => void
   slots: {
     inject(name: string, cb: () => unknown): () => void
     register(options: Record<string, unknown>, component: unknown): () => void
@@ -33,16 +48,6 @@ export interface BrowserCtx {
     credentials: {
       describe(refs: string[]): Promise<{ ok: boolean; value?: Record<string, { configured?: boolean; writable?: boolean }> }>
       set(ref: string, value: string): Promise<unknown>
-    }
-  }
-  sidebarRightTabs: { get(kind: string): unknown }
-  sidebarRight: { openTab(kind: string, options: { params: { url: string } }): void }
-  uiSession: {
-    adapter: {
-      current: {
-        getSnapshot(): { key?: string }
-        subscribe(listener: () => void): () => void
-      }
     }
   }
 }
