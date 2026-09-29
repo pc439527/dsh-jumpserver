@@ -252,44 +252,19 @@ export function apply(ctx: Context, config: JumpServerConfig): void {
       } catch (error) {
         mark('settings:describe-failed')
       }
-      // describe() skips an entry whose fiber is not yet active (state !== 2),
-      // so a probe taken inside apply() can be a false negative. Re-probe once
-      // this fiber is certainly active to tell "not served" from "not yet".
-      const late = setTimeout(() => {
-        try {
-          const served = (typeof settings.describe === 'function' ? settings.describe() : []).map((d) => String(d.ns ?? ''))
-          mark('late:namespaces:' + served.join(','))
-          mark(served.includes(JS_SETTINGS_NAMESPACE) ? 'late:namespace-ok' : 'late:namespace-missing')
-        } catch {
-          mark('late:describe-failed')
-        }
-        // Evaluate describe()'s exact filter conditions for OUR entry, so the
-        // reason it is skipped is named instead of inferred.
-        try {
-          const editor = (ctx as unknown as { get?: (n: string) => unknown }).get?.('configEditor') as
-            | { entries?: () => Array<{ options?: { id?: string }; fiber?: { state?: number; runtime?: { Config?: unknown } | null } | null }> }
-            | undefined
-          const all = typeof editor?.entries === 'function' ? editor.entries() : []
-          const mine = all.find((e) => String(e.options?.id ?? '') === JS_SETTINGS_NAMESPACE)
-          mark('probe:in-entries:' + String(mine !== undefined))
-          const fiber = mine?.fiber
-          mark('probe:fiber:' + String(fiber !== undefined && fiber !== null))
-          mark('probe:state:' + String(fiber?.state))
-          mark('probe:runtime:' + String(fiber?.runtime === null ? 'null' : fiber?.runtime === undefined ? 'undefined' : 'present'))
-          const schema = fiber?.runtime?.Config as { toJSON?: unknown } | undefined
-          mark('probe:config:' + String(schema === undefined ? 'undefined' : schema === null ? 'null' : 'present'))
-          mark('probe:toJSON:' + String(typeof schema?.toJSON))
-          const withConfig = editor as unknown as { configuration?: () => Array<{ entry?: { options?: { id?: string } } }> } | undefined
-          const cfgRows = (typeof withConfig?.configuration === 'function' ? withConfig.configuration() : [])
-            .map((row) => String(row.entry?.options?.id ?? '?'))
-          mark('cfgcount:' + String(cfgRows.length) + ' hasmine:' + String(cfgRows.includes(JS_SETTINGS_NAMESPACE)))
-        } catch (error) {
-          mark('probe:failed:' + String(error).slice(0, 60))
-        }
-      }, 5000)
-      if (typeof late === 'object' && late !== null && 'unref' in late) late.unref()
-      // The served namespaces are exactly the config-editor entry ids, so dump
-      // those too: it distinguishes "entry absent" from "entry under another id".
+      // One confirmation probe: the namespace must actually be served, because a
+      // Config that fails the Host's volatile projection is skipped silently and
+      // the settings card then never mounts. tests/config-volatile.test.ts pins
+      // the schema side; this records the runtime side.
+      try {
+        const served = (typeof settings.describe === 'function' ? settings.describe() : []).map((d) => String(d.ns ?? ''))
+        mark('settings:namespaces:' + served.join(','))
+        mark(served.includes(JS_SETTINGS_NAMESPACE) ? 'settings:namespace-ok' : 'settings:namespace-missing')
+      } catch {
+        mark('settings:describe-failed')
+      }
+      // The served namespaces are exactly the config-editor entry ids; recording
+      // them makes a missing entry diagnosable without attaching a debugger.
       try {
         const editor = (ctx as unknown as { get?: (n: string) => unknown }).get?.('configEditor') as
           | { entries?: () => Array<{ options?: { id?: string; name?: string } }> }
