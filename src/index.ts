@@ -29,7 +29,7 @@ import { jumpHomeBaselines, jumpHomeBootMarker, jumpHomeClientTrace, jumpHomeCon
 import { interruptSession } from './runtime/interrupt.js'
 import { DEFAULT_CONSOLE_PORT, startConsoleServer, type ConsoleHandle } from './runtime/console.js'
 import { OpsCaseRegistry } from './ops/evidence.js'
-import { manualPolicyOf, resolveConcurrency, resolveConnection } from './config/types.js'
+import { manualPolicyOf, resolveConcurrency, resolveConnection, unwrapConfig } from './config/types.js'
 import { Semaphore } from './jumpserver/concurrency.js'
 import { requireTargetAllowed } from './security/target-scope.js'
 import { classifyManual, manualGate, menuManualKind } from './security/manual-policy.js'
@@ -103,7 +103,13 @@ export function apply(ctx: Context, config: JumpServerConfig): void {
   // DSH Host configuration is the single source of connection settings. Every
   // reader must use this projection so status, settings views and the actual
   // SSH identity can never disagree.
-  const effectiveConfig = (): Config => source()
+  //
+  // Unwrapping is mandatory, not cosmetic: a field declared `.volatile()` (which
+  // every field in config/schema.ts is, so the Host will serve this namespace at
+  // all) arrives as a Volatile REFERENCE, not a value. Reading it directly yields
+  // `[object Object]`, which then leaks into connection errors such as
+  // "password is not configured (set [object Object])".
+  const effectiveConfig = (): Config => unwrapConfig(source())
 
   // V0.5.0/V0.5.11: the effective connection is resolved per call so a
   // settings change (or a different selected profile) takes effect on the next
