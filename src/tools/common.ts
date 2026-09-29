@@ -6,7 +6,6 @@ import { redactCommandSecrets } from '../security/command-redaction.js'
 import type { ExecOutcome, SessionStatus } from '../jumpserver/session.js'
 import type { TargetBatchResult } from '../jumpserver/session-manager.js'
 import type { SessionBundle } from '../jumpserver/session-registry.js'
-import { ANONYMOUS_SESSION } from '../jumpserver/session-registry.js'
 import { SessionState } from '../jumpserver/state-machine.js'
 import type { AssetEntry } from '../jumpserver/asset-list.js'
 
@@ -106,13 +105,14 @@ export function toLosslessJsonValue<T>(value: T): T {
  * the composed agent rather than the conversation and therefore made multiple
  * conversations reuse one JumpServer bundle.
  *
- * Calls without an owning agent use the anonymous test/mock scope only;
- * production conversation calls never fall back to a shared agent identity.
+ * Calls without an authoritative conversation id fail closed. A shared
+ * anonymous fallback can merge unrelated tool calls into one PTY/session.
  */
 export function sessionIdOf(exec: ToolRunContext): string {
   const agent = exec.agent as { session?: { header?: { id?: unknown } } } | undefined
   const id = agent?.session?.header?.id
-  return typeof id === 'string' && id.length > 0 ? id : ANONYMOUS_SESSION
+  if (typeof id === 'string' && id.length > 0) return id
+  throw new Error('JUMPSERVER_SESSION_REQUIRED: authoritative conversation session id is missing')
 }
 
 /** The per-conversation bundle for one tool call (never shared across ids). */

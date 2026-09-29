@@ -28,6 +28,9 @@ audit-export-*
 id_rsa*
 id_ed25519*
 
+# Git bundles are local backup artifacts, never release sources
+submission/*.bundle
+
 # Generated reports
 classifier-report.json
 

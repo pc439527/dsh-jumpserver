@@ -62,8 +62,8 @@ function harness(entries: Array<Record<string, unknown>>, overrides: Partial<Jum
     grants,
     undefined,
     () => entries,
-    // V0.4.0: the loopback console URL accessor.
-    (sessionId) => 'http://127.0.0.1:9/?token=test&session=' + sessionId,
+    // Desktop 0.2.x: stable token-free loopback console URL.
+    () => 'http://127.0.0.1:8765/',
   )
   const def = defs.find((d) => d.name === 'jumpserver_audit')!
   const execFor = (sessionId: string) => ({ agent: { session: { header: { id: sessionId } } }, signal: new AbortController().signal, name: 'jumpserver_audit', callId: 'c1' })
@@ -104,7 +104,7 @@ describe('jumpserver_status console handover', () => {
     h.grants.arm('conversation-A', 'persistent')
     const status = h.defs.find((d) => d.name === 'jumpserver_status')!
     const value = await status.execute({}, h.execFor('conversation-A'))
-    expect(value.consoleUrl).toBe('http://127.0.0.1:9/?token=test&session=conversation-A')
+    expect(value.consoleUrl).toBe('http://127.0.0.1:8765/')
   })
 })
 

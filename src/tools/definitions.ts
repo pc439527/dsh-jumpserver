@@ -32,7 +32,7 @@ export const ASSETS_SCHEMA = {
   additionalProperties: false,
   properties: {
     ok: { type: 'boolean', required: true },
-    /** V0.4.1: loopback console URL for this conversation (token embedded). */
+    /** Desktop 0.2.x: stable token-free loopback console URL. */
     consoleUrl: { type: 'string' },
     code: { type: 'string' },
     message: { type: 'string' },
@@ -75,7 +75,7 @@ export const AUDIT_SCHEMA = {
   additionalProperties: false,
   properties: {
     ok: { type: 'boolean', required: true },
-    /** V0.4.1: loopback console URL for this conversation (token embedded). */
+    /** Desktop 0.2.x: stable token-free loopback console URL. */
     consoleUrl: { type: 'string' },
     code: { type: 'string' },
     message: { type: 'string' },

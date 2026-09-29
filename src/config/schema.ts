@@ -92,8 +92,8 @@ export const Config = z.object({
     .max(MAX_SESSIONS_CEILING)
     .default(DEFAULT_MAX_SESSIONS)
     .description('V0.4.1 同时进入的目标数上限（1..' + MAX_SESSIONS_CEILING + '，进程级 Semaphore，仅在 batchConcurrency > 1 时生效）'),
-  consoleEnabled: z.boolean().default(true).description('V0.4.0 内置运维控制台（仅绑定 127.0.0.1）：终端镜像 / 资产 / 任务 / 审计，URL 由 jumpserver_status 返回，适合 desktop 版本（无需 better-sidebar）'),
-  consolePort: z.number().min(0).max(65535).default(0).description('控制台端口；0 = 随机回环端口（推荐，避免与其他实例冲突）'),
+  consoleEnabled: z.boolean().default(true).description('V0.4.0 内置运维控制台（仅绑定 127.0.0.1）：终端镜像 / 资产 / 任务 / 审计，稳定 URL 由 jumpserver_status 返回，认证 Token 不进入 URL/日志/工具结果'),
+  consolePort: z.number().min(0).max(65535).default(8765).description('控制台端口；默认 8765，提供稳定的 Desktop 右栏地址；测试可显式使用 0'),
   autoReconnect: z.boolean().default(true).description('空闲断线自动重连（最多 2 次）'),
   assetCacheTtlSeconds: z
     .number()

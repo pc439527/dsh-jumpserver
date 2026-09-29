@@ -30,7 +30,7 @@ export function jumpHomeKnownHosts(): string {
   return join(jumpHomeRoot(), 'known_hosts.json')
 }
 
-/** Console discovery file: written at boot so the port/token are findable. */
+/** Console discovery file with the public loopback URL only. */
 export function jumpHomeConsole(): string {
   return join(jumpHomeRoot(), 'console.json')
 }
@@ -38,11 +38,6 @@ export function jumpHomeConsole(): string {
 /** Boot marker: proves the Host half activated, even if the console later fails. */
 export function jumpHomeBootMarker(): string {
   return join(jumpHomeRoot(), 'boot.json')
-}
-
-/** Editable configuration overlay (settings card backend). */
-export function jumpHomeConfig(): string {
-  return join(jumpHomeRoot(), 'config.json')
 }
 
 /** Browser-half activation trace (JSON lines). */

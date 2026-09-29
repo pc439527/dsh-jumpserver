@@ -35,9 +35,6 @@ export interface SessionRegistryOptions {
   onDetach?: (sessionId: string) => void
 }
 
-/** Fallback only for direct/mock tool calls that carry no Agent session. */
-export const ANONYMOUS_SESSION = 'anonymous'
-
 export class SessionRegistry {
   private readonly bundles = new Map<string, SessionBundle>()
   private readonly detachGraceMs: number
@@ -55,7 +52,7 @@ export class SessionRegistry {
   }
 
   getOrCreate(sessionId: string): SessionBundle {
-    if (sessionId.length === 0) sessionId = ANONYMOUS_SESSION
+    if (sessionId.length === 0) throw new Error('JUMPSERVER_SESSION_REQUIRED: empty conversation session id')
     let bundle = this.bundles.get(sessionId)
     if (bundle === undefined) {
       bundle = this.options.create(sessionId)

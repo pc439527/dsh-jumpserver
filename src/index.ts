@@ -26,9 +26,8 @@ import { registerCollectionTools } from './tools/inspection.js'
 import { JobStore } from './runtime/job-store.js'
 import { BaselineStore } from './runtime/baseline-store.js'
 import { jumpHomeBaselines, jumpHomeBootMarker, jumpHomeClientTrace, jumpHomeConsole, jumpHomeKnownHosts } from './runtime/paths.js'
-import { readOverlay, writeOverlayPatch } from './runtime/config-store.js'
 import { interruptSession } from './runtime/interrupt.js'
-import { startConsoleServer, type ConsoleHandle } from './runtime/console.js'
+import { DEFAULT_CONSOLE_PORT, startConsoleServer, type ConsoleHandle } from './runtime/console.js'
 import { OpsCaseRegistry } from './ops/evidence.js'
 import { manualPolicyOf, resolveConcurrency, resolveConnection } from './config/types.js'
 import { Semaphore } from './jumpserver/concurrency.js'
@@ -101,13 +100,16 @@ export function apply(ctx: Context, config: JumpServerConfig): void {
   let auditDomain: { close(): Promise<void> } | undefined
   let auditTable: { put(key: string, value: unknown): Promise<void> } | undefined
 
+  // DSH Host configuration is the single source of connection settings. Every
+  // reader must use this projection so status, settings views and the actual
+  // SSH identity can never disagree.
+  const effectiveConfig = (): Config => source()
+
   // V0.5.0/V0.5.11: the effective connection is resolved per call so a
   // settings change (or a different selected profile) takes effect on the next
   // connect without restarting the Host. The profile wins field by field.
   const getConfig = (): Config => {
-    // V0.4.2: the settings card writes an explicit overlay file; it wins over
-    // the composed config so the UI can configure the plugin on any DSH build.
-    const cfg = { ...source(), ...readOverlay() } as Config
+    const cfg = effectiveConfig()
     const conn = resolveConnection(cfg)
     const knownHostsPath = typeof cfg.knownHostsPath === 'string' && cfg.knownHostsPath.length > 0
       ? cfg.knownHostsPath
@@ -115,35 +117,9 @@ export function apply(ctx: Context, config: JumpServerConfig): void {
     return { ...cfg, host: conn.host, port: conn.port, username: conn.username, passwordEnv: conn.passwordEnv, knownHostsPath }
   }
 
-  /** Store a credential value when the host's credential service supports it. */
-  const storeCredential = async (ref: string, value: string): Promise<boolean> => {
-    try {
-      const credentials = ctx.get('credentials') as
-        | { set?: (r: string, v: string) => unknown; write?: (r: string, v: string) => unknown; store?: (r: string, v: string) => unknown }
-        | undefined
-      const write = credentials?.set ?? credentials?.write ?? credentials?.store
-      if (typeof write !== 'function') return false
-      await Promise.resolve(write.call(credentials, ref, value))
-      return true
-    } catch {
-      return false
-    }
-  }
-
-  /** The settings card's read view: effective values, secrets stripped. */
-  const configView = (): { value: Record<string, unknown>; user: Record<string, unknown>; secrets: string[] } => {
-    const cfg = getConfig() as unknown as Record<string, unknown>
-    const { password, ...rest } = cfg
-    return {
-      value: { ...rest, passwordConfigured: typeof password === 'string' && password.length > 0 },
-      user: readOverlay(),
-      secrets: ['password'],
-    }
-  }
-
   /** Where the live identity comes from (never the value itself). */
   const connectionSource = (): { source: string; profileId?: string; profileLabel?: string } => {
-    const conn = resolveConnection(source())
+    const conn = resolveConnection(effectiveConfig())
     return {
       source: conn.source,
       ...(conn.profileId !== undefined ? { profileId: conn.profileId } : {}),
@@ -628,13 +604,6 @@ export function apply(ctx: Context, config: JumpServerConfig): void {
 
       return { ok: false, code: 'NOT_NAVIGABLE', message: '会话状态 ' + st.state + ' 下无法执行人工输入（先连接并进入服务器）', state: st.state, sessionId }
     },
-    credentialWriteFor: storeCredential,
-    configReadFor: () => configView(),
-    configWriteFor: (patch) => {
-      writeOverlayPatch(patch as Record<string, unknown>)
-      registry.applyScrollback(Math.max(200, getConfig().terminalScrollback))
-      return configView()
-    },
     consoleUrlFor: (sessionId) => (sessionId === undefined || sessionId.length === 0 ? consoleUrlFor('') : consoleUrlFor(sessionId)),
     diagFor: (event, detail) => {
       try {
@@ -674,16 +643,16 @@ export function apply(ctx: Context, config: JumpServerConfig): void {
     },
   }
 
-  // V0.4.0: the desktop-friendly console. It needs no client plugin and no
-  // webServer route, so it starts whenever the plugin does; the sidebar tab
-  // (which needs dsh-better-sidebar) stays optional and independent of it.
+  // Desktop 0.2.x: the loopback console. It needs no webServer route, so it
+  // starts whenever the plugin does; the native sidebarRight Browser Tab that
+  // opens it is independent of the console's own lifetime.
   ctx.effect(
     () => {
       mark('console:start')
       if (getConfig().consoleEnabled === false) { mark('console:disabled'); return () => undefined }
       let disposed = false
       let handle: ConsoleHandle | undefined
-      void startConsoleServer(bridgeServices, { port: getConfig().consolePort ?? 0 })
+      void startConsoleServer(bridgeServices, { port: getConfig().consolePort ?? DEFAULT_CONSOLE_PORT })
         .then((started) => {
           if (disposed) {
             void started.close()
@@ -692,10 +661,9 @@ export function apply(ctx: Context, config: JumpServerConfig): void {
           handle = started
           mark('console:bound:' + String(started.port))
           consoleUrlFor = (sessionId: string) => started.urlFor(sessionId)
-          writeStateFile(jumpHomeConsole(), { port: started.port, token: started.token, url: started.urlFor(undefined) })
-          ctx.logger.warn(
-            '[dsh-jumpserver] console: ' + started.urlFor(undefined) + ' (append &session=<conversationId>, or read consoleUrl from jumpserver_status)',
-          )
+          // The token never leaves Host memory and the HttpOnly cookie.
+          writeStateFile(jumpHomeConsole(), { port: started.port, url: started.urlFor(undefined) })
+          ctx.logger.warn('[dsh-jumpserver] console: ' + started.urlFor(undefined))
         })
         .catch((error) => {
           failures.push('console: ' + (error instanceof Error ? error.message : String(error)))
