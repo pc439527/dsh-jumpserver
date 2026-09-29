@@ -53,26 +53,48 @@ function credentialsFace(ctx: BrowserCtx): SettingsCardProps['api'] {
   }
 }
 
+/**
+ * Fire-and-forget activation trace -> <dsh home>/jumpserver/client-trace.jsonl.
+ * The settings page mounts only when the Host actually serves this namespace,
+ * which is invisible from the browser, so every mount gate is traced.
+ */
+function diag(event: string, detail?: Record<string, unknown>): void {
+  try {
+    void fetch('/api/jumpserver.diag', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ event, detail }),
+    }).catch(() => undefined)
+  } catch {
+    /* telemetry must never break the page */
+  }
+}
+
 /** Conversations that already auto-opened the tab (per page load). */
 const autoOpenedFor = new Set<string>()
 
 export function apply(ctx: BrowserCtx): void {
   injectStyles()
+  diag('apply:enter', { inject: ['slots', 'locale', 'remote', 'remote.credentials', 'configForms'] })
   const t = ctx.locale.bind(NS)
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'jumpserver: browser dictionaries')
 
   const form = ctx.configForms.get(NS)
   const scope = scopeFace(form)
   const api = credentialsFace(ctx)
+  diag('form:bound', { snapshot: form.getSnapshot()?.status ?? 'none', writable: form.getSnapshot()?.writable })
 
-  ctx.effect(() => ctx.configForms.whileServed([NS], () => ctx.slots.inject('plugins.item', () => ctx.slots.register({
+  ctx.effect(() => ctx.configForms.whileServed([NS], (served: Set<string>) => {
+    diag('whileServed:fired', { served: Array.from(served ?? []) })
+    return ctx.slots.inject('plugins.item', () => ctx.slots.register({
     name: 'plugins.item',
     id: NS,
     order: 100,
     label: () => t('tabTitle'),
     locale: NS,
     inject: () => ({ t: tMap(t), scope, api }),
-  }, JumpServerSettingsCard))), 'jumpserver: native settings page')
+  }, JumpServerSettingsCard))
+  }), 'jumpserver: native settings page')
 
   // The right column is optional: without it the Host tools and the loopback
   // console still work, so this must never gate the settings page above.
