@@ -10,7 +10,15 @@ export function consolePage(): string {
   return PAGE
 }
 
-const PAGE = `<!doctype html>
+/*
+ * String.raw is REQUIRED, not stylistic. A plain template literal processes
+ * escapes before emitting, so the ANSI-strip regex reached the browser with an
+ * escaped closing paren: the group never terminated, the whole inline <script>
+ * failed to parse, and the console rendered as static HTML with no tab
+ * switching, no buttons and no polling. Raw keeps every backslash the
+ * browser's own parser is meant to see.
+ */
+const PAGE = String.raw`<!doctype html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8" />
