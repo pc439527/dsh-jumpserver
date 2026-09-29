@@ -45,6 +45,7 @@ const PAGE = String.raw`<!doctype html>
   button.act { background: #161b22; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px; padding: 6px 10px; cursor: pointer; font: inherit; }
   button.act[disabled] { opacity: .45; cursor: default; }
   button.act.danger { border-color: rgba(248,81,73,.5); color: #f85149; }
+  button.act[data-on] { border-color: rgba(63,185,80,.55); color: #3fb950; }
   table { width: 100%; border-collapse: collapse; }
   th, td { text-align: left; padding: 4px 8px; border-bottom: 1px solid #161b22; font-size: 12px; }
   th { color: #8b949e; font-weight: 600; }
@@ -81,6 +82,7 @@ const PAGE = String.raw`<!doctype html>
       <button class="act" id="send" disabled>发送</button>
       <button class="act danger" id="interrupt" disabled>中断</button>
       <button class="act" id="clear">清屏</button>
+      <button class="act" id="follow" data-on="1">跟随：开</button>
     </div>
     <div id="confirm" class="notice" style="display:none"></div>
   </section>
@@ -104,6 +106,19 @@ const PAGE = String.raw`<!doctype html>
 var fragment = new URLSearchParams(location.hash.replace(/^#/, ''));
 var SESSION = fragment.get('session') || '';
 var sinceSeq = 0;
+var following = true;
+
+// Follow mode: ON pins the view to the newest output on every append. OFF
+// leaves the scroll position entirely to the operator. Scrolling up breaks
+// follow automatically (standard terminal behaviour) and the button says so,
+// so nobody is yanked back to the bottom without an explanation.
+function setFollow(on) {
+  following = on;
+  var btn = el('follow');
+  btn.textContent = '跟随：' + (on ? '开' : '关');
+  if (on) btn.setAttribute('data-on', '1'); else btn.removeAttribute('data-on');
+  if (on) { var t = el('term'); t.scrollTop = t.scrollHeight; }
+}
 var tab = 'term';
 var confirmReq = null;
 
@@ -159,12 +174,11 @@ function setTab(next) {
 
 function append(text, cls) {
   var term = el('term');
-  var atBottom = term.scrollTop + term.clientHeight >= term.scrollHeight - 24;
   var div = document.createElement('div');
   div.className = cls || 'out';
   div.textContent = text;
   term.appendChild(div);
-  if (atBottom) term.scrollTop = term.scrollHeight;
+  if (following) term.scrollTop = term.scrollHeight;
 }
 
 function renderStatus(st) {
@@ -331,6 +345,12 @@ function loadAudit() {
   el('cmd').addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); send(); } });
   el('send').onclick = send;
   el('clear').onclick = function () { el('term').textContent = ''; };
+  el('follow').onclick = function () { setFollow(!following); };
+  el('term').addEventListener('scroll', function () {
+    var t = el('term');
+    if (following && t.scrollTop + t.clientHeight < t.scrollHeight - 24) setFollow(false);
+  });
+  setFollow(true);
   el('jobsRefresh').onclick = loadJobs;
   el('auditRefresh').onclick = loadAudit;
   var interrupt = function () {
