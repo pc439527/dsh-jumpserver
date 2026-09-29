@@ -6,10 +6,16 @@ import { fetchStatus } from './api.js'
 import { JumpServerSettingsCard, type SettingsCardProps } from './settings-card.js'
 import type { BrowserCtx, NativeConfigForm } from './context.js'
 
-// Only the guaranteed core service is injected. Native Desktop services are
-// resolved from the live Context after activation so an older composition cannot
-// stall the whole client boot.
-export const inject = ['slots']
+/**
+ * Cordis refuses an undeclared service property access ("cannot get property
+ * 'locale' without inject"), so every service apply() touches directly must be
+ * declared here. This mirrors the official web-search settings plugin.
+ *
+ * The right-column services are deliberately NOT listed: they are resolved
+ * through ctx.inject() below, so a composition without the sidebar degrades
+ * instead of stalling the whole client entry on a pending dependency.
+ */
+export const inject = ['slots', 'locale', 'remote', 'remote.credentials', 'configForms']
 
 /** locale bind() -> plain object snapshot (re-read at every render, never stale). */
 function tMap(bind: (key: string) => string): Record<string, string> {
@@ -68,8 +74,10 @@ export function apply(ctx: BrowserCtx): void {
     inject: () => ({ t: tMap(t), scope, api }),
   }, JumpServerSettingsCard))), 'jumpserver: native settings page')
 
-  ctx.effect(() => {
-    const current = ctx.uiSession.adapter.current
+  // The right column is optional: without it the Host tools and the loopback
+  // console still work, so this must never gate the settings page above.
+  ctx.inject(['sidebarRight', 'sidebarRightTabs', 'uiSession'], (side) => {
+    const current = side.uiSession.adapter.current
     let disposed = false
     let inFlight = false
 
@@ -79,7 +87,7 @@ export function apply(ctx: BrowserCtx): void {
       const sessionId = current.getSnapshot().key
       if (typeof sessionId !== 'string' || sessionId.length === 0 || autoOpenedFor.has(sessionId) || inFlight) return
       if ((scope.getSnapshot().value ?? {})['autoOpenTerminal'] !== true) return
-      if (ctx.sidebarRightTabs.get('browser') === undefined) return
+      if (side.sidebarRightTabs.get('browser') === undefined) return
       inFlight = true
       void fetchStatus(sessionId, undefined)
         .then((status) => {
@@ -88,7 +96,7 @@ export function apply(ctx: BrowserCtx): void {
           // The conversation id travels in the fragment: it never reaches the Host,
           // so it cannot leak into access logs or the discovery file.
           const separator = status.consoleUrl.includes('#') ? '&' : '#'
-          ctx.sidebarRight.openTab('browser', { params: { url: status.consoleUrl + separator + 'session=' + encodeURIComponent(sessionId) } })
+          side.sidebarRight.openTab('browser', { params: { url: status.consoleUrl + separator + 'session=' + encodeURIComponent(sessionId) } })
         })
         .catch(() => undefined)
         .finally(() => { inFlight = false })
@@ -104,5 +112,5 @@ export function apply(ctx: BrowserCtx): void {
       offSettings()
       clearInterval(poll)
     }
-  }, 'jumpserver: open native browser tab after conversation grant')
+  })
 }
