@@ -221,41 +221,61 @@ export function apply(ctx: Context, config: JumpServerConfig): void {
     return bundle.manager.close()
   }
 
-  // Live settings seam; supports current provider API and the legacy helper.
+  // DSH 0.2.x settings: the Loader already publishes this entry's Config under
+  // its profile entry id, so the plugin only has to (a) allow the UI to
+  // auto-generate a page for this instance and (b) react to live edits.
+  //
+  // The previous installSection()/installSettingsSection() calls were a 0.1-era
+  // API: neither exists in @deepseek-ai/dsh-settings 0.2.x, so both branches
+  // silently no-op'd, the namespace was never served, and the settings card
+  // never mounted - with no error anywhere.
   ctx.effect(
-    async () => {
+    () => {
       mark('settings:start')
-      mark('settings:resolve')
       const settings = (ctx as unknown as { get?: (name: string) => unknown }).get?.('settings') as
-        | { installSection?: (...args: unknown[]) => void }
+        | {
+            configure?: (presentation: { auto?: boolean }, owner?: unknown) => () => void
+            describe?: () => Array<{ ns?: string; autoGenerate?: boolean }>
+          }
         | undefined
-      const hooks = {
-        setSource: (current: () => Config) => {
-          source = current
-        },
-        onChange: () => {
-          registry.applyScrollback(Math.max(200, source().terminalScrollback))
-        },
-      }
-      if (settings !== undefined && typeof settings.installSection === 'function') {
-        settings.installSection(ctx, JS_SETTINGS_NAMESPACE, Config, config, hooks)
+      if (settings === undefined) {
+        mark('settings:absent')
+        ctx.logger.warn('[jumpserver] no settings service on this Host; configuration is composition-only')
         return () => undefined
       }
+      const dispose = typeof settings.configure === 'function' ? settings.configure({ auto: true }, ctx) : undefined
+      mark('settings:configured')
       try {
-        const mod = (await import('@deepseek-ai/dsh-settings')) as unknown as {
-          installSettingsSection?: (owner: Context, ns: string, schema: unknown, entry: JumpServerConfig, hk: typeof hooks) => void
-        }
-        if (typeof mod.installSettingsSection === 'function') {
-          mod.installSettingsSection(ctx, JS_SETTINGS_NAMESPACE, Config, config, hooks)
-          return () => undefined
-        }
-      } catch {
-        /* provider-less deployment: keep the composition entry */
+        const served = (typeof settings.describe === 'function' ? settings.describe() : []).map((d) => String(d.ns ?? ''))
+        mark('settings:namespaces:' + served.join(','))
+        mark(served.includes(JS_SETTINGS_NAMESPACE) ? 'settings:namespace-ok' : 'settings:namespace-missing')
+      } catch (error) {
+        mark('settings:describe-failed')
+        ctx.logger.warn('[jumpserver] settings.describe() failed: ' + String(error))
       }
-      ctx.logger.warn('[jumpserver] no settings seam available; using composition config only')
-      return () => undefined
+      return () => {
+        try {
+          dispose?.()
+        } catch {
+          /* policy already released */
+        }
+      }
     },
-    'jumpserver: settings section',
+    'jumpserver: settings page policy',
+  )
+
+  // Live edits: re-budget the terminal observers when the operator changes it.
+  ctx.effect(
+    () => {
+      const settings = (ctx as unknown as { get?: (name: string) => unknown }).get?.('settings') as
+        | { subscribe?: (listener: () => void) => () => void }
+        | undefined
+      const off = typeof settings?.subscribe === 'function' ? settings.subscribe(() => {
+        registry.applyScrollback(Math.max(200, getConfig().terminalScrollback))
+      }) : undefined
+      return () => { try { off?.() } catch { /* already disposed */ } }
+    },
+    'jumpserver: settings live updates',
   )
 
   // Audit sink via the DSH-native storage domain.
