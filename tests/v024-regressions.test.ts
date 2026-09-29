@@ -302,8 +302,13 @@ describe('V0.2.4 #4/#9 /jumpserver command semantics', () => {
         return { manager, observer, lastUsedAt: Date.now() }
       },
     })
+    const commands = { register: (d: CommandDefinition) => { defs.push(d); return () => undefined } }
+    // V0.4.1: registerJumpServerCommand reads optional services through
+    // ctx.get('commands') (cordis guards property access for services the
+    // plugin does not inject), so the stub must expose that seam. A bare
+    // `commands` property is never read and would leave defs empty.
     const fakeCtx = {
-      commands: { register: (d: CommandDefinition) => { defs.push(d); return () => undefined } },
+      get: (name: string) => (name === 'commands' ? commands : undefined),
       logger: { debug() {}, warn() {}, info() {} },
     } as unknown as Context
     registerJumpServerCommand(fakeCtx, registry, () => baseConfig(), grants)

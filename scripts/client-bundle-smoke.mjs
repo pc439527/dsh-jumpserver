@@ -6,7 +6,7 @@
  * bad require names, and gross wiring mistakes without a browser.
  *
  * V0.2.2 assertions:
- *  - settings.plugin.item       present  (settings card)
+ *  - settings.section           present  (settings card; V0.4.1 name)
  *  - conversation.session.header.utilities ABSENT  (legacy >_ JumpServer entry removed)
  *  - shell.overlay              ABSENT  (self-drawn drawer removed)
  *  - the terminal is registered through ctx.betterSidebar.registerTab with
@@ -190,9 +190,10 @@ try {
 
 const injected = registrations.filter((r) => r.kind === 'inject').map((r) => r.name)
 
-// 1) settings card present.
-if (!injected.includes('settings.plugin.item')) {
-  console.error('BUNDLE_SMOKE_FAIL: settings.plugin.item must be declared')
+// 1) settings card present. V0.4.1 registers under 'settings.section' — the
+// old 'settings.plugin.item' name is deliberately gone (its inject never fired).
+if (!injected.includes('settings.section')) {
+  console.error('BUNDLE_SMOKE_FAIL: settings.section must be declared')
   process.exit(1)
 }
 // 2) legacy entries ABSENT (V0.2.2: no >_ JumpServer button, no drawer).
@@ -303,7 +304,7 @@ console.log('BUNDLE_SMOKE_PASS')
     console.error('BUNDLE_SMOKE_FAIL: apply() must not throw without dsh-better-sidebar:', error)
     process.exit(1)
   }
-  if (!soloRegistrations.includes('settings.plugin.item')) {
+  if (!soloRegistrations.includes('settings.section')) {
     console.error('BUNDLE_SMOKE_FAIL: the settings card must still register without dsh-better-sidebar')
     process.exit(1)
   }
