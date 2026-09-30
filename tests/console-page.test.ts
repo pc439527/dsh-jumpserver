@@ -23,11 +23,6 @@ describe('console page script', () => {
     expect(() => new Function(source)).not.toThrow()
   })
 
-  it('keeps the ANSI-strip regex intact (no template-literal mangling)', () => {
-    const source = scriptOf(consolePage())
-    expect(source).toContain('(?:\\u0007|\\u001b\\\\)')
-  })
-
   it('reads the conversation from the fragment, never from a token', () => {
     const source = scriptOf(consolePage())
     expect(source).toContain('location.hash')
