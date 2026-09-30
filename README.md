@@ -312,6 +312,43 @@ npm run sync               # build + 把 lib/ + package.json 同步进 web profi
 
 GitHub Actions CI（typecheck + vitest + build + classifier 门槛 + e2e + client bundle smoke）在 main 与 PR 上自动运行。
 
+
+## 已知限制与故障排查（DSH Desktop 0.2.x）
+
+以下均为真实堡垒机验收中确认的行为，不是待办事项。
+
+### 命令成功但没有输出
+
+远端 PTY 的 canonical 行规程对**单行**有约 4KB 上限。超长的单行响应（压缩过的 JSON、base64）会在远端被丢弃，而命令本身仍然 exit 0：
+
+```
+curl -s http://127.0.0.1:9090/api/v1/alerts | wc -c   # 41613  数据确实到了
+curl -s http://127.0.0.1:9090/api/v1/alerts          # 空输出，exit 0
+```
+
+插件无法从外部改变堡垒机的 tty 参数，因此改为**让失败可见**：这类结果会附带 `outputNote` 说明原因。规避方式：
+
+- `| wc -c` 先确认是否有数据
+- `| jq .` / `| head` / `| fold -w 200` 折行
+
+### 终端里的乱码字符（形如 ???0.5）
+
+堡垒机连接进度用退格符在同一位置刷新数字。控制台已按终端语义实现 BS 删字符与孤立 CR 覆盖重绘，并与侧栏终端共用同一套规则（`src/client/ansi.ts`，由 `tests/console-terminal-strip.test.ts` 对拍保证）。
+
+### 风险裁决（Jev）没有生效
+
+语义副驾**只对 UNKNOWN 分类的命令**发起咨询，且只在即将弹出人工审批时触发。在 READ_ONLY 模式下未知命令被直接拒绝、不会进入审批，因此裁决器没有介入点。要验证链路请把 `permissionMode` 改为 AUTO。
+
+API 密钥保存在 **DSH 凭据域**（设置页写入），不是环境变量。裁决失败时会在审计与结果中给出原因：disabled / no-credential / unreachable / timeout / http-error / bad-payload。`autoAllow` 默认关闭，裁决永远不会自动放行。
+
+### 拒绝审计
+
+BLOCKED / DENIED 都会写入审计，可用 `jumpserver_audit`（`refusalsOnly: true`）或控制台审计页查看。若写入本身失败，工具结果会带 `AUDIT_WRITE_FAILED` 前缀——此时拒绝判定不受影响，但审计承诺已破，需要排查凭据/存储层。
+
+### npm run sync
+
+脚本按 `JS_PROFILE_PKG` → `DSH_PROFILE_DIR` → **自动探测** `~/.dsh/profiles/*` 的顺序解析目标。`DSH_PROFILE_DIR` 只在宿主进程里存在，普通终端中会自动探测并优先选择 desktop profile。
+
 ## License
 
 MIT

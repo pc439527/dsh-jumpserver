@@ -9,7 +9,7 @@ import { JUMPSERVER_NOT_ARMED, NOT_ARMED_MESSAGE, type SessionGrant } from '../s
 import type { BatchCommandRequest, TargetBatchResult } from '../jumpserver/session-manager.js'
 import { runtimeVersion } from '../version.js'
 import { formatAuditTime, resolveTimeZone } from '../runtime/time.js'
-import { assetsToValue, bundleFor, execOutcomeToValue, guardValue, renderAssetsResult, renderBatchResult, renderResult, RESULT_SCHEMA, sessionIdOf, statusToValue, type ResultValue } from './common.js'
+import { assetsToValue, bundleFor, emptyOutputNote, execOutcomeToValue, guardValue, renderAssetsResult, renderBatchResult, renderResult, RESULT_SCHEMA, sessionIdOf, statusToValue, type ResultValue } from './common.js'
 
 function thisJumpError(error: unknown): { code: string; message: string } {
   if (error instanceof JumpServerError) return { code: error.code, message: error.message }
@@ -298,6 +298,11 @@ export function registerJumpServerTools(ctx: Context, registry: SessionRegistry,
               signal: exec.signal,
             })
             const value = execOutcomeToValue(status, outcome)
+            // An exit-0 command that produced nothing is usually a dropped
+            // over-long single line (PTY caps one line near 4KB), not "no result".
+            const exit = outcome.kind === 'completed' ? outcome.exitCode : null
+            const note = emptyOutputNote(args.command, outcome.output, exit)
+            if (note !== undefined) value['outputNote'] = note
             return gated.judgeNote !== undefined ? { ...value, riskJudge: gated.judgeNote } : value
           })
         },
@@ -346,6 +351,11 @@ export function registerJumpServerTools(ctx: Context, registry: SessionRegistry,
             })
             const { target, hostname, status, outcome } = result
             const value = execOutcomeToValue(status, outcome)
+            // An exit-0 command that produced nothing is usually a dropped
+            // over-long single line (PTY caps one line near 4KB), not "no result".
+            const exit = outcome.kind === 'completed' ? outcome.exitCode : null
+            const note = emptyOutputNote(args.command, outcome.output, exit)
+            if (note !== undefined) value['outputNote'] = note
             return {
               ...value,
               target,

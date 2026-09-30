@@ -259,28 +259,17 @@ export function apply(ctx: Context, config: JumpServerConfig): void {
         mark('settings:describe-failed')
       }
       // One confirmation probe: the namespace must actually be served, because a
-      // Config that fails the Host's volatile projection is skipped silently and
-      // the settings card then never mounts. tests/config-volatile.test.ts pins
-      // the schema side; this records the runtime side.
+      // A Config that fails the Host's volatile projection is skipped SILENTLY and
+      // the settings card never mounts, so keep one cheap assertion on record.
+      // tests/config-volatile.test.ts pins the schema side.
       try {
         const served = (typeof settings.describe === 'function' ? settings.describe() : []).map((d) => String(d.ns ?? ''))
-        mark('settings:namespaces:' + served.join(','))
         mark(served.includes(JS_SETTINGS_NAMESPACE) ? 'settings:namespace-ok' : 'settings:namespace-missing')
-      } catch {
-        mark('settings:describe-failed')
-      }
-      // The served namespaces are exactly the config-editor entry ids; recording
-      // them makes a missing entry diagnosable without attaching a debugger.
-      try {
-        const editor = (ctx as unknown as { get?: (n: string) => unknown }).get?.('configEditor') as
-          | { entries?: () => Array<{ options?: { id?: string; name?: string } }> }
-          | undefined
-        const rows = (typeof editor?.entries === 'function' ? editor.entries() : [])
-          .map((e) => String(e.options?.id ?? '?') + '(' + String(e.options?.name ?? '?') + ')')
-        mark('entries:' + rows.join(','))
-        mark(rows.some((row) => row.startsWith(JS_SETTINGS_NAMESPACE + '(')) ? 'entry:found' : 'entry:absent')
+        if (!served.includes(JS_SETTINGS_NAMESPACE)) {
+          ctx.logger.warn('[jumpserver] settings namespace not served; the settings card will not mount')
+        }
       } catch (error) {
-        mark('entries:failed')
+        mark('settings:describe-failed')
         ctx.logger.warn('[jumpserver] settings.describe() failed: ' + String(error))
       }
       return () => {
