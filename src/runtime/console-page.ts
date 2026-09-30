@@ -129,10 +129,51 @@ function esc(s) {
   });
 }
 function strip(s) {
-  return String(s == null ? '' : s)
-    .replace(/\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)/g, '')
-    .replace(/\u001b\[[0-9;?]*[ -\/]*[@-~]/g, '')
-    .replace(/\r/g, '\n');
+  // Terminal semantics, matching src/client/ansi.ts's line framer:
+  //   ESC [ ... CSI  -> dropped
+  //   ESC ] ... BEL  -> dropped (OSC title)
+  //   CRLF / LF      -> line break
+  //   lone CR        -> cursor to column 0 and OVERWRITE (progress redraw);
+  //                     treating it as a newline produced the '???0.5' garbage
+  //   BS             -> erase the previous character
+  //   other controls -> dropped
+  var text = String(s == null ? '' : s);
+  var out = '';
+  var line = '';
+  var i = 0;
+  var n = text.length;
+  function flush() { out += line + '\n'; line = ''; }
+  while (i < n) {
+    var c = text.charAt(i);
+    if (c === '\u001b') {
+      var next = text.charAt(i + 1);
+      if (next === '[') {
+        var j = i + 2;
+        while (j < n && !/[A-Za-z@-~]/.test(text.charAt(j))) j++;
+        i = j + 1;
+      } else if (next === ']') {
+        var k = i + 2;
+        while (k < n && text.charAt(k) !== '\u0007') k++;
+        i = text.charAt(k) === '\u0007' ? k + 1 : k;
+      } else {
+        i += 2;
+      }
+      continue;
+    }
+    if (c === '\n') { flush(); i += 1; continue; }
+    if (c === '\r') {
+      if (text.charAt(i + 1) === '\n') { flush(); i += 2; continue; }
+      line = '';
+      i += 1;
+      continue;
+    }
+    if (c === '\b') { line = line.slice(0, -1); i += 1; continue; }
+    if (c === '\t' || c >= ' ') { line += c; i += 1; continue; }
+    i += 1;
+  }
+  if (line.length > 0) out += line;
+  else if (out.charAt(out.length - 1) === '\n') out = out.slice(0, -1);
+  return out;
 }
 
 function api(path, body, method) {
