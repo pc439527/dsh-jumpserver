@@ -1,10 +1,18 @@
 import { describe, expect, it } from 'vitest'
-import { serializeAudit } from '../src/client/audit-export.js'
-import { formatAuditTime } from '../src/client/audit-view.js'
+import { serializeAudit } from '../src/runtime/audit-export.js'
+import { formatAuditTime } from '../src/runtime/audit-view.js'
 
 describe('audit UI helpers', () => {
-  it('renders audit timestamps in UTC+8 instead of slicing UTC text', () => {
-    expect(formatAuditTime('2026-09-04T02:08:42.000Z')).toBe('10:08:42')
+  it('renders audit timestamps in the CONFIGURED zone, not a hardcoded one', () => {
+    // This used to always be Asia/Shanghai, so every surface showed UTC+8 no
+    // matter what the operator set.
+    expect(formatAuditTime('2026-09-04T02:08:42.000Z', 'Asia/Shanghai')).toBe('10:08:42')
+    expect(formatAuditTime('2026-09-04T02:08:42.000Z', 'UTC')).toBe('02:08:42')
+    expect(formatAuditTime('2026-09-04T02:08:42.000Z', 'America/New_York')).toBe('22:08:42')
+  })
+
+  it('still shows the record when the zone is unusable', () => {
+    expect(formatAuditTime('2026-09-04T02:08:42.000Z', 'Not/AZone')).toBe('02:08:42')
   })
 
   it('exports only the redacted command field when available', () => {

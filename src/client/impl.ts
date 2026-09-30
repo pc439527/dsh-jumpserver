@@ -71,18 +71,12 @@ function diag(event: string, detail?: Record<string, unknown>): void {
 }
 
 /**
- * When this client last opened a console for a session, per page load.
+ * Whether this page load has already observed the conversation granted.
  *
- * Presence alone is not enough to stop a storm: a freshly opened tab needs
- * seconds to load and send its first heartbeat, while the poll runs every
- * 2.5s, so every empty-heartbeat window opened ANOTHER tab (observed: a stack
- * of them). The cooldown covers that gap from the client side.
- *
- * Deliberately in-memory: it only has to bridge one page load's polling, and a
- * reload must be free to open again once the operator closed every tab.
+ * Auto-open fires on the not-granted -> granted EDGE, so this is what stops the
+ * poll from resurrecting a console the operator deliberately closed. It replaced
+ * a 60s cooldown, which only delayed that resurrection instead of preventing it.
  */
-const openedAt = new Map<string, number>()
-const OPEN_COOLDOWN_MS = 60000
 
 /**
  * Ask the Host whether a console page for this session is currently on screen.
@@ -142,29 +136,35 @@ export function apply(ctx: BrowserCtx): void {
     let disposed = false
     let inFlight = false
 
-    // The console is only reachable after /jumpserver granted this conversation,
-    // so the open stays gated on the Host-reported grant, never on a timer alone.
+    // Auto-open is an EVENT, not an invariant.
+    //
+    // It used to mean "a console must exist": whenever none was on screen the
+    // poll rebuilt one, so closing the tab only delayed it by the cooldown. The
+    // console is opened once on the not-granted -> granted transition and then
+    // left alone - the operator closes it and it stays closed until they grant
+    // again. Presence is consulted only to avoid stacking a second tab beside
+    // one that is already showing this conversation.
+    const grantSeen = new Map<string, boolean>()
     const maybeOpen = (): void => {
       const sessionId = current.getSnapshot().key
       if (typeof sessionId !== 'string' || sessionId.length === 0 || inFlight) return
-      // Cover the load gap: a tab we just opened cannot have heartbeated yet.
-      if (Date.now() - (openedAt.get(sessionId) ?? 0) < OPEN_COOLDOWN_MS) return
       if ((scope.getSnapshot().value ?? {})['autoOpenTerminal'] !== true) return
       if (side.sidebarRightTabs.get('browser') === undefined) return
       inFlight = true
       void Promise.all([fetchStatus(sessionId, undefined), consoleAlreadyOpen(sessionId)])
         .then(([status, alreadyOpen]) => {
-          // Live presence: a console is already showing this conversation, so do
-          // not stack another tab beside it. Once it is closed the heartbeat
-          // stops and the next tick opens a fresh one.
+          if (disposed) return
+          const granted = status?.granted === true
+          const wasGranted = grantSeen.get(sessionId) ?? false
+          grantSeen.set(sessionId, granted)
+          // Only the transition opens. A tick that merely observes "still
+          // granted" must never resurrect a console the operator closed.
+          if (!granted || wasGranted) return
           if (alreadyOpen) return
-          if (disposed || status?.granted !== true || typeof status.consoleUrl !== 'string') return
+          if (typeof status.consoleUrl !== 'string') return
           // The conversation id travels in the fragment: it never reaches the Host,
           // so it cannot leak into access logs or the discovery file.
           const separator = status.consoleUrl.includes('#') ? '&' : '#'
-          // revealIfOpened keeps a repeat open on the existing tab instead of
-          // stacking another one beside it.
-          openedAt.set(sessionId, Date.now())
           side.sidebarRight.openTab('browser', {
             revealIfOpened: true,
             params: { url: status.consoleUrl + separator + 'session=' + encodeURIComponent(sessionId) },

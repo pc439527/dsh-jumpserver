@@ -502,10 +502,17 @@ export function JumpServerSettingsCard({ t, scope, api }: SettingsCardProps): Re
     if (drafts['activeProfileId'] === id) edit('activeProfileId', '')
   }
 
-  /** Jev (TypeSafe System One) defaults, so the section is usable without a doc lookup. */
+  /**
+   * Jev (TypeSafe System One) defaults, so the section is usable without a doc
+   * lookup.
+   *
+   * enabled stays FALSE on purpose: filling the template must not start sending
+   * command text to a third party. Turning the judge on is its own deliberate
+   * act, and the surrounding UI says so.
+   */
   const fillRiskJudge = (): void => {
     edit('riskJudge', JSON.stringify({
-      enabled: true,
+      enabled: false,
       endpoint: 'https://api.typesafe.ai/v1/systemone',
       apiKeyEnv: 'TYPESAFE_API_KEY',
       apiKeyFile: '',
