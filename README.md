@@ -157,7 +157,7 @@ jumpserver_job_read(jobId="jsjob_xxxx")                          # 只取增量
 | assetGroups | {} | 资产组别名：组名 → 关键词列表 |
 | runbooks | {} | 命名 runbook：`{ title, steps[] }`，步骤为 profile 或只读 command，可带 `expect` 断言 |
 | riskJudge | {} | 可选语义裁决：`{ enabled, endpoint, apiKeyEnv, model, timeoutMs, cacheTtlSeconds, redactNetwork, autoAllow{...} }`，**默认关闭**；API Key 只经 credential-ref 解析 |
-| consoleEnabled / consolePort | true / 8765 | 内置控制台：仅绑定 127.0.0.1，默认 8765 固定回环端口；URL 由 `jumpserver_status` 返回 |
+| consoleEnabled / consolePort | true / 8766 | 内置控制台：仅绑定 127.0.0.1，默认 8766 固定回环端口（避开 WorkBuddy 的 8765）；URL 由 `jumpserver_status` 返回 |
 | autoReconnect / enableAudit | true / true | 空闲断线自动重连（最多 2 次）/ 命令审计 |
 | autoOpenTerminal / terminalScrollback | true / 5000 | 进会话页自动打开侧栏标签 / 终端保留行数 |
 

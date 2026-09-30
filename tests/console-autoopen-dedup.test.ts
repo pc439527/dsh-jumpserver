@@ -31,8 +31,12 @@ describe('console auto-open dedup', () => {
     expect(client).not.toMatch(/autoOpenedFor[.]/)
   })
 
-  it('has the console page heartbeat its presence', () => {
-    expect(page).toContain('console:alive')
+  it('has the console page heartbeat to the presence endpoint', () => {
+    // Not through /diag: a heartbeat there appends a trace line every few
+    // seconds, forever, for every console that is merely open.
+    expect(page).toContain('/api/jumpserver.consoleAlive')
+    expect(page).toContain('heartbeat: true')
     expect(page).toContain('setInterval(heartbeat')
+    expect(page).not.toContain('console:alive')
   })
 })

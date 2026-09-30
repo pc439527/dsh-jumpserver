@@ -18,8 +18,13 @@ import { consolePage } from './console-page.js'
 // __Host- requires Secure; HTTP loopback cookies must use a host-only name.
 const CONSOLE_COOKIE = 'dsh_jumpserver_console'
 
-/** Stable Desktop sidebar port; the right-column URL must survive restarts. */
-export const DEFAULT_CONSOLE_PORT = 8765
+/**
+ * Stable Desktop sidebar port; the right-column URL must survive restarts.
+ *
+ * 8765 is the WorkBuddy console port on this workstation, so the plugin takes
+ * its own port and both consoles can run side by side.
+ */
+export const DEFAULT_CONSOLE_PORT = 8766
 
 export interface ConsoleHandle {
   port: number
@@ -123,7 +128,14 @@ export function startConsoleServer(services: BridgeServices, options: ConsoleOpt
       resolve({
         port,
         token,
-        urlFor: () => baseUrl,
+        // A tool's consoleUrl is opened by a person, so it must already point
+        // at THAT conversation. The id rides in the fragment, which never
+        // reaches the Host, so nothing about it lands in access logs.
+        urlFor: (sessionId) => {
+          const id = (sessionId ?? '').trim()
+          if (id.length === 0) return baseUrl
+          return baseUrl + '#session=' + encodeURIComponent(id)
+        },
         close: () => new Promise<void>((done) => server.close(() => done())),
       })
     })

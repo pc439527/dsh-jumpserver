@@ -83,6 +83,8 @@ export interface BridgeServices {
    * browser tab type is multiple, so the right column cannot dedupe it itself.
    */
   consoleActiveFor?: (sessionId: string) => boolean
+  /** Record that a console page for this session is on screen (memory only). */
+  noteConsoleAlive?: (sessionId: string) => void
   /** V0.4.0: streaming jobs of one conversation (never another's). */
   jobsFor?: (sessionId: string) => Promise<Array<Record<string, unknown>>>
   /** V0.4.5: idempotent job stop (one Ctrl+C, shared verdict). */
@@ -231,10 +233,10 @@ export function registerBridgeRoutes(webServer: {
           if (!requireGrant(services, sessionId, res)) return
           const observer = services.observerFor(sessionId)
           if (observer !== null) {
-            const holdUntil = Date.now() + SNAPSHOT_HOLD_MS
-            while (observer.cursorSeq <= sinceSeq && Date.now() < holdUntil && !res.destroyed) {
-              await new Promise((r) => setTimeout(r, 150))
-            }
+            // Event-driven: the observer wakes this exact request the moment a
+            // PTY event lands. The previous 150ms cursor poll woke the timer even
+            // for a console that was simply idle.
+            await observer.waitForChange(sinceSeq, requestAbort(req, res), SNAPSHOT_HOLD_MS)
           }
           const events = observer !== null
             ? observer.snapshotSince(sinceSeq).filter((event) => !('visibility' in event) || event.visibility !== 'internal')
@@ -428,6 +430,7 @@ export function registerBridgeRoutes(webServer: {
             json(res, 400, { ok: false, code: 'INVALID_REQUEST', message: 'valid sessionId is required' })
             return
           }
+          if (body.heartbeat === true) services.noteConsoleAlive?.(sessionId)
           json(res, 200, { ok: true, active: services.consoleActiveFor?.(sessionId) === true })
         } catch (error) {
           json(res, 500, { ok: false, code: 'CONSOLE_ALIVE_FAILED', message: error instanceof Error ? error.message : String(error) })
@@ -564,6 +567,20 @@ export function registerBridgeRoutes(webServer: {
       }
     }
   }
+}
+
+/**
+ * Abort as soon as the client goes away.
+ *
+ * Without this a closed console tab leaves the request parked for the whole
+ * long-poll window, holding a waiter that no longer has a consumer.
+ */
+function requestAbort(req: IncomingMessage, res: ServerResponse): AbortSignal {
+  const controller = new AbortController()
+  const stop = (): void => controller.abort()
+  req.once('aborted', stop)
+  res.once('close', stop)
+  return controller.signal
 }
 
 export function draftPasswordSource(

@@ -128,52 +128,79 @@ function esc(s) {
     return c === '&' ? '&amp;' : c === '<' ? '&lt;' : c === '>' ? '&gt;' : '&quot;';
   });
 }
-function strip(s) {
-  // Terminal semantics, matching src/client/ansi.ts's line framer:
-  //   ESC [ ... CSI  -> dropped
-  //   ESC ] ... BEL  -> dropped (OSC title)
-  //   CRLF / LF      -> line break
-  //   lone CR        -> cursor to column 0 and OVERWRITE (progress redraw);
-  //                     treating it as a newline produced the '???0.5' garbage
-  //   BS             -> erase the previous character
-  //   other controls -> dropped
-  var text = String(s == null ? '' : s);
-  var out = '';
+/**
+ * Stateful PTY stream renderer.
+ *
+ * A PTY delivers a byte STREAM, not messages: an escape sequence, a CR or a BS
+ * can be split across two reads. The previous strip() rebuilt its line state on
+ * every event, so anything crossing a chunk boundary decoded twice and rendered
+ * wrong (50%\r + 100% came out as 5100%, a half CSI leaked as literal text).
+ *
+ * The framer therefore keeps the pending escape prefix, the current logical
+ * line and the carry-over between calls, mirroring src/client/ansi.ts. Tests
+ * assert the required property: for every corpus entry and EVERY split point,
+ * rendering the chunks equals rendering the whole string.
+ */
+function makeRenderer() {
+  var esc = '';
   var line = '';
-  var i = 0;
-  var n = text.length;
-  function flush() { out += line + '\n'; line = ''; }
-  while (i < n) {
-    var c = text.charAt(i);
-    if (c === '\u001b') {
-      var next = text.charAt(i + 1);
-      if (next === '[') {
-        var j = i + 2;
-        while (j < n && !/[A-Za-z@-~]/.test(text.charAt(j))) j++;
-        i = j + 1;
-      } else if (next === ']') {
-        var k = i + 2;
-        while (k < n && text.charAt(k) !== '\u0007') k++;
-        i = text.charAt(k) === '\u0007' ? k + 1 : k;
-      } else {
+  // A CR at the very end of a chunk is ambiguous: CRLF if the next chunk starts
+  // with LF, a cursor-to-column-0 overwrite otherwise. Deciding immediately
+  // discards a whole line whenever the LF turns out to arrive next.
+  var crPending = false;
+  function flush() { var out = line + '\n'; line = ''; return out; }
+  function render(chunk) {
+    var text = String(chunk == null ? '' : chunk);
+    var out = '';
+    if (crPending) {
+      crPending = false;
+      if (text.charAt(0) === '\n') { out += flush(); text = text.slice(1); }
+      else { line = ''; }
+    }
+    text = esc + text;
+    var i = 0;
+    var n = text.length;
+    esc = '';
+    while (i < n) {
+      var c = text.charAt(i);
+      if (c === '\u001b') {
+        var next = text.charAt(i + 1);
+        if (next === '[') {
+          var j = i + 2;
+          while (j < n && !/[A-Za-z@-~]/.test(text.charAt(j))) j++;
+          if (j >= n) { esc = text.slice(i); return out; }
+          i = j + 1;
+          continue;
+        }
+        if (next === ']') {
+          var k = i + 2;
+          while (k < n && text.charAt(k) !== '\u0007') k++;
+          if (k >= n) { esc = text.slice(i); return out; }
+          i = k + 1;
+          continue;
+        }
+        if (next === '') { esc = c; return out; }
         i += 2;
+        continue;
       }
-      continue;
-    }
-    if (c === '\n') { flush(); i += 1; continue; }
-    if (c === '\r') {
-      if (text.charAt(i + 1) === '\n') { flush(); i += 2; continue; }
-      line = '';
+      if (c === '\n') { out += flush(); i += 1; continue; }
+      if (c === '\r') {
+        if (i + 1 >= n) { crPending = true; i += 1; continue; }
+        if (text.charAt(i + 1) === '\n') { out += flush(); i += 2; continue; }
+        line = '';
+        i += 1;
+        continue;
+      }
+      if (c === '\b') { line = line.slice(0, -1); i += 1; continue; }
+      if (c === '\t' || c >= ' ') { line += c; i += 1; continue; }
       i += 1;
-      continue;
     }
-    if (c === '\b') { line = line.slice(0, -1); i += 1; continue; }
-    if (c === '\t' || c >= ' ') { line += c; i += 1; continue; }
-    i += 1;
+    return out;
   }
-  if (line.length > 0) out += line;
-  else if (out.charAt(out.length - 1) === '\n') out = out.slice(0, -1);
-  return out;
+  // The not-yet-terminated line belongs to the next event, so keep it and
+  // hand back only what is safe to append now.
+  function renderTake(chunk) { var out = render(chunk); return { out: out, pending: line }; }
+  return { render: render, renderTake: renderTake };
 }
 
 function api(path, body, method) {
@@ -208,17 +235,19 @@ function api(path, body, method) {
 function heartbeat() {
   if (SESSION.length === 0) return;
   try {
-    fetch('/api/jumpserver.diag', {
+    fetch('/api/jumpserver.consoleAlive', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ event: 'console:alive', detail: { sessionId: SESSION } }),
+      body: JSON.stringify({ sessionId: SESSION, heartbeat: true }),
       credentials: 'same-origin',
     }).catch(function () {});
   } catch (e) {
     /* telemetry must never break the console */
   }
 }
-setInterval(heartbeat, 4000);
+// 10s beats the 60s Host TTL with room for timer throttling in a hidden window.
+heartbeat();
+setInterval(heartbeat, 10000);
 
 function setTab(next) {
   tab = next;
@@ -243,6 +272,30 @@ function append(text, cls) {
   div.textContent = text;
   term.appendChild(div);
   if (following) term.scrollTop = term.scrollHeight;
+}
+
+// One renderer for the terminal pane: it must survive across events, since a
+// CR/BS/escape can be split between two of them.
+var terminal = makeRenderer();
+
+/**
+ * Append one PTY chunk: completed lines as their own rows, and the line still
+ * being written into a single reusable row so a partial line is never frozen
+ * into the scrollback (or duplicated when its tail arrives).
+ */
+function termRender(chunk) {
+  var step = terminal.renderTake(chunk);
+  if (step.out.length > 0) append(step.out.replace(/\n$/, ''), 'out');
+  var box = el('term');
+  var live = el('termLive');
+  if (live === null) {
+    live = document.createElement('div');
+    live.id = 'termLive';
+    box.appendChild(live);
+  }
+  live.className = 'out';
+  live.textContent = step.pending;
+  if (following) box.scrollTop = box.scrollHeight;
 }
 
 function renderStatus(st) {
@@ -280,33 +333,45 @@ function renderConfirm(req) {
         if (res.data && res.data.ok === true) append('$ ' + String(req.command), 'in');
         else append('确认执行失败：' + String((res.data && (res.data.message || res.data.code)) || res.status), 'err');
         confirmReq = null;
-        poll();
       });
   };
 }
 
-function poll() {
-  api('/api/jumpserver.status', { sessionId: SESSION }).then(function (statusRes) {
-    var st = statusRes.data || {};
-    el('net').textContent = st.code ? String(st.code) : '';
-    renderStatus(st);
-    return api('/api/jumpserver.snapshot', { sessionId: SESSION, sinceSeq: sinceSeq });
-  }).then(function (snap) {
-    var data = snap.data || {};
-    if (data.lastSeq !== undefined && Number(data.lastSeq) >= sinceSeq) sinceSeq = Number(data.lastSeq) + 1;
-    var events = Array.isArray(data.events) ? data.events : [];
-    for (var i = 0; i < events.length; i++) {
-      var ev = events[i];
-      if (ev.visibility === 'internal') continue;
-      if (ev.type === 'input') append('$ ' + strip(ev.data), 'in');
-      else if (ev.type === 'output') append(strip(ev.data), 'out');
-      else if (ev.type === 'state') append('[state] ' + String(ev.prev || '?') + ' -> ' + String(ev.state || '?'), 'meta');
-      else if (ev.type === 'target') append('[target] ' + String(ev.target || '') + (ev.hostname ? ' (' + ev.hostname + ')' : ''), 'meta');
-      else if (ev.type === 'error') append('[error] ' + String(ev.message || ''), 'err');
-    }
-  }).catch(function () { el('net').textContent = '连接控制台失败'; });
+/**
+ * One in-flight snapshot at a time, chained.
+ *
+ * The snapshot route long-polls (it waits for the next PTY event), so a
+ * setInterval poll overlapped requests: a 2s timer against a route that holds
+ * for up to 12s stacked roughly six concurrent snapshots, each re-reading the
+ * same events and racing on sinceSeq. Chaining means exactly one request exists
+ * at any moment and sinceSeq can only move forward.
+ *
+ * Status rides along in the snapshot payload, so the separate /status round
+ * trip per cycle is gone too.
+ */
+function pump() {
+  api('/api/jumpserver.snapshot', { sessionId: SESSION, sinceSeq: sinceSeq })
+    .then(function (snap) {
+      var data = snap.data || {};
+      if (data.lastSeq !== undefined && Number(data.lastSeq) >= sinceSeq) sinceSeq = Number(data.lastSeq) + 1;
+      el('net').textContent = data.code ? String(data.code) : '';
+      renderStatus(data);
+      var events = Array.isArray(data.events) ? data.events : [];
+      for (var i = 0; i < events.length; i++) {
+        var ev = events[i];
+        if (ev.visibility === 'internal') continue;
+        // Input events echo the command we sent; they are not part of the PTY
+        // output stream, so they must not consume renderer state.
+        if (ev.type === 'input') append('$ ' + String(ev.data == null ? '' : ev.data), 'in');
+        else if (ev.type === 'output') termRender(ev.data);
+        else if (ev.type === 'state') append('[state] ' + String(ev.prev || '?') + ' -> ' + String(ev.state || '?'), 'meta');
+        else if (ev.type === 'target') append('[target] ' + String(ev.target || '') + (ev.hostname ? ' (' + ev.hostname + ')' : ''), 'meta');
+        else if (ev.type === 'error') append('[error] ' + String(ev.message || ''), 'err');
+      }
+    })
+    .catch(function () { el('net').textContent = '连接控制台失败'; })
+    .then(function () { setTimeout(pump, 50); });
 }
-
 function send() {
   var input = el('cmd');
   var command = input.value.trim();
@@ -318,9 +383,9 @@ function send() {
       renderConfirm({ command: command, risk: data.risk, confirmToken: data.confirmToken });
       return;
     }
-    if (data.ok === true) append('$ ' + command, 'in');
-    else append('执行失败：' + String(data.message || data.code || res.status), 'err');
-    poll();
+    // No optimistic echo of the command: SessionManager records it through the
+    // observer, so appending here showed every manual command twice.
+    if (data.ok !== true) append('执行失败：' + String(data.message || data.code || res.status), 'err');
   });
 }
 
@@ -408,7 +473,12 @@ function loadAudit() {
   }
   el('cmd').addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); send(); } });
   el('send').onclick = send;
-  el('clear').onclick = function () { el('term').textContent = ''; };
+  el('clear').onclick = function () {
+    el('term').textContent = '';
+    // Fresh renderer too: a half-written line from before the clear must not
+    // reappear when its tail arrives.
+    terminal = makeRenderer();
+  };
   el('follow').onclick = function () { setFollow(!following); };
   el('term').addEventListener('scroll', function () {
     var t = el('term');
@@ -422,19 +492,19 @@ function loadAudit() {
       var data = res.data || {};
       el('jobsNote').textContent = String(data.message || (data.ok ? '中断信号已发送' : '没有可中断的任务'));
       append('[interrupt] ' + String(data.message || data.code || ''), 'meta');
-      poll();
       if (tab === 'jobs') loadJobs();
     });
   };
   el('interrupt').onclick = interrupt;
   el('interrupt2').onclick = interrupt;
   setTab('term');
-  poll();
+  // One chained long-poll for the terminal. The other tabs keep their own slow
+  // refresh, so switching away never leaves the terminal loop running twice.
+  pump();
   setInterval(function () {
-    if (tab === 'term') poll();
-    else if (tab === 'jobs') loadJobs();
+    if (tab === 'jobs') loadJobs();
     else if (tab === 'audit') loadAudit();
-  }, 2000);
+  }, 5000);
 })();
 </script>
 </body>

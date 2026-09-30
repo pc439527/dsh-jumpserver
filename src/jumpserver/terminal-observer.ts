@@ -171,9 +171,55 @@ export class TerminalObserver {
     return this.internalCaptureDepth > 0 ? 'internal' : 'terminal'
   }
 
+  /**
+   * Resolvers waiting for new terminal events.
+   *
+   * The console long-polls for output, and the server used to satisfy that by
+   * re-reading the cursor every 150ms. That woke the timer even for a console
+   * that was simply sitting there, multiplied by every request the page had
+   * overlapping. Waking the exact waiters on push removes that timer traffic
+   * entirely: an idle console now costs one pending promise and no polling.
+   */
+  private waiters = new Set<(value: boolean) => void>()
+
+  private pushEvent(event: TerminalNewEvent): void {
+    this.buffer.push(event)
+    // Copy first: a resolver may call waitForChange again synchronously.
+    const waiting = [...this.waiters]
+    this.waiters.clear()
+    for (const resolve of waiting) resolve(true)
+  }
+
+  /**
+   * Resolve once the cursor passes `sinceSeq`, or when the abort signal fires.
+   *
+   * Returns true when new events are (or already were) available, so the caller
+   * can decide between draining immediately and waiting.
+   */
+  waitForChange(sinceSeq: number, signal: AbortSignal, timeoutMs: number): Promise<boolean> {
+    if (this.buffer.cursorSeq > sinceSeq) return Promise.resolve(true)
+    return new Promise<boolean>((resolve) => {
+      let settled = false
+      const finish = (value: boolean): void => {
+        if (settled) return
+        settled = true
+        this.waiters.delete(finish)
+        signal.removeEventListener('abort', onAbort)
+        clearTimeout(timer)
+        resolve(value)
+      }
+      const onAbort = (): void => finish(false)
+      const timer = setTimeout(() => finish(false), Math.max(1, timeoutMs))
+      signal.addEventListener('abort', onAbort, { once: true })
+      this.waiters.add(finish)
+      // The cursor may have moved between the check above and this line.
+      if (this.buffer.cursorSeq > sinceSeq) finish(true)
+    })
+  }
+
   recordInput(data: string): void {
     const safe = redactCommandSecrets(data)
-    this.buffer.push({ type: 'input', data: safe, visibility: this.visibility })
+    this.pushEvent({ type: 'input', data: safe, visibility: this.visibility })
   }
 
   recordOutput(data: string): void {
@@ -181,19 +227,19 @@ export class TerminalObserver {
     // PTYs normally echo the command. Redacting raw output as well prevents a
     // secret from reappearing through that echo or through diagnostic logs.
     const safe = redactCommandSecrets(data)
-    this.buffer.push({ type: 'output', data: safe, visibility: this.visibility })
+    this.pushEvent({ type: 'output', data: safe, visibility: this.visibility })
   }
 
   recordState(state: SessionState, prev: SessionState | null): void {
-    this.buffer.push({ type: 'state', state, prev })
+    this.pushEvent({ type: 'state', state, prev })
   }
 
   recordTarget(target: string, hostname: string | null, user: string | null, pwd: string | null): void {
-    this.buffer.push({ type: 'target', target, hostname, user, pwd })
+    this.pushEvent({ type: 'target', target, hostname, user, pwd })
   }
 
   recordError(message: string): void {
-    this.buffer.push({ type: 'error', message: redactCommandSecrets(message) })
+    this.pushEvent({ type: 'error', message: redactCommandSecrets(message) })
   }
 
   snapshotSince(sinceSeq: number): TerminalEvent[] {
