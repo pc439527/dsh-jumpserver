@@ -71,32 +71,42 @@ function diag(event: string, detail?: Record<string, unknown>): void {
 }
 
 /**
- * Sessions whose console tab we already opened, persisted so a page reload does
- * not stack another identical tab in the right column.
+ * When this client last opened a console for a session, per page load.
  *
- * A module-level Set was not enough: it is reset on every reload, so each visit
- * to the settings page opened another JumpServer console tab (observed: three
- * side by side). sessionStorage survives reloads within the same window, and it
- * is cleared when the window closes - exactly the lifetime we want.
+ * Presence alone is not enough to stop a storm: a freshly opened tab needs
+ * seconds to load and send its first heartbeat, while the poll runs every
+ * 2.5s, so every empty-heartbeat window opened ANOTHER tab (observed: a stack
+ * of them). The cooldown covers that gap from the client side.
+ *
+ * Deliberately in-memory: it only has to bridge one page load's polling, and a
+ * reload must be free to open again once the operator closed every tab.
  */
-const OPENED_KEY = 'dsh-jumpserver:console-opened'
+const openedAt = new Map<string, number>()
+const OPEN_COOLDOWN_MS = 60000
 
-function alreadyOpened(sessionId: string): boolean {
+/**
+ * Ask the Host whether a console page for this session is currently on screen.
+ *
+ * Presence answers "is it open right now", which survives a reload without ever
+ * locking the console shut. An earlier sessionStorage record did the opposite:
+ * it stayed written after the operator closed the tab, so nothing opened again.
+ */
+async function consoleAlreadyOpen(sessionId: string): Promise<boolean> {
   try {
-    const raw = globalThis.sessionStorage?.getItem(OPENED_KEY)
-    const parsed: unknown = raw === null || raw === undefined ? [] : JSON.parse(raw)
-    const ids: string[] = Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === 'string') : []
-    const list = ids
-    if (list.includes(sessionId)) return true
-    list.push(sessionId)
-    // Bound the record so a long-lived window cannot grow it without limit.
-    globalThis.sessionStorage?.setItem(OPENED_KEY, JSON.stringify(list.slice(-50)))
-    return false
+    const response = await fetch('/api/jumpserver.consoleAlive', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ sessionId }),
+    })
+    if (!response.ok) return false
+    const value = await response.json() as { active?: unknown }
+    return value.active === true
   } catch {
-    // A blocked/absent sessionStorage must not stop the console from opening.
+    // A failed probe must never block the console from opening.
     return false
   }
 }
+
 
 
 export function apply(ctx: BrowserCtx): void {
@@ -137,18 +147,24 @@ export function apply(ctx: BrowserCtx): void {
     const maybeOpen = (): void => {
       const sessionId = current.getSnapshot().key
       if (typeof sessionId !== 'string' || sessionId.length === 0 || inFlight) return
-      if (alreadyOpened(sessionId)) return
+      // Cover the load gap: a tab we just opened cannot have heartbeated yet.
+      if (Date.now() - (openedAt.get(sessionId) ?? 0) < OPEN_COOLDOWN_MS) return
       if ((scope.getSnapshot().value ?? {})['autoOpenTerminal'] !== true) return
       if (side.sidebarRightTabs.get('browser') === undefined) return
       inFlight = true
-      void fetchStatus(sessionId, undefined)
-        .then((status) => {
+      void Promise.all([fetchStatus(sessionId, undefined), consoleAlreadyOpen(sessionId)])
+        .then(([status, alreadyOpen]) => {
+          // Live presence: a console is already showing this conversation, so do
+          // not stack another tab beside it. Once it is closed the heartbeat
+          // stops and the next tick opens a fresh one.
+          if (alreadyOpen) return
           if (disposed || status?.granted !== true || typeof status.consoleUrl !== 'string') return
           // The conversation id travels in the fragment: it never reaches the Host,
           // so it cannot leak into access logs or the discovery file.
           const separator = status.consoleUrl.includes('#') ? '&' : '#'
           // revealIfOpened keeps a repeat open on the existing tab instead of
           // stacking another one beside it.
+          openedAt.set(sessionId, Date.now())
           side.sidebarRight.openTab('browser', {
             revealIfOpened: true,
             params: { url: status.consoleUrl + separator + 'session=' + encodeURIComponent(sessionId) },

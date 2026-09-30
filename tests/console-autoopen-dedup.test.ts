@@ -4,22 +4,35 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const here = dirname(fileURLToPath(import.meta.url))
-const source = readFileSync(join(here, '..', 'src', 'client', 'impl.ts'), 'utf8')
+const client = readFileSync(join(here, '..', 'src', 'client', 'impl.ts'), 'utf8')
+const page = readFileSync(join(here, '..', 'src', 'runtime', 'console-page.ts'), 'utf8')
 
 /**
- * The auto-open guard must survive a page reload.
+ * The right column registers the browser tab type as multiple, so every openTab
+ * creates a NEW tab and the right column cannot dedupe for us. Two earlier
+ * attempts were both wrong:
  *
- * It was a module-level Set, which resets on every reload, so each visit to the
- * settings page stacked another identical JumpServer console tab in the right
- * column (observed: three side by side). sessionStorage outlives a reload.
+ *   - a module Set, reset on every reload, stacked a tab per visit (observed 3);
+ *   - a sessionStorage record, which stayed written after the operator CLOSED
+ *     the tab, so the console stopped opening at all.
+ *
+ * Presence is the only signal that answers both questions, so the console page
+ * must heartbeat and the client must consult the Host before opening.
  */
-describe('console auto-open guard', () => {
-  it('persists opened sessions instead of keeping them in module state', () => {
-    expect(source).toContain('sessionStorage')
-    expect(source).not.toContain('autoOpenedFor')
+describe('console auto-open dedup', () => {
+  it('asks the Host whether a console is already open', () => {
+    expect(client).toContain('/api/jumpserver.consoleAlive')
+    expect(client).toContain('consoleAlreadyOpen')
   })
 
-  it('asks the right column to reveal an existing tab rather than stacking', () => {
-    expect(source).toContain('revealIfOpened')
+  it('no longer relies on state that survives a close', () => {
+    // Match real calls, not the prose explaining why they were removed.
+    expect(client).not.toMatch(/sessionStorage[.]getItem/)
+    expect(client).not.toMatch(/autoOpenedFor[.]/)
+  })
+
+  it('has the console page heartbeat its presence', () => {
+    expect(page).toContain('console:alive')
+    expect(page).toContain('setInterval(heartbeat')
   })
 })
