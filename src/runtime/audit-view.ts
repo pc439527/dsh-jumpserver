@@ -4,20 +4,25 @@
  * the refusal/failure semantics stay testable without a browser.
  */
 
-/** Storage is UTC; display follows the configured audit time zone. */
-export const AUDIT_TIME_ZONE = 'Asia/Shanghai'
-
-export function formatAuditTime(value: unknown): string {
+/**
+ * Storage is always UTC; only display follows the configured zone.
+ *
+ * This module hardcoded Asia/Shanghai, so every surface showed UTC+8 regardless
+ * of the operator's setting. The zone is a parameter now, and runtime/time.ts is
+ * the single source for resolving it.
+ */
+export function formatAuditTime(value: unknown, timeZone: string): string {
   const raw = String(value ?? '')
   const date = new Date(raw)
   if (!Number.isNaN(date.getTime())) {
     try {
       return new Intl.DateTimeFormat('zh-CN', {
-        timeZone: AUDIT_TIME_ZONE,
+        timeZone,
         hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
       }).format(date)
     } catch {
-      // Older browser/embedded runtimes: preserve the readable fallback.
+      // An unusable zone must still show the record rather than blank it out.
+      return date.toISOString().replace('T', ' ').slice(11, 19)
     }
   }
   return raw.length > 19 ? raw.slice(11, 19) : raw

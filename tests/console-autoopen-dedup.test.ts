@@ -8,32 +8,39 @@ const client = readFileSync(join(here, '..', 'src', 'client', 'impl.ts'), 'utf8'
 const page = readFileSync(join(here, '..', 'src', 'runtime', 'console-page.ts'), 'utf8')
 
 /**
- * The right column registers the browser tab type as multiple, so every openTab
- * creates a NEW tab and the right column cannot dedupe for us. Two earlier
- * attempts were both wrong:
+ * Auto-open is an EDGE, not an invariant.
  *
+ * Three earlier designs failed in three different ways:
  *   - a module Set, reset on every reload, stacked a tab per visit (observed 3);
- *   - a sessionStorage record, which stayed written after the operator CLOSED
- *     the tab, so the console stopped opening at all.
+ *   - a sessionStorage record outlived the tab being closed, so nothing ever
+ *     opened again;
+ *   - presence plus a 60s cooldown merely DELAYED re-creating a console the
+ *     operator had deliberately closed.
  *
- * Presence is the only signal that answers both questions, so the console page
- * must heartbeat and the client must consult the Host before opening.
+ * The contract now: open once when the conversation becomes granted, then leave
+ * it alone. Presence only prevents stacking beside a live one.
  */
-describe('console auto-open dedup', () => {
-  it('asks the Host whether a console is already open', () => {
-    expect(client).toContain('/api/jumpserver.consoleAlive')
+describe('console auto-open', () => {
+  it('opens on the granted transition, not on every observation', () => {
+    expect(client).toContain('grantSeen')
+    expect(client).toMatch(/if \(!granted \|\| wasGranted\) return/)
+  })
+
+  it('no longer re-creates a console that was closed', () => {
+    expect(client).not.toContain('OPEN_COOLDOWN_MS')
+    expect(client).not.toContain('openedAt')
+  })
+
+  it('keeps only one tab when one is already on screen', () => {
     expect(client).toContain('consoleAlreadyOpen')
+    expect(client).toContain('/api/jumpserver.consoleAlive')
   })
+})
 
-  it('no longer relies on state that survives a close', () => {
-    // Match real calls, not the prose explaining why they were removed.
-    expect(client).not.toMatch(/sessionStorage[.]getItem/)
-    expect(client).not.toMatch(/autoOpenedFor[.]/)
-  })
-
-  it('has the console page heartbeat to the presence endpoint', () => {
-    // Not through /diag: a heartbeat there appends a trace line every few
-    // seconds, forever, for every console that is merely open.
+describe('console presence heartbeat', () => {
+  it('beats to the presence endpoint, never to the trace log', () => {
+    // A /diag heartbeat appended a trace line every few seconds, forever, for
+    // every console that was merely open.
     expect(page).toContain('/api/jumpserver.consoleAlive')
     expect(page).toContain('heartbeat: true')
     expect(page).toContain('setInterval(heartbeat')

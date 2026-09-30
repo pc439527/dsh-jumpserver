@@ -21,6 +21,8 @@ import { SessionState } from '../jumpserver/state-machine.js'
 import type { TerminalObserver } from '../jumpserver/terminal-observer.js'
 import { PROTOCOL_VERSION, PLUGIN_VERSION, hostBuild } from '../version.js'
 import { manualPolicyOf } from '../config/types.js'
+import { resolveTimeZone } from '../runtime/time.js'
+import { serializeAudit } from '../runtime/audit-export.js'
 import { classifyCommand } from '../security/permission.js'
 
 export interface BridgeServices {
@@ -85,6 +87,14 @@ export interface BridgeServices {
   consoleActiveFor?: (sessionId: string) => boolean
   /** Record that a console page for this session is on screen (memory only). */
   noteConsoleAlive?: (sessionId: string) => void
+  /** Record a refusal made by a person in the console (memory + audit sink). */
+  recordManualRefusal?: (input: {
+    sessionId: string
+    command: string
+    risk: string
+    classification: { risk: string; reason?: string; ruleId?: string; confidence?: string; classifierVersion?: number; normalizedCommand?: string }
+    reason: string
+  }) => Promise<void>
   /** V0.4.0: streaming jobs of one conversation (never another's). */
   jobsFor?: (sessionId: string) => Promise<Array<Record<string, unknown>>>
   /** V0.4.5: idempotent job stop (one Ctrl+C, shared verdict). */
@@ -143,6 +153,9 @@ function statusPayload(services: BridgeServices, sessionId: string | undefined):
     hostname: st.hostname,
     user: st.user,
     permissionMode: st.permissionMode,
+    // Effective display zone, so the console never has to guess one. Stored
+    // audit timestamps stay UTC; this only affects presentation.
+    timeZone: resolveTimeZone(cfg.timeZone),
     manualPolicy: manualPolicyOf(cfg),
     granted: services.grantedFor(sessionId),
     connectionSource: st.connectionSource,
@@ -412,6 +425,32 @@ export function registerBridgeRoutes(webServer: {
           json(res, 200, result)
         } catch (error) {
           json(res, 500, { ok: false, code: 'INTERRUPT_FAILED', message: error instanceof Error ? error.message : String(error) })
+        }
+      })()
+    },
+  }))
+
+  disposers.push(webServer.register({
+    kind: 'exact',
+    path: '/api/jumpserver.auditExport',
+    handler: (req, res) => {
+      if (!requirePost(req, res)) return
+      void (async () => {
+        try {
+          const body = await readJsonBody(req)
+          const sessionId = validSessionId(body.sessionId)
+          const format = body.format === 'json' ? 'json' : body.format === 'markdown' ? 'markdown' : 'csv'
+          if (sessionId === null) {
+            json(res, 400, { ok: false, code: 'INVALID_REQUEST', message: 'valid sessionId is required' })
+            return
+          }
+          if (!requireGrant(services, sessionId, res)) return
+          // Serialised by the SAME tested module the settings surface uses, so
+          // the console export cannot drift away from it.
+          const records = services.auditFor(sessionId) as Array<Record<string, unknown>>
+          json(res, 200, { ok: true, format, content: serializeAudit(records, format), count: records.length })
+        } catch (error) {
+          json(res, 500, { ok: false, code: 'AUDIT_EXPORT_FAILED', message: error instanceof Error ? error.message : String(error) })
         }
       })()
     },

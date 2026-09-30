@@ -96,7 +96,7 @@ const PAGE = String.raw`<!doctype html>
     <div id="jobList"></div>
   </section>
   <section id="pane-audit" style="display:none">
-    <div class="row"><button class="act" id="auditRefresh">刷新</button><span class="muted" id="auditNote"></span></div>
+    <div class="row"><button class="act" id="auditRefresh">刷新</button><button class="act" id="auditCsv">导出 CSV</button><button class="act" id="auditJson">导出 JSON</button><span class="muted" id="auditNote"></span></div>
     <div id="auditList"></div>
   </section>
 </main>
@@ -316,8 +316,7 @@ function renderStatus(st) {
   el('cmd').placeholder = st.state === 'JUMPSERVER_MENU'
     ? '菜单态：p 列资产 / IP 或名称 进入 / q 结束会话'
     : '在已进入的资产上执行一条命令';
-  el('interrupt').disabled = !granted;
-  el('interrupt2').disabled = !granted;
+  renderInterrupt(st.state);
 }
 
 function renderConfirm(req) {
@@ -355,6 +354,7 @@ function pump() {
       var data = snap.data || {};
       if (data.lastSeq !== undefined && Number(data.lastSeq) >= sinceSeq) sinceSeq = Number(data.lastSeq) + 1;
       el('net').textContent = data.code ? String(data.code) : '';
+      if (typeof data.timeZone === 'string' && data.timeZone.length > 0) auditZone = data.timeZone;
       renderStatus(data);
       var events = Array.isArray(data.events) ? data.events : [];
       for (var i = 0; i < events.length; i++) {
@@ -408,11 +408,36 @@ function loadAssets() {
   });
 }
 
+/** Running streaming jobs for this conversation; drives the interrupt button. */
+var runningJobs = 0;
+
+/**
+ * Enable "interrupt" only when there is something to interrupt.
+ *
+ * It used to key off granted alone, so it sat red and clickable while the
+ * session was merely parked at the bastion menu. The label follows too: with
+ * nothing running the control is simply disabled, not an invitation.
+ */
+function renderInterrupt(state) {
+  var running = state === 'COMMAND_RUNNING' || runningJobs > 0;
+  var granted = el('grant').textContent === '已授权';
+  var off = !granted || !running;
+  el('interrupt').disabled = off;
+  el('interrupt2').disabled = off;
+  el('interrupt2').textContent = running ? '中断运行' : '中断';
+}
+
 function loadJobs() {
   api('/api/jumpserver.jobs', { sessionId: SESSION }).then(function (res) {
     var data = res.data || {};
     var jobs = Array.isArray(data.jobs) ? data.jobs : [];
+    // Track running jobs here: the interrupt button is enabled by TASK state,
+    // not merely by "granted" - a red interrupt button with nothing to stop
+    // invites the operator to press it for no reason.
+    runningJobs = 0;
+    for (var n = 0; n < jobs.length; n++) if (jobs[n].state === 'RUNNING') runningJobs++;
     el('jobsNote').textContent = jobs.length === 0 ? '本对话没有流式任务' : String(jobs.length) + ' 个任务';
+    renderInterrupt();
     if (jobs.length === 0) {
       el('jobList').innerHTML = '<div class="muted">用 jumpserver_job_start 启动 tail -f / journalctl -f / tcpdump 后在此查看与停止</div>';
       return;
@@ -436,19 +461,64 @@ function loadJobs() {
   });
 }
 
+/** Effective zone reported by the Host; the page never guesses one. */
+var auditZone = 'UTC';
+
 function fmtTime(value) {
   var d = new Date(String(value || ''));
   if (isNaN(d.getTime())) return String(value || '');
   try {
-    return new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }).format(d);
-  } catch (e) { return d.toLocaleTimeString(); }
+    return new Intl.DateTimeFormat('zh-CN', { timeZone: auditZone, hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }).format(d);
+  } catch (e) {
+    // An unusable zone must still show the record, never blank it out.
+    return d.toISOString().replace('T', ' ').slice(0, 19);
+  }
+}
+
+function fmtFull(value) {
+  var d = new Date(String(value || ''));
+  if (isNaN(d.getTime())) return String(value || '');
+  try {
+    return new Intl.DateTimeFormat('zh-CN', { timeZone: auditZone, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }).format(d);
+  } catch (e) {
+    return d.toISOString().replace('T', ' ').slice(0, 19);
+  }
+}
+
+/**
+ * Download the audit trail as CSV or JSON.
+ *
+ * The serialisation is done by the Host (one tested implementation shared with
+ * the settings surface) rather than re-implemented here, so the two can never
+ * disagree about what an export contains.
+ */
+function exportAudit(format) {
+  el('auditNote').textContent = '正在导出…';
+  api('/api/jumpserver.auditExport', { sessionId: SESSION, format: format }).then(function (res) {
+    var data = res.data || {};
+    if (data.ok !== true || typeof data.content !== 'string') {
+      el('auditNote').textContent = '导出失败：' + String(data.message || data.code || res.status);
+      return;
+    }
+    var type = format === 'csv' ? 'text/csv' : 'application/json';
+    var blob = new Blob([data.content], { type: type + ';charset=utf-8' });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = 'jumpserver-audit-' + new Date().toISOString().slice(0, 19).replace(/[:T]/g, '') + '.' + format;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(function () { URL.revokeObjectURL(url); }, 5000);
+    el('auditNote').textContent = '已导出 ' + String(data.count || 0) + ' 条（' + format.toUpperCase() + '）';
+  }).catch(function () { el('auditNote').textContent = '导出失败'; });
 }
 
 function loadAudit() {
   api('/api/jumpserver.audit', { sessionId: SESSION }).then(function (res) {
     var data = res.data || {};
     var rows = Array.isArray(data.records) ? data.records.slice().reverse() : [];
-    el('auditNote').textContent = rows.length === 0 ? '本对话尚无审计记录' : '最近 ' + String(rows.length) + ' 条（存储 UTC，显示 UTC+8）';
+    el('auditNote').textContent = rows.length === 0 ? '本对话尚无审计记录' : '最近 ' + String(rows.length) + ' 条（存储 UTC，显示 ' + auditZone + '）';
     if (rows.length === 0) { el('auditList').innerHTML = ''; return; }
     var html = '<table><thead><tr><th>时间</th><th>操作</th><th>目标</th><th>风险</th><th>结果</th><th>命令 / 原因</th></tr></thead><tbody>';
     for (var i = 0; i < rows.length; i++) {
@@ -487,6 +557,8 @@ function loadAudit() {
   setFollow(true);
   el('jobsRefresh').onclick = loadJobs;
   el('auditRefresh').onclick = loadAudit;
+  el('auditCsv').onclick = function () { exportAudit('csv'); };
+  el('auditJson').onclick = function () { exportAudit('json'); };
   var interrupt = function () {
     api('/api/jumpserver.interrupt', { sessionId: SESSION }).then(function (res) {
       var data = res.data || {};

@@ -595,15 +595,18 @@ export function apply(ctx: Context, config: JumpServerConfig): void {
           const challenge = confirmTokens.get(sessionId)
           if (challenge === undefined || challenge.expiresAt < Date.now()) {
             confirmTokens.delete(sessionId)
+            await bridgeServices.recordManualRefusal?.({ sessionId, command, risk, classification, reason: '确认已过期' })
             return { ok: false, code: 'CONFIRMATION_EXPIRED', message: '确认已过期，请重新发起该命令', state: st.state, sessionId }
           }
           if (confirmToken === undefined || challenge.token !== confirmToken || challenge.commandHash !== commandHashOf(command) || challenge.risk !== risk) {
             confirmTokens.delete(sessionId)
+            await bridgeServices.recordManualRefusal?.({ sessionId, command, risk, classification, reason: '确认内容与原始命令不一致' })
             return { ok: false, code: 'CONFIRMATION_MISMATCH', message: '确认内容与原始命令不一致，已拒绝执行', state: st.state, sessionId }
           }
           confirmTokens.delete(sessionId) // single use
         }
         if (gate.kind === 'block') {
+          await bridgeServices.recordManualRefusal?.({ sessionId, command, risk, classification, reason: gate.reason })
           return { ok: false, code: 'MANUAL_BLOCKED', message: gate.reason, state: st.state, sessionId }
         }
         // execute — the CLASSIFIED risk is what the audit records (V0.3.1), so
@@ -674,6 +677,39 @@ export function apply(ctx: Context, config: JumpServerConfig): void {
       return { ok: false, code: 'NOT_NAVIGABLE', message: '会话状态 ' + st.state + ' 下无法执行人工输入（先连接并进入服务器）', state: st.state, sessionId }
     },
     consoleUrlFor: (sessionId) => (sessionId === undefined || sessionId.length === 0 ? consoleUrlFor('') : consoleUrlFor(sessionId)),
+    /**
+     * Record a HUMAN refusal.
+     *
+     * The console's manual input is a person acting directly, and "a refusal
+     * always leaves a trace" applies to people the same way it applies to the
+     * agent. These paths used to return straight to the caller, so a blocked or
+     * mismatched manual command was invisible in the audit trail.
+     *
+     * Best-effort by design: an audit failure must never change the refusal.
+     */
+    recordManualRefusal: async (input: {
+      sessionId: string
+      command: string
+      risk: string
+      classification: { risk: string; reason?: string; ruleId?: string; confidence?: string; classifierVersion?: number; normalizedCommand?: string }
+      reason: string
+    }): Promise<void> => {
+      const bundle = registry.get(input.sessionId)
+      if (bundle === undefined) return
+      try {
+        await bundle.manager.recordDenied({
+          operation: 'manual',
+          command: input.command,
+          risk: input.risk,
+          classification: input.classification,
+          reason: input.reason,
+          kind: 'blocked',
+          actor: 'HUMAN',
+        })
+      } catch {
+        /* the refusal itself already happened; never let the sink undo it */
+      }
+    },
     consoleActiveFor,
     noteConsoleAlive,
     diagFor: (event, detail) => {
