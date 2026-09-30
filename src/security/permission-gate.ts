@@ -22,7 +22,7 @@ import { APPROVAL_DENIED_REASON, JumpServerError } from '../jumpserver/errors.js
 import type { SessionManager } from '../jumpserver/session-manager.js'
 import { redactCommandSecrets } from './command-redaction.js'
 import { classifyCommand, gateDecision, requireTargetVerified, type Classification } from './permission.js'
-import { decideAutoAllow, judgeCommandRisk, riskJudgeAuditLine, riskJudgeNote, riskJudgeSummary, type RiskJudgeVerdict } from './risk-judge.js'
+import { decideAutoAllow, judgeCommandRiskDetailed, riskJudgeAuditLine, riskJudgeNote, riskJudgeSummary, type RiskJudgeError, type RiskJudgeVerdict } from './risk-judge.js'
 
 export interface GateServices {
   getConfig: () => {
@@ -32,6 +32,12 @@ export interface GateServices {
   }
   manager: SessionManager
   approval?: ApprovalService
+  /**
+   * Resolve a secret by its credential reference. The settings card writes the
+   * JumpServer password AND the Jev API key into the DSH credential domain, so
+   * the judge must read through the same seam rather than process.env.
+   */
+  resolveCredential?: (ref: string) => Promise<string | undefined>
 }
 
 export interface GatedCommand {
@@ -143,16 +149,25 @@ async function requestApproval(services: GateServices, exec: ToolRunContext, rea
  *
  * Called ONLY right before an approval prompt is built: a command that is
  * blocked outright needs no reading, and READ / PRIVILEGED_READ / MODIFY /
- * DANGEROUS are never sent anywhere. Every failure — judge disabled, no
- * credential, timeout, bad payload — yields null, so the prompt keeps exactly
- * the text it has today and the gate never depends on a remote service.
+ * DANGEROUS are never sent anywhere.
+ *
+ * Failures still yield no verdict and never change the gate's decision, but the
+ * reason is now REPORTED. Returning a bare null made "the key you saved is not
+ * being read" indistinguishable from "the judge is switched off".
  */
-async function judgeUnknown(services: GateServices, classification: Classification): Promise<RiskJudgeVerdict | null> {
-  if (classification.risk !== 'UNKNOWN') return null
+async function judgeUnknown(
+  services: GateServices,
+  classification: Classification,
+): Promise<{ verdict: RiskJudgeVerdict | null; error?: RiskJudgeError }> {
+  if (classification.risk !== 'UNKNOWN') return { verdict: null }
   try {
-    return await judgeCommandRisk(classification.command, services.getConfig().riskJudge)
-  } catch {
-    return null
+    return await judgeCommandRiskDetailed(
+      classification.command,
+      services.getConfig().riskJudge,
+      services.resolveCredential,
+    )
+  } catch (error) {
+    return { verdict: null, error: 'unreachable' }
   }
 }
 
@@ -274,7 +289,7 @@ export async function gateCommand(services: GateServices, exec: ToolRunContext, 
     verifyTarget(services)
   }
   if (decision.code === 'COMMAND_APPROVAL_REQUIRED') {
-    const verdict = await judgeUnknown(services, classification)
+    const { verdict } = await judgeUnknown(services, classification)
     const judge = applyJudge(services, classification, verdict)
     if (judge.auto) {
       return {
@@ -345,7 +360,7 @@ export async function gateCommandForNavigation(services: GateServices, exec: Too
     })
     throw new JumpServerError('COMMAND_BLOCKED', command + ' -- ' + decision.reason)
   }
-  const verdict = await judgeUnknown(services, classification)
+  const { verdict } = await judgeUnknown(services, classification)
   const judge = applyJudge(services, classification, verdict)
   const autoAllowEnabled = autoAllowConfig(services)?.enabled === true
   if (judge.auto) {
@@ -424,7 +439,7 @@ export async function gateCommandsForNavigation(
   const verdicts = new Map<object, RiskJudgeVerdict | null>()
   await Promise.all(
     approvalItems.map(async (item) => {
-      verdicts.set(item, await judgeUnknown(services, item.gated.classification))
+      verdicts.set(item, (await judgeUnknown(services, item.gated.classification)).verdict)
     }),
   )
 

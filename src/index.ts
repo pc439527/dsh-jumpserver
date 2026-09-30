@@ -368,6 +368,7 @@ export function apply(ctx: Context, config: JumpServerConfig): void {
           terminateConversationJumpServer,
           (sessionId) => recentAudits.get(sessionId) ?? [],
           (sessionId) => consoleUrlFor(sessionId),
+          resolvePassword,
         ))
       })
       mark('tools:ops')
