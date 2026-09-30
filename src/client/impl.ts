@@ -70,8 +70,34 @@ function diag(event: string, detail?: Record<string, unknown>): void {
   }
 }
 
-/** Conversations that already auto-opened the tab (per page load). */
-const autoOpenedFor = new Set<string>()
+/**
+ * Sessions whose console tab we already opened, persisted so a page reload does
+ * not stack another identical tab in the right column.
+ *
+ * A module-level Set was not enough: it is reset on every reload, so each visit
+ * to the settings page opened another JumpServer console tab (observed: three
+ * side by side). sessionStorage survives reloads within the same window, and it
+ * is cleared when the window closes - exactly the lifetime we want.
+ */
+const OPENED_KEY = 'dsh-jumpserver:console-opened'
+
+function alreadyOpened(sessionId: string): boolean {
+  try {
+    const raw = globalThis.sessionStorage?.getItem(OPENED_KEY)
+    const parsed: unknown = raw === null || raw === undefined ? [] : JSON.parse(raw)
+    const ids: string[] = Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === 'string') : []
+    const list = ids
+    if (list.includes(sessionId)) return true
+    list.push(sessionId)
+    // Bound the record so a long-lived window cannot grow it without limit.
+    globalThis.sessionStorage?.setItem(OPENED_KEY, JSON.stringify(list.slice(-50)))
+    return false
+  } catch {
+    // A blocked/absent sessionStorage must not stop the console from opening.
+    return false
+  }
+}
+
 
 export function apply(ctx: BrowserCtx): void {
   injectStyles()
@@ -110,18 +136,23 @@ export function apply(ctx: BrowserCtx): void {
     // so the open stays gated on the Host-reported grant, never on a timer alone.
     const maybeOpen = (): void => {
       const sessionId = current.getSnapshot().key
-      if (typeof sessionId !== 'string' || sessionId.length === 0 || autoOpenedFor.has(sessionId) || inFlight) return
+      if (typeof sessionId !== 'string' || sessionId.length === 0 || inFlight) return
+      if (alreadyOpened(sessionId)) return
       if ((scope.getSnapshot().value ?? {})['autoOpenTerminal'] !== true) return
       if (side.sidebarRightTabs.get('browser') === undefined) return
       inFlight = true
       void fetchStatus(sessionId, undefined)
         .then((status) => {
           if (disposed || status?.granted !== true || typeof status.consoleUrl !== 'string') return
-          autoOpenedFor.add(sessionId)
           // The conversation id travels in the fragment: it never reaches the Host,
           // so it cannot leak into access logs or the discovery file.
           const separator = status.consoleUrl.includes('#') ? '&' : '#'
-          side.sidebarRight.openTab('browser', { params: { url: status.consoleUrl + separator + 'session=' + encodeURIComponent(sessionId) } })
+          // revealIfOpened keeps a repeat open on the existing tab instead of
+          // stacking another one beside it.
+          side.sidebarRight.openTab('browser', {
+            revealIfOpened: true,
+            params: { url: status.consoleUrl + separator + 'session=' + encodeURIComponent(sessionId) },
+          })
         })
         .catch(() => undefined)
         .finally(() => { inFlight = false })
