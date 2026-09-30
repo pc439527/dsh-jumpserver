@@ -22,7 +22,7 @@ import { APPROVAL_DENIED_REASON, JumpServerError } from '../jumpserver/errors.js
 import type { SessionManager } from '../jumpserver/session-manager.js'
 import { redactCommandSecrets } from './command-redaction.js'
 import { classifyCommand, gateDecision, requireTargetVerified, type Classification } from './permission.js'
-import { decideAutoAllow, judgeCommandRisk, riskJudgeAuditLine, riskJudgeNote, riskJudgeSummary, type RiskJudgeVerdict } from './risk-judge.js'
+import { decideAutoAllow, judgeCommandRiskDetailed, riskJudgeAuditLine, riskJudgeNote, riskJudgeSummary, type RiskJudgeError, type RiskJudgeVerdict } from './risk-judge.js'
 
 export interface GateServices {
   getConfig: () => {
@@ -32,6 +32,12 @@ export interface GateServices {
   }
   manager: SessionManager
   approval?: ApprovalService
+  /**
+   * Resolve a secret by its credential reference. The settings card writes the
+   * JumpServer password AND the Jev API key into the DSH credential domain, so
+   * the judge must read through the same seam rather than process.env.
+   */
+  resolveCredential?: (ref: string) => Promise<string | undefined>
 }
 
 export interface GatedCommand {
@@ -143,16 +149,25 @@ async function requestApproval(services: GateServices, exec: ToolRunContext, rea
  *
  * Called ONLY right before an approval prompt is built: a command that is
  * blocked outright needs no reading, and READ / PRIVILEGED_READ / MODIFY /
- * DANGEROUS are never sent anywhere. Every failure — judge disabled, no
- * credential, timeout, bad payload — yields null, so the prompt keeps exactly
- * the text it has today and the gate never depends on a remote service.
+ * DANGEROUS are never sent anywhere.
+ *
+ * Failures still yield no verdict and never change the gate's decision, but the
+ * reason is now REPORTED. Returning a bare null made "the key you saved is not
+ * being read" indistinguishable from "the judge is switched off".
  */
-async function judgeUnknown(services: GateServices, classification: Classification): Promise<RiskJudgeVerdict | null> {
-  if (classification.risk !== 'UNKNOWN') return null
+async function judgeUnknown(
+  services: GateServices,
+  classification: Classification,
+): Promise<{ verdict: RiskJudgeVerdict | null; error?: RiskJudgeError }> {
+  if (classification.risk !== 'UNKNOWN') return { verdict: null }
   try {
-    return await judgeCommandRisk(classification.command, services.getConfig().riskJudge)
-  } catch {
-    return null
+    return await judgeCommandRiskDetailed(
+      classification.command,
+      services.getConfig().riskJudge,
+      services.resolveCredential,
+    )
+  } catch (error) {
+    return { verdict: null, error: 'unreachable' }
   }
 }
 
@@ -224,7 +239,7 @@ async function recordRefusal(
     batchId?: string
     batchIndex?: number
   },
-): Promise<void> {
+): Promise<string | undefined> {
   try {
     await services.manager.recordDenied({
       operation: input.operation,
@@ -238,9 +253,25 @@ async function recordRefusal(
       batchId: input.batchId,
       batchIndex: input.batchIndex,
     })
-  } catch {
-    /* never let an audit failure alter the gate's decision */
+    return undefined
+  } catch (error) {
+    // An audit failure must never change the gate's decision, but it MUST be
+    // visible: "a refusal always leaves a trace" is a safety promise, and a
+    // silently swallowed write makes a broken promise indistinguishable from a
+    // refusal that was simply never recorded. The caller attaches this to the
+    // thrown error so it reaches the tool result and the console.
+    return error instanceof Error ? (error.stack ?? error.message) : String(error)
   }
+}
+
+/** Re-throw the gate's decision, carrying an audit-write failure when there was one. */
+function rethrowWithAuditFailure(error: unknown, auditFailure: string | undefined): never {
+  if (auditFailure === undefined) throw error
+  const code = error instanceof JumpServerError ? error.code : 'COMMAND_BLOCKED'
+  const message = error instanceof Error ? error.message : String(error)
+  const prior = error instanceof JumpServerError ? error.detail : undefined
+  const detail = (prior !== undefined && prior.length > 0 ? prior + ' | ' : '') + 'AUDIT_WRITE_FAILED: ' + auditFailure
+  throw new JumpServerError(code, message, detail)
 }
 
 function verifyTarget(services: GateServices): void {
@@ -258,7 +289,7 @@ export async function gateCommand(services: GateServices, exec: ToolRunContext, 
     verifyTarget(services)
   }
   if (decision.code === 'COMMAND_APPROVAL_REQUIRED') {
-    const verdict = await judgeUnknown(services, classification)
+    const { verdict } = await judgeUnknown(services, classification)
     const judge = applyJudge(services, classification, verdict)
     if (judge.auto) {
       return {
@@ -278,7 +309,7 @@ export async function gateCommand(services: GateServices, exec: ToolRunContext, 
     } catch (error) {
       // V0.5.9: exec's approval runs inline (exec has no beforeExec), so this is
       // the only place a DENIED record can come from on the exec path.
-      await recordRefusal(services, exec, {
+      const auditFailure = await recordRefusal(services, exec, {
         operation: 'exec',
         command,
         classification,
@@ -286,7 +317,7 @@ export async function gateCommand(services: GateServices, exec: ToolRunContext, 
         kind: 'denied',
         riskJudge: judge.note,
       })
-      throw error
+      rethrowWithAuditFailure(error, auditFailure)
     }
     return {
       risk: classification.risk,
@@ -297,14 +328,17 @@ export async function gateCommand(services: GateServices, exec: ToolRunContext, 
     }
   }
   // V0.5.9: a rule refusal is recorded, not only thrown.
-  await recordRefusal(services, exec, {
+  const auditFailure = await recordRefusal(services, exec, {
     operation: 'exec',
     command,
     classification,
     reason: decision.reason,
     kind: 'blocked',
   })
-  throw new JumpServerError('COMMAND_BLOCKED', command + ' -- ' + decision.reason)
+  rethrowWithAuditFailure(
+    new JumpServerError('COMMAND_BLOCKED', command + ' -- ' + decision.reason),
+    auditFailure,
+  )
 }
 
 /**
@@ -326,7 +360,7 @@ export async function gateCommandForNavigation(services: GateServices, exec: Too
     })
     throw new JumpServerError('COMMAND_BLOCKED', command + ' -- ' + decision.reason)
   }
-  const verdict = await judgeUnknown(services, classification)
+  const { verdict } = await judgeUnknown(services, classification)
   const judge = applyJudge(services, classification, verdict)
   const autoAllowEnabled = autoAllowConfig(services)?.enabled === true
   if (judge.auto) {
@@ -352,10 +386,25 @@ export async function gateCommandForNavigation(services: GateServices, exec: Too
     judgeNote: judge.note,
     beforeExec: async () => {
       verifyTarget(services)
-      await askApproval(services, exec, command, classification, verdict, {
-        autoAllowEnabled,
-        autoAllowRefusal: judge.reason,
-      })
+      // The approval runs HERE (deferred until the asset is entered), so this is
+      // the only place a DENIED record can come from on the run path. Without
+      // it a rejected jumpserver_run left no audit trace at all.
+      try {
+        await askApproval(services, exec, command, classification, verdict, {
+          autoAllowEnabled,
+          autoAllowRefusal: judge.reason,
+        })
+      } catch (error) {
+        const auditFailure = await recordRefusal(services, exec, {
+          operation: 'run',
+          command,
+          classification,
+          reason: APPROVAL_DENIED_REASON,
+          kind: 'denied',
+          riskJudge: judge.note,
+        })
+        rethrowWithAuditFailure(error, auditFailure)
+      }
     },
   }
 }
@@ -405,7 +454,7 @@ export async function gateCommandsForNavigation(
   const verdicts = new Map<object, RiskJudgeVerdict | null>()
   await Promise.all(
     approvalItems.map(async (item) => {
-      verdicts.set(item, await judgeUnknown(services, item.gated.classification))
+      verdicts.set(item, (await judgeUnknown(services, item.gated.classification)).verdict)
     }),
   )
 
@@ -443,10 +492,25 @@ export async function gateCommandsForNavigation(
     for (const item of stillPending) {
       item.gated.beforeExec = async () => {
         verifyTarget(services)
-        await askApproval(services, exec, item.command, item.gated.classification, verdicts.get(item) ?? null, {
-          autoAllowEnabled,
-          autoAllowRefusal: refusals.get(item) ?? '',
-        })
+        // Deferred approval: this is the only place a DENIED batch item can be
+        // recorded, exactly as on the single-command run path.
+        try {
+          await askApproval(services, exec, item.command, item.gated.classification, verdicts.get(item) ?? null, {
+            autoAllowEnabled,
+            autoAllowRefusal: refusals.get(item) ?? '',
+          })
+        } catch (error) {
+          const auditFailure = await recordRefusal(services, exec, {
+            operation: 'batch',
+            command: item.command,
+            classification: item.gated.classification,
+            reason: APPROVAL_DENIED_REASON,
+            kind: 'denied',
+            riskJudge: item.gated.judgeNote,
+            batchIndex: stillPending.indexOf(item),
+          })
+          rethrowWithAuditFailure(error, auditFailure)
+        }
       }
     }
     return gated.map((item) => item.gated)
@@ -476,6 +540,22 @@ export async function gateCommandsForNavigation(
     } catch (error) {
       state = 'failed'
       failure = error
+      // A grouped approval covers every pending item, so record each command
+      // that was refused rather than only the first one.
+      for (const item of stillPending) {
+        const auditFailure = await recordRefusal(services, exec, {
+          operation: 'batch',
+          command: item.command,
+          classification: item.gated.classification,
+          reason: APPROVAL_DENIED_REASON,
+          kind: 'denied',
+          riskJudge: item.gated.judgeNote,
+          batchIndex: stillPending.indexOf(item),
+        })
+        if (auditFailure !== undefined) {
+          rethrowWithAuditFailure(error, auditFailure)
+        }
+      }
       throw error
     }
   }

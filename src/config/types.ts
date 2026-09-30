@@ -1,3 +1,31 @@
+import { isVolatile } from '@deepseek-ai/cosmokit'
+
+/**
+ * Unwrap DSH volatile config references into plain values.
+ *
+ * Every field in schema.ts is declared `.volatile()` so the Host's settings
+ * service will serve this plugin's namespace at all. A volatile field's parsed
+ * value is a REFERENCE (cosmokit's Volatile) exposing get(), so reading it
+ * directly yields `[object Object]` instead of the configured value. The Host
+ * unwraps internally (plainConfig); plugin code must do it explicitly or every
+ * scalar read is wrong.
+ */
+export function unwrapConfig<T>(value: T): T {
+  return unwrapValue(value) as T
+}
+
+/** Recursively replace Volatile references with their current snapshots. */
+function unwrapValue(value: unknown): unknown {
+  if (isVolatile(value)) return unwrapValue(value.get())
+  if (Array.isArray(value)) return value.map(unwrapValue)
+  if (value !== null && typeof value === 'object') {
+    const out: Record<string, unknown> = {}
+    for (const [key, child] of Object.entries(value)) out[key] = unwrapValue(child)
+    return out
+  }
+  return value
+}
+
 /** Runtime configuration of the JumpServer connector (V0.1). */
 export type PermissionMode = 'READ_ONLY' | 'AUTO' | 'FULL_ACCESS'
 
@@ -96,8 +124,9 @@ export interface JumpServerConfig {
    * V0.4.1: how many targets of ONE batch/inspect/topology call may be
    * processed concurrently (each target still gets its own serialized
    * session turn). Default 1 (strictly sequential — the safe, auditable
-   * baseline). Raise deliberately: more concurrency = more simultaneous
-   * bastion sessions, which the bastion may rate-limit or audit differently.
+   * baseline). One conversation still owns one SessionManager and one PTY, so
+   * this setting schedules target work but does not create parallel SSH logins
+   * inside a single conversation.
    */
   batchConcurrency?: number
   /**
@@ -122,13 +151,13 @@ export interface JumpServerConfig {
   runbooks?: Record<string, RunbookDef>
   /**
    * V0.4.0: serve the embedded ops console on 127.0.0.1 (default true). It is
-   * the desktop-friendly alternative to the better-sidebar tab: a loopback-only
-   * page with the terminal mirror, assets, jobs and the audit trail, reached
-   * through a per-process token URL reported by jumpserver_status.
+   * the Desktop-native loopback page with the terminal mirror, assets, jobs and
+   * the audit trail. Authentication stays in an HttpOnly cookie; the reported
+   * URL never contains a bearer token.
    * Absent means enabled (the schema default); only `false` turns it off.
    */
   consoleEnabled?: boolean
-  /** Console port; 0 (default) binds an ephemeral loopback port. */
+  /** Console port; default 8765 provides a stable Desktop sidebar URL. */
   consolePort?: number
   /** Auto reconnect at most 2 times with 1s/3s backoff when idle (default true) */
   autoReconnect: boolean
@@ -306,7 +335,7 @@ export interface RunbookDef {
  * sections (`id="tab-<name>"`) and the hash router, so they must not be
  * renamed without touching the viewer's markup.
  */
-export type ConsoleTabId = 'terminal' | 'assets' | 'topology' | 'jobs' | 'audit' | 'stats' | 'sessions' | 'settings'
+export type ConsoleTabId = 'terminal' | 'assets' | 'jobs' | 'audit'
 
 /**
  * Every console tab id, in navigation order.
@@ -317,36 +346,25 @@ export type ConsoleTabId = 'terminal' | 'assets' | 'topology' | 'jobs' | 'audit'
 export const CONSOLE_TAB_IDS: readonly ConsoleTabId[] = [
   'terminal',
   'assets',
-  'topology',
   'jobs',
   'audit',
-  'stats',
-  'sessions',
-  'settings',
 ] as const
 
 /** Default visibility of every console tab: all on. */
 export const DEFAULT_CONSOLE_TABS: Record<ConsoleTabId, boolean> = {
   terminal: true,
   assets: true,
-  topology: true,
   jobs: true,
   audit: true,
-  stats: true,
-  sessions: true,
-  settings: true,
 }
 
 /**
  * Tabs that can never be hidden.
  *
- * `settings` is the console's only explanation and diagnostics entry point —
- * and the page that documents this very switch. Hiding it would strand an
- * operator with a console that has lost tabs and no way to find out why, so
- * the rule is enforced inside `resolveConsoleTabs()` rather than delegated to
- * each caller.
+ * The terminal mirror is the console's reason to exist, so it can never be
+ * hidden; the rule is enforced here rather than delegated to each caller.
  */
-export const ALWAYS_ON_CONSOLE_TABS: readonly ConsoleTabId[] = ['settings'] as const
+export const ALWAYS_ON_CONSOLE_TABS: readonly ConsoleTabId[] = ['terminal'] as const
 
 /** Default terminal scrollback (rows). */
 export const DEFAULT_TERMINAL_SCROLLBACK = 5000

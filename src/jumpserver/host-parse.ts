@@ -123,9 +123,43 @@ export function emptyInventory(target: string, profiles: string[], error: string
 
 const IPV4 = /(\d{1,3}(?:\.\d{1,3}){3})/
 
-export function parseHostname(text: string): string | null {
-  const line = text.trim().split('\n')[0]?.trim()
-  return line !== undefined && line.length > 0 && !line.includes(' ') ? line : null
+/**
+ * Drop the shell's echo of the command from a probe's captured output.
+ *
+ * A PTY echoes what it receives, so a probe's text normally STARTS with the
+ * command line, followed by a blank line, then the real output. Parsers that
+ * read the first line or coerce the whole text then reported the COMMAND as the
+ * value (hostname -> "hostname", nproc -> NaN). Parsers that SEARCH the whole
+ * text survived, which is why only some inventory fields degraded.
+ *
+ * Only the leading echo is removed, and only when it matches the command that
+ * was actually sent; anything else is left untouched.
+ */
+export function stripCommandEcho(output: string, command: string): string {
+  if (output.length === 0) return output
+  const wanted = command.trim()
+  if (wanted.length === 0) return output
+  const lines = output.split('\n')
+  const first = lines[0]?.replace(/\r$/, '').trim() ?? ''
+  if (first !== wanted) return output
+  // Drop the echo line and the blank line that separates it from the result.
+  let cut = 1
+  while (cut < lines.length && lines[cut]?.trim() === '') cut += 1
+  return lines.slice(cut).join('\n')
+}
+
+export function parseHostname(text: string, command?: string): string | null {
+  // Scan rather than take the first line: a prompt (`root@host:~#`) or a
+  // leftover echo can precede the real value.
+  const echo = command === undefined ? '' : command.trim()
+  for (const raw of text.split('\n')) {
+    const line = raw.trim()
+    if (line.length === 0) continue
+    if (line.includes(' ') || line.includes('#') || line.includes('$')) continue
+    if (echo.length > 0 && line === echo) continue
+    return line
+  }
+  return null
 }
 
 export function parseOsRelease(text: string): { id: string | null; name: string | null; version: string | null } {
@@ -169,11 +203,16 @@ export function parseLoadavg(text: string): number[] | null {
   return nums.every((n) => Number.isFinite(n)) ? nums : null
 }
 
+/** `free` prints localised row labels: Mem/内存, Swap/交换, Buffers/缓冲. */
+const MEM_ROW = /^(?:mem|\u5185\u5b58)\s*[:：]/i
+
 export function parseMemory(text: string): HostInventory['memory'] {
   const out: HostInventory['memory'] = { totalMb: null, usedMb: null, availableMb: null, usedPct: null }
   for (const raw of text.split('\n')) {
     const line = raw.trim()
-    if (line.toLowerCase().startsWith('mem:')) {
+    // A zh_CN host prints 内存: / 交换:, so matching the English label alone
+    // silently reported no memory at all on every localised system.
+    if (MEM_ROW.test(line)) {
       const nums = line.match(/\d+/g)
       // `free -m` Mem line: total used free shared buff/cache available (6 numbers).
       // Older `free` and some BusyBox builds only emit total/used/free (3 numbers);
@@ -190,6 +229,7 @@ export function parseMemory(text: string): HostInventory['memory'] {
   }
   return out
 }
+
 
 export function parseDisks(text: string): DiskEntry[] {
   const out: DiskEntry[] = []
@@ -473,12 +513,14 @@ export function detectRoles(inv: HostInventory): string[] {
 }
 
 /** Apply one probe's output onto the inventory (keyed by probe id). */
-export function applyProbe(inv: HostInventory, id: string, output: string, exitCode: number | null): void {
-  const text = output ?? ''
+export function applyProbe(inv: HostInventory, id: string, output: string, exitCode: number | null, command?: string): void {
+  // Strip the shell's echo BEFORE parsing; without it the command itself was
+  // reported as the value for every probe that reads the first line.
+  const text = command === undefined ? (output ?? '') : stripCommandEcho(output ?? '', command)
   const ok = exitCode === null || exitCode === 0
   switch (id) {
     case 'hostname':
-      inv.hostname = parseHostname(text)
+      inv.hostname = parseHostname(text, command)
       return
     case 'os-release':
       if (ok) inv.os = parseOsRelease(text)

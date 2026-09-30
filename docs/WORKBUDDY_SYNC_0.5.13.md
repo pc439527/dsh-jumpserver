@@ -1,7 +1,10 @@
 # WorkBuddy → dsh-jumpserver 同步追踪（jumpserver-mcp v0.5.13）
 
 > 基线：`dsh-jumpserver` v0.3.1（branch `main` @ `c4443add5`）
-> 参考：`D:/desktop/<department>/WorkBuddy/jumpserver-mcp` v0.5.13（branch `main` @ `03d3ffd`，只读）
+> 参考：`<workbuddy-repo>`（branch `main`）
+> - WorkBuddy base commit: `03d3ffd`（公开发布的 0.5.1）
+> - Local patch version: 0.5.13（本地继续开发，未 push）
+> - 复现说明：`03d3ffd` 是公开可取的基线；0.5.13 是本地增量，仅凭 `0.5.13 @ 03d3ffd` 无法复现
 > 分支：`sync/workbuddy-0.5.13`
 
 血缘：`jumpserver-mcp` 由 `dsh-jumpserver` v0.3.1 的 `src/jumpserver/` + `src/security/` 原样移植而来，
@@ -39,7 +42,7 @@ v0.5.5 不可达快速失败 / v0.5.7+5.8 语义风险裁决 / v0.5.9 拒绝审�
 | `asset-store.ts` `topology-store.ts` | `src/runtime/` 同名 | 🔜 供侧栏用，待接线 |
 | `paths.ts`（DSH 新建） | `src/runtime/paths.ts` | ✅ 插件状态落在 `<dsh home>/jumpserver/` |
 | `audit-store.ts`（JSONL） | — | ⛔ DSH 用 `storageDomain`（见 §3） |
-| `audit-viewer.ts`（HTTP 控制台） | — | ⛔ DSH 由 better-sidebar 承担 |
+| `audit-viewer.ts`（HTTP 控制台） | — | ✅ 由 `runtime/console-page.ts` 的审计标签承担 |
 | `doctor.ts` `config-guard.ts` `profile-store.ts` `credential-vault.ts` `console-*` `session-scope.ts` `tool-host.ts` `runtime.ts` `tools-common.ts` `tools-ops.ts` `progress.ts` | — | ⛔ MCP/WorkBuddy 专有（等价能力见 §3） |
 | `config/env.ts` | — | ⛔ 连接器表单 ENV 分层；DSH 用设置页 + credential-ref + `profiles` |
 
@@ -65,8 +68,8 @@ v0.5.5 不可达快速失败 / v0.5.7+5.8 语义风险裁决 / v0.5.9 拒绝审�
 ### 侧栏 / 桥接
 | 能力 | 状态 |
 |---|---|
-| 侧栏 任务 标签（列表 / 停止 / 中断） | ✅ |
-| 侧栏 审计 标签渲染「已拦截 / 未批准」+ 拒绝筛选 | ✅ |
+| 控制台 任务 标签（列表 / 停止 / 中断） | ✅ |
+| 控制台 审计 标签渲染「已拦截 / 未批准」+ 拒绝筛选 | ✅ |
 | `/api/jumpserver.jobs` / `.jobStop` / `.interrupt` | ✅ 均 POST-only + same-site + 按对话授权 |
 | `PROTOCOL_VERSION` | ✅ 3 → 4 |
 
@@ -90,7 +93,7 @@ v0.5.5 不可达快速失败 / v0.5.7+5.8 语义风险裁决 / v0.5.9 拒绝审�
 5. `62dba538d` 风险裁决与拒绝审计：advisory judge（仅 UNKNOWN 外发）、opt-in autoAllow、
    BLOCKED/DENIED 各恰好一条审计、`riskJudge` 贯通 exec/run/batch/job_start 结果。
 6. `jumpserver_audit`：对话内审计（本地时间、`why=` 拒绝原因、`refusalsOnly`、limit/filter）。
-7. 侧栏 任务 标签 + 桥接 `/api/jumpserver.jobs|jobStop|interrupt` + 审计标签「已拦截/未批准」
+7. 控制台 任务 标签 + 桥接 `/api/jumpserver.jobs|jobStop|interrupt` + 审计标签「已拦截/未批准」
    与拒绝筛选；`PROTOCOL_VERSION` 3 → 4。
 
 顺带修掉两个**基线就存在的**陈旧测试：`tests/bridge-security.test.ts` 的快照长轮询
@@ -104,7 +107,7 @@ v0.5.5 不可达快速失败 / v0.5.7+5.8 语义风险裁决 / v0.5.9 拒绝审�
   不引入 WB 的 JSONL + 归档。
 - **凭据**：沿用 DSH credential-ref；不引入 `~/.workbuddy` 的 AES `profiles.json`。
 - **审批**：沿用 DSH `ctx.get('approval')`（含 batch 一次审批）；不采用 WB 的 `confirm:true` 二次调用。
-- **控制台**：不移植 HTTP 控制台 / 实例选择器 / console token；侧栏视图按需扩展。
+- **控制台**：已实现 loopback HTTP 控制台（终端/资产/任务/审计）；**未**移植实例选择器；Token 采用 Host 内存 + HttpOnly Cookie，不进入 URL/日志/工具结果。
 - **progress / annotations**：DSH 工具面无对应能力，不做（无回归）。
 
 ## 4. 剩余工作（按优先级）
@@ -132,18 +135,18 @@ npm run build && npm run smoke:client && node scripts/sync-profile.mjs
 
 | 项 | 值 |
 |---|---|
-| 运行 profile | **desktop**（`$DSH_PROFILE_DIR=C:\Users\<user>\.dsh\profiles\desktop`），DSH desktop 0.1.7-rc.2（alpha 通道）；本机**没有** `web` profile |
+| 运行 profile | **desktop**（`$DSH_PROFILE_DIR=<dsh-home>\profiles\desktop`），DSH Desktop 0.2.0-rc.1（Node 22.19+）；本机**没有** `web` profile |
 | 已安装 | `dsh-jumpserver@0.4.0`（`node_modules/dsh-jumpserver`：`lib/` + `cordis.patch.yml` + `package.json` + `README.md`） |
-| 安装方式 | profile `package.json` 增加 `"dsh-jumpserver": "file:D:/cusor/DSH/jumpserver"` + `dsh.profile.bundles` 追加 `dsh-jumpserver`，随后用内置 pnpm 安装（本机无 `dsh` CLI 可用） |
+| 安装方式 | profile `package.json` 增加 `"dsh-jumpserver": "file:<plugin-workspace>"` + `dsh.profile.bundles` 追加 `dsh-jumpserver`，随后用内置 pnpm 安装（本机无 `dsh` CLI 可用） |
 | 一致性校验 | 部署副本的 `lib/index.js`、`lib/client.js`、`package.json` 与仓库构建产物 **SHA256 逐字节一致** |
 | 依赖 | `ssh2` / `zod` 等已装；`cpu-features` 原生构建失败（无 C++ 工具链）——ssh2 会自动退回纯 JS 实现 |
 | 生效方式 | **需要重启 DSH（dsh web / 桌面应用）**，Host 在启动时装载插件；随后硬刷新浏览器 |
 
 顺带修掉两个打包缺陷（提交 `a5074c6c6`）：`files` 只含 `lib` 导致安装副本丢失 `cordis.patch.yml`（少它插件无法被装载）；`sync-profile.mjs` 写死 web profile，现按 `JS_PROFILE_PKG > $DSH_PROFILE_DIR > web 默认` 解析。
 
-**侧栏尚未可用**：插件的客户端半边 inject 了 `betterSidebar`，而 profile 里没有 `dsh-better-sidebar`。其版本要按内核通道选（本机为 alpha）：`dsh plugin --profile desktop add dsh-better-sidebar@alpha`（或 `@latest`，对应 stable 内核）。未安装时 Host 工具（25 个）仍可用，侧栏标签与设置卡片不会出现。
+**Desktop 原生化已完成**：设置卡片走 `ctx.configForms`，密码走 `ctx.remote.credentials`，控制台由 `ctx.sidebarRight.openTab('browser', …)` 在右栏打开；`dsh-better-sidebar` 依赖与其注入元数据已全部移除。Host 工具（25 个）与右栏控制台均可直接使用。
 
-**回滚**：`C:\Users\<user>\.dsh\profiles\desktop\package.json.bak-0.4.0` 是安装前的备份；恢复它并删除 `node_modules/dsh-jumpserver` 即回到安装前状态。
+**回滚**：`<dsh-home>\profiles\desktop\package.json.bak-0.4.0` 是安装前的备份；恢复它并删除 `node_modules/dsh-jumpserver` 即回到安装前状态。
 
 ## 7. 已知验证边界
 
@@ -162,9 +165,15 @@ npm run build && npm run smoke:client && node scripts/sync-profile.mjs
 
 **新增内置控制台**（"改为控制台"路线，desktop 无需任何客户端插件）：
 - `src/runtime/console.ts`（服务）+ `src/runtime/console-page.ts`（自带页面，无 CDN/框架）；
-- 只绑定 `127.0.0.1`；每进程随机令牌（页面 URL + `x-console-token` 头，常量时间比较）；未注册路径一律 404；CSP 不含任何远程来源；
+- 只绑定 `127.0.0.1`；每进程随机令牌（HttpOnly/SameSite Cookie；Token 不进入 URL、HTML、日志或工具结果）；未注册路径一律 404；CSP 不含任何远程来源；
 - API 直接挂载插件**现有的 bridge 路由**（`registerBridgeRoutes`），所以会话授权、状态机、人工输入的一次性确认挑战、审计行为与侧栏完全一致；
 - 页面含 **终端 / 资产 / 任务 / 审计** 四个标签，拒绝记录显示为「已拦截 / 未批准 + 原因」；
 - 配置 `consoleEnabled`（默认 true）/ `consolePort`（默认 0 = 随机回环端口）；`jumpserver_status` 返回本对话的 `consoleUrl`，Host 启动日志打印基础地址。
 
-**若仍想用侧栏**：装与插件 peer 范围匹配的版本 —— `dsh plugin --profile desktop add dsh-better-sidebar@0.18.0-alpha.0`（npm 上存在；插件 peer 为 `^0.18.0-alpha.0`，仓库内提取的也是这一版）。npm 的 `alpha` 标签目前是 0.21.0-rc.1（主版本已跨过 0.18，超出 peer 范围），`latest` 是 0.22.0，两者都可能要求更新的 DSH 内核。
+## 9. 同步边界（务必如实理解）
+
+本分支的同步是 **Core / function sync**，不是 Console UI 等价：
+
+- **Core 已同步**：Job 生命周期与 Ctrl+C、Host Key、目标作用域、Inspect/Topology/Runbook/Baseline、Risk Judge、多账号、拒绝审计、PTY 会话隔离。
+- **Console UI 只同步了一部分**：实际渲染的只有 **终端 / 资产 / 任务 / 审计** 四个标签，WorkBuddy 的 Topology / Stats / Sessions / Settings 标签**未实现**；`ConsoleTabId` 已收窄为这四项，避免声明不存在的能力。
+- **有意保留差异**：WorkBuddy 的实例选择器与 console token 轮换模型未移植。

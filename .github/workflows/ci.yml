@@ -8,16 +8,22 @@ on:
 
 jobs:
   verify:
-    name: typecheck + tests + build + smoke
-    runs-on: ubuntu-latest
+    name: typecheck + tests + build + smoke (${{ matrix.os }}, node ${{ matrix.node }})
+    # The plugin ships inside the Desktop app, so Windows is a first-class gate.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        node: [22.19.0]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: ${{ matrix.node }}
           cache: npm
       - name: Install
-        # DSH alpha packages carry mutually-conflicting peer ranges upstream;
+        # DSH release-candidate packages carry mutually-conflicting peer ranges;
         # --legacy-peer-deps mirrors how the project is installed (package-lock
         # is generated with npm install --package-lock-only --legacy-peer-deps).
         run: npm ci --legacy-peer-deps

@@ -2,15 +2,23 @@
  * The console page, shipped as a string by the Host.
  *
  * Deliberately dependency-free: no CDN, no build step, no framework, so the
- * page can never drift from the server that serves it. The access token and
- * the conversation id are injected at serve time (the URL already carries the
- * token, so embedding it adds no exposure the request itself did not have).
+ * page can never drift from the server that serves it. Authentication stays in
+ * an HttpOnly cookie, and conversation selection is read from the URL fragment,
+ * which is never sent to the Host.
  */
-export function consolePage(token: string, sessionId: string): string {
-  return PAGE.split('__TOKEN__').join(JSON.stringify(token)).split('__SESSION__').join(JSON.stringify(sessionId))
+export function consolePage(): string {
+  return PAGE
 }
 
-const PAGE = `<!doctype html>
+/*
+ * String.raw is REQUIRED, not stylistic. A plain template literal processes
+ * escapes before emitting, so the ANSI-strip regex reached the browser with an
+ * escaped closing paren: the group never terminated, the whole inline <script>
+ * failed to parse, and the console rendered as static HTML with no tab
+ * switching, no buttons and no polling. Raw keeps every backslash the
+ * browser's own parser is meant to see.
+ */
+const PAGE = String.raw`<!doctype html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8" />
@@ -37,6 +45,7 @@ const PAGE = `<!doctype html>
   button.act { background: #161b22; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px; padding: 6px 10px; cursor: pointer; font: inherit; }
   button.act[disabled] { opacity: .45; cursor: default; }
   button.act.danger { border-color: rgba(248,81,73,.5); color: #f85149; }
+  button.act[data-on] { border-color: rgba(63,185,80,.55); color: #3fb950; }
   table { width: 100%; border-collapse: collapse; }
   th, td { text-align: left; padding: 4px 8px; border-bottom: 1px solid #161b22; font-size: 12px; }
   th { color: #8b949e; font-weight: 600; }
@@ -73,6 +82,7 @@ const PAGE = `<!doctype html>
       <button class="act" id="send" disabled>发送</button>
       <button class="act danger" id="interrupt" disabled>中断</button>
       <button class="act" id="clear">清屏</button>
+      <button class="act" id="follow" data-on="1">跟随：开</button>
     </div>
     <div id="confirm" class="notice" style="display:none"></div>
   </section>
@@ -91,9 +101,24 @@ const PAGE = `<!doctype html>
   </section>
 </main>
 <script>
-var TOKEN = '__TOKEN__';
-var SESSION = '__SESSION__';
+// Fragments never reach the Host, so the conversation id cannot leak into
+// access logs or the discovery file.
+var fragment = new URLSearchParams(location.hash.replace(/^#/, ''));
+var SESSION = fragment.get('session') || '';
 var sinceSeq = 0;
+var following = true;
+
+// Follow mode: ON pins the view to the newest output on every append. OFF
+// leaves the scroll position entirely to the operator. Scrolling up breaks
+// follow automatically (standard terminal behaviour) and the button says so,
+// so nobody is yanked back to the bottom without an explanation.
+function setFollow(on) {
+  following = on;
+  var btn = el('follow');
+  btn.textContent = '跟随：' + (on ? '开' : '关');
+  if (on) btn.setAttribute('data-on', '1'); else btn.removeAttribute('data-on');
+  if (on) { var t = el('term'); t.scrollTop = t.scrollHeight; }
+}
 var tab = 'term';
 var confirmReq = null;
 
@@ -104,16 +129,58 @@ function esc(s) {
   });
 }
 function strip(s) {
-  return String(s == null ? '' : s)
-    .replace(/\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)/g, '')
-    .replace(/\u001b\[[0-9;?]*[ -\/]*[@-~]/g, '')
-    .replace(/\r/g, '\n');
+  // Terminal semantics, matching src/client/ansi.ts's line framer:
+  //   ESC [ ... CSI  -> dropped
+  //   ESC ] ... BEL  -> dropped (OSC title)
+  //   CRLF / LF      -> line break
+  //   lone CR        -> cursor to column 0 and OVERWRITE (progress redraw);
+  //                     treating it as a newline produced the '???0.5' garbage
+  //   BS             -> erase the previous character
+  //   other controls -> dropped
+  var text = String(s == null ? '' : s);
+  var out = '';
+  var line = '';
+  var i = 0;
+  var n = text.length;
+  function flush() { out += line + '\n'; line = ''; }
+  while (i < n) {
+    var c = text.charAt(i);
+    if (c === '\u001b') {
+      var next = text.charAt(i + 1);
+      if (next === '[') {
+        var j = i + 2;
+        while (j < n && !/[A-Za-z@-~]/.test(text.charAt(j))) j++;
+        i = j + 1;
+      } else if (next === ']') {
+        var k = i + 2;
+        while (k < n && text.charAt(k) !== '\u0007') k++;
+        i = text.charAt(k) === '\u0007' ? k + 1 : k;
+      } else {
+        i += 2;
+      }
+      continue;
+    }
+    if (c === '\n') { flush(); i += 1; continue; }
+    if (c === '\r') {
+      if (text.charAt(i + 1) === '\n') { flush(); i += 2; continue; }
+      line = '';
+      i += 1;
+      continue;
+    }
+    if (c === '\b') { line = line.slice(0, -1); i += 1; continue; }
+    if (c === '\t' || c >= ' ') { line += c; i += 1; continue; }
+    i += 1;
+  }
+  if (line.length > 0) out += line;
+  else if (out.charAt(out.length - 1) === '\n') out = out.slice(0, -1);
+  return out;
 }
 
 function api(path, body, method) {
   var init = {
     method: method || (body === undefined ? 'GET' : 'POST'),
-    headers: { 'x-console-token': TOKEN },
+    headers: {},
+    credentials: 'same-origin',
     cache: 'no-store'
   };
   if (body !== undefined) {
@@ -148,12 +215,11 @@ function setTab(next) {
 
 function append(text, cls) {
   var term = el('term');
-  var atBottom = term.scrollTop + term.clientHeight >= term.scrollHeight - 24;
   var div = document.createElement('div');
   div.className = cls || 'out';
   div.textContent = text;
   term.appendChild(div);
-  if (atBottom) term.scrollTop = term.scrollHeight;
+  if (following) term.scrollTop = term.scrollHeight;
 }
 
 function renderStatus(st) {
@@ -320,6 +386,12 @@ function loadAudit() {
   el('cmd').addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); send(); } });
   el('send').onclick = send;
   el('clear').onclick = function () { el('term').textContent = ''; };
+  el('follow').onclick = function () { setFollow(!following); };
+  el('term').addEventListener('scroll', function () {
+    var t = el('term');
+    if (following && t.scrollTop + t.clientHeight < t.scrollHeight - 24) setFollow(false);
+  });
+  setFollow(true);
   el('jobsRefresh').onclick = loadJobs;
   el('auditRefresh').onclick = loadAudit;
   var interrupt = function () {

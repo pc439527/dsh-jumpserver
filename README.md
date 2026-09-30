@@ -27,7 +27,7 @@
 - **语义风险裁决（可选，默认关闭）**：分类器给出 `UNKNOWN` 的命令，可征询 TypeSafe System One（Jev）的结构化第二意见，**只作为审批文案里的参考**；`riskJudge.autoAllow` 打开后，通过全部阈值与结构否决的判定才可跳过人工确认，并在审计里记 `AUTO_ALLOWED`。任何失败（未启用/无凭据/超时/非 2xx/畸形响应）静默降级为普通审批。
 - **多账号身份**：`profiles` + `activeProfileId` 可在设置页保存并切换多套堡垒机身份（host/port/username + credential-ref），选中者优先；密码始终只经凭据域解析，绝不落盘到插件目录。
 - **实时终端镜像 + 人工输入 + 任务/审计侧栏**：所有 PTY 输入/输出/目标事件经 `TerminalObserver` 有界事件流（seq）供侧栏渲染；侧栏含 **终端 / 资产 / 任务 / 审计** 四个标签，人工输入经 SessionManager 执行并同样审计，拒绝记录以「已拦截 / 未批准」呈现而非红色失败。
-- **内置控制台（desktop 友好）**：Host 在 127.0.0.1 上提供一个**自带页面**的运维控制台（终端镜像 / 资产 / 任务 / 审计），URL 由 `jumpserver_status` 返回（含每进程令牌 + 对话 id）。它**不依赖任何客户端插件**——侧栏标签需要第三方的 `dsh-better-sidebar`，而控制台在任何 DSH 形态（含 desktop）下都能用。
+- **内置控制台（Desktop 友好）**：Host 在 127.0.0.1 上提供一个**自带页面**的运维控制台（终端镜像 / 资产 / 任务 / 审计），URL 由 `jumpserver_status` 返回（不含令牌；对话 ID 通过 URL fragment 传递）。它**不依赖任何第三方插件**——Desktop 直接用 DSH 原生 `sidebarRight` Browser Tab 打开。
 - **凭据安全**：密码走 DSH 凭据域 credential-ref（`passwordEnv`），连接时解析、不缓存，绝不进入 tool result / 日志 / 审计 / 终端事件 / 浏览器响应。
 
 ## 架构
@@ -61,25 +61,22 @@ src/
 ├── security/               command-classifier / sql-command-classifier / permission / permission-gate / risk-judge / target-scope / audit / manual-policy / grant
 ├── ops/                    triage 采集 / 应用 profile / 证据账本与案件
 ├── tools/                  definitions（核心）/ ops（案件·修复）/ jobs（任务）/ inspection（巡检）/ common（输出契约）
-└── client/                 浏览器 half 源码（settings 卡片 / better-sidebar 终端标签页；构建为 lib/client.js）
+└── client/                 DSH Desktop 原生 settings card / Browser Tab 入口（构建为 lib/client.js）
 ```
 
 核心设计：**传输主机（Transport Host）≠ 逻辑目标（Logical Target）**。一个 ssh2 PTY Channel 复用于整个会话；进入目标后执行随机探针（hostname/whoami/pwd）验证，验证成功才置 `ASSET_SHELL`；命令完成用唯一 Completion Marker 判定并返回真实 exit code。
 
 ## 安装
 
-侧栏终端标签页注册在 **dsh-better-sidebar**（第三方插件）中；**不装它也能用**——设置卡片照常出现，终端改走内置控制台。想用侧栏标签就先装 better-sidebar，再装 dsh-jumpserver：
+面向 **DSH Desktop 0.2.x**（Node 22.19+）：设置卡片走 DSH 原生 `configForms`，终端/资产/任务/审计经原生 `sidebarRight` Browser Tab 打开内置控制台，无需任何第三方侧栏插件。
 
 ```bash
 # ① 构建本插件（生成 lib/，含 lib/client.js 浏览器 bundle）
 npm install --legacy-peer-deps
 npm run build
 
-# ② 安装 dsh-better-sidebar（按 DSH core 版本选通道）
-dsh plugin --profile web add dsh-better-sidebar@latest    # stable core
-# 或 dsh plugin --profile web add dsh-better-sidebar@alpha  # alpha core
+# ② 安装 dsh-jumpserver
 
-# ③ 安装 dsh-jumpserver
 ## 本地源码方式（等价于 DSH「添加插件」弹窗里复制出的命令）：
 dsh plugin --profile web add "file:<本插件所在路径>"
 ## 发布到 npm 后可直接：
@@ -160,7 +157,7 @@ jumpserver_job_read(jobId="jsjob_xxxx")                          # 只取增量
 | assetGroups | {} | 资产组别名：组名 → 关键词列表 |
 | runbooks | {} | 命名 runbook：`{ title, steps[] }`，步骤为 profile 或只读 command，可带 `expect` 断言 |
 | riskJudge | {} | 可选语义裁决：`{ enabled, endpoint, apiKeyEnv, model, timeoutMs, cacheTtlSeconds, redactNetwork, autoAllow{...} }`，**默认关闭**；API Key 只经 credential-ref 解析 |
-| consoleEnabled / consolePort | true / 0 | 内置控制台：仅绑定 127.0.0.1，0 = 随机回环端口；URL 由 `jumpserver_status` 返回 |
+| consoleEnabled / consolePort | true / 8765 | 内置控制台：仅绑定 127.0.0.1，默认 8765 固定回环端口；URL 由 `jumpserver_status` 返回 |
 | autoReconnect / enableAudit | true / true | 空闲断线自动重连（最多 2 次）/ 命令审计 |
 | autoOpenTerminal / terminalScrollback | true / 5000 | 进会话页自动打开侧栏标签 / 终端保留行数 |
 
@@ -223,14 +220,14 @@ jumpserver_job_read(jobId="jsjob_xxxx")                          # 只取增量
 
 ## 控制台（desktop 版本推荐）
 
-Desktop 版 DSH 与 web 版跑的是同一套客户端运行时，但侧栏标签依赖第三方插件 **dsh-better-sidebar**：没装它时插件的浏览器半边以前会**整体不激活**（连设置卡片都不出现）。V0.4.0 起 " + BT + "betterSidebar" + BT + " 变为**可选**，并新增内置控制台，desktop 无需任何客户端插件即可观察与接管会话。
+Desktop 版使用 DSH 原生服务：设置页经 `ctx.configForms.get('jumpserver')` 注册到插件设置区，密码写入 `ctx.remote.credentials`；授权后由 `ctx.sidebarRight.openTab('browser', …)` 在右栏打开控制台。不依赖任何第三方侧栏插件。
 
 - **入口**：调用 " + BT + "jumpserver_status" + BT + "，返回的 " + BT + "consoleUrl" + BT + " 就是本对话的控制台地址（Host 启动日志里也会打印基础地址）。直接粘贴进浏览器打开即可。
 - **内容**：**终端**（实时 PTY 镜像，输入黄/输出绿/系统蓝，人工输入支持菜单态 " + BT + "p" + BT + " / IP 或名称 / " + BT + "q" + BT + " / " + BT + "exit" + BT + "）、**资产**、**任务**（停止 / 中断）、**审计**（拒绝记录显示为「已拦截 / 未批准 + 原因」）。
-- **安全模型**（三条必须同时成立）：① 只绑定 " + BT + "127.0.0.1" + BT + "，永不监听可路由地址；② 每个请求都要带每进程随机令牌（页面 URL 与 " + BT + "x-console-token" + BT + " 头，常量时间比较）；③ API 就是侧栏用的**同一套 bridge 接口**——会话授权、状态机、人工输入的一次性确认挑战、审计全部一致，控制台只增加通道，不新增策略。
+- **安全模型**（三条必须同时成立）：① 只绑定 `127.0.0.1`，永不监听可路由地址；② 每进程随机令牌只存在于 Host 内存与 **HttpOnly / SameSite=Strict Cookie**（首次打开页面时下发），Token 不进入 URL、HTML、日志、`console.json` 或工具结果，且 Host/Origin/Sec-Fetch-Site 校验拒绝跨站与 Host 伪造；③ API 就是侧栏用的**同一套 bridge 接口**——会话授权、状态机、人工输入的一次性确认挑战、审计全部一致，控制台只增加通道，不新增策略。
 - **不做**：不自动拉起系统浏览器（模型只把 URL 交给你），不引入跨进程实例选择器。
 
-## 侧栏（better-sidebar 标签页）
+## 控制台标签（Desktop 右栏 Browser Tab）
 
 | 标签 | 内容 |
 |---|---|
@@ -314,6 +311,43 @@ npm run sync               # build + 把 lib/ + package.json 同步进 web profi
 测试覆盖亮点：`tests/console.test.ts`（控制台令牌/路由/端口释放）、`tests/jobs.test.ts`（单次 Ctrl+C / 幂等停止 / 对话隔离 / 游标读）、`tests/inspection-tools.test.ts`（结构化画像 + 基线漂移往返）、`tests/risk-judge-gate.test.ts`（advisory / 失败降级 / autoAllow 与分布否决）、`tests/context-budget.test.ts`（工具表 schema 预算 28 KB）、`tests/classifier-corpus.test.ts`（READ 误判 <2%、0 误放）。
 
 GitHub Actions CI（typecheck + vitest + build + classifier 门槛 + e2e + client bundle smoke）在 main 与 PR 上自动运行。
+
+
+## 已知限制与故障排查（DSH Desktop 0.2.x）
+
+以下均为真实堡垒机验收中确认的行为，不是待办事项。
+
+### 命令成功但没有输出
+
+远端 PTY 的 canonical 行规程对**单行**有约 4KB 上限。超长的单行响应（压缩过的 JSON、base64）会在远端被丢弃，而命令本身仍然 exit 0：
+
+```
+curl -s http://127.0.0.1:9090/api/v1/alerts | wc -c   # 41613  数据确实到了
+curl -s http://127.0.0.1:9090/api/v1/alerts          # 空输出，exit 0
+```
+
+插件无法从外部改变堡垒机的 tty 参数，因此改为**让失败可见**：这类结果会附带 `outputNote` 说明原因。规避方式：
+
+- `| wc -c` 先确认是否有数据
+- `| jq .` / `| head` / `| fold -w 200` 折行
+
+### 终端里的乱码字符（形如 ???0.5）
+
+堡垒机连接进度用退格符在同一位置刷新数字。控制台已按终端语义实现 BS 删字符与孤立 CR 覆盖重绘，并与侧栏终端共用同一套规则（`src/client/ansi.ts`，由 `tests/console-terminal-strip.test.ts` 对拍保证）。
+
+### 风险裁决（Jev）没有生效
+
+语义副驾**只对 UNKNOWN 分类的命令**发起咨询，且只在即将弹出人工审批时触发。在 READ_ONLY 模式下未知命令被直接拒绝、不会进入审批，因此裁决器没有介入点。要验证链路请把 `permissionMode` 改为 AUTO。
+
+API 密钥保存在 **DSH 凭据域**（设置页写入），不是环境变量。裁决失败时会在审计与结果中给出原因：disabled / no-credential / unreachable / timeout / http-error / bad-payload。`autoAllow` 默认关闭，裁决永远不会自动放行。
+
+### 拒绝审计
+
+BLOCKED / DENIED 都会写入审计，可用 `jumpserver_audit`（`refusalsOnly: true`）或控制台审计页查看。若写入本身失败，工具结果会带 `AUDIT_WRITE_FAILED` 前缀——此时拒绝判定不受影响，但审计承诺已破，需要排查凭据/存储层。
+
+### npm run sync
+
+脚本按 `JS_PROFILE_PKG` → `DSH_PROFILE_DIR` → **自动探测** `~/.dsh/profiles/*` 的顺序解析目标。`DSH_PROFILE_DIR` 只在宿主进程里存在，普通终端中会自动探测并优先选择 desktop profile。
 
 ## License
 

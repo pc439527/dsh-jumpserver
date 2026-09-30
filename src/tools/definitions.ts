@@ -9,7 +9,7 @@ import { JUMPSERVER_NOT_ARMED, NOT_ARMED_MESSAGE, type SessionGrant } from '../s
 import type { BatchCommandRequest, TargetBatchResult } from '../jumpserver/session-manager.js'
 import { runtimeVersion } from '../version.js'
 import { formatAuditTime, resolveTimeZone } from '../runtime/time.js'
-import { assetsToValue, bundleFor, execOutcomeToValue, guardValue, renderAssetsResult, renderBatchResult, renderResult, RESULT_SCHEMA, sessionIdOf, statusToValue, type ResultValue } from './common.js'
+import { assetsToValue, bundleFor, emptyOutputNote, execOutcomeToValue, guardValue, renderAssetsResult, renderBatchResult, renderResult, RESULT_SCHEMA, sessionIdOf, statusToValue, type ResultValue } from './common.js'
 
 function thisJumpError(error: unknown): { code: string; message: string } {
   if (error instanceof JumpServerError) return { code: error.code, message: error.message }
@@ -32,7 +32,7 @@ export const ASSETS_SCHEMA = {
   additionalProperties: false,
   properties: {
     ok: { type: 'boolean', required: true },
-    /** V0.4.1: loopback console URL for this conversation (token embedded). */
+    /** Desktop 0.2.x: stable token-free loopback console URL. */
     consoleUrl: { type: 'string' },
     code: { type: 'string' },
     message: { type: 'string' },
@@ -75,7 +75,7 @@ export const AUDIT_SCHEMA = {
   additionalProperties: false,
   properties: {
     ok: { type: 'boolean', required: true },
-    /** V0.4.1: loopback console URL for this conversation (token embedded). */
+    /** Desktop 0.2.x: stable token-free loopback console URL. */
     consoleUrl: { type: 'string' },
     code: { type: 'string' },
     message: { type: 'string' },
@@ -116,7 +116,7 @@ function renderAudit(_args: Record<string, unknown>, value: ResultValue): Array<
  * exec.agent.session.id, so 对话 A and 对话 B never share a PTY/mutex/
  * terminal stream. V0.2.3 P1 adds jumpserver_assets (KoKo 'p' -> local filter).
  */
-export function registerJumpServerTools(ctx: Context, registry: SessionRegistry, getConfig: () => JumpServerConfig, grants: SessionGrant, terminateConversation?: (sessionId: string) => Promise<unknown>, auditFor?: (sessionId: string) => Array<Record<string, unknown>>, consoleUrlFor?: (sessionId: string) => string | undefined): Array<() => void> {
+export function registerJumpServerTools(ctx: Context, registry: SessionRegistry, getConfig: () => JumpServerConfig, grants: SessionGrant, terminateConversation?: (sessionId: string) => Promise<unknown>, auditFor?: (sessionId: string) => Array<Record<string, unknown>>, consoleUrlFor?: (sessionId: string) => string | undefined, resolveCredential?: (ref: string) => Promise<string | undefined>): Array<() => void> {
   const disposers: Array<() => void> = []
 
   disposers.push(
@@ -279,7 +279,7 @@ export function registerJumpServerTools(ctx: Context, registry: SessionRegistry,
             const blocked = requireGrant(grants, exec)
             if (blocked !== null) return blocked
             const bundle = bundleFor(exec, registry)
-            const services: GateServices = { getConfig, manager: bundle.manager, approval: ctx.get('approval') }
+            const services: GateServices = { getConfig, manager: bundle.manager, approval: ctx.get('approval'), resolveCredential }
             // V0.4.0: the scope guard also applies to commands run against an
             // asset that was entered before the scope was narrowed.
             requireTargetAllowed(getConfig(), bundle.manager.status().target ?? '')
@@ -298,6 +298,11 @@ export function registerJumpServerTools(ctx: Context, registry: SessionRegistry,
               signal: exec.signal,
             })
             const value = execOutcomeToValue(status, outcome)
+            // An exit-0 command that produced nothing is usually a dropped
+            // over-long single line (PTY caps one line near 4KB), not "no result".
+            const exit = outcome.kind === 'completed' ? outcome.exitCode : null
+            const note = emptyOutputNote(args.command, outcome.output, exit)
+            if (note !== undefined) value['outputNote'] = note
             return gated.judgeNote !== undefined ? { ...value, riskJudge: gated.judgeNote } : value
           })
         },
@@ -328,7 +333,7 @@ export function registerJumpServerTools(ctx: Context, registry: SessionRegistry,
             if (blocked !== null) return blocked
             const bundle = bundleFor(exec, registry)
             requireTargetAllowed(getConfig(), args.target)
-            const services: GateServices = { getConfig, manager: bundle.manager, approval: ctx.get('approval') }
+            const services: GateServices = { getConfig, manager: bundle.manager, approval: ctx.get('approval'), resolveCredential }
             const gated = await gateCommandForNavigation(services, exec, args.command)
             const timeoutMs = args.timeout !== undefined ? Math.max(1, args.timeout) * 1000 : undefined
             const result = await bundle.manager.run({
@@ -346,6 +351,11 @@ export function registerJumpServerTools(ctx: Context, registry: SessionRegistry,
             })
             const { target, hostname, status, outcome } = result
             const value = execOutcomeToValue(status, outcome)
+            // An exit-0 command that produced nothing is usually a dropped
+            // over-long single line (PTY caps one line near 4KB), not "no result".
+            const exit = outcome.kind === 'completed' ? outcome.exitCode : null
+            const note = emptyOutputNote(args.command, outcome.output, exit)
+            if (note !== undefined) value['outputNote'] = note
             return {
               ...value,
               target,
@@ -397,7 +407,7 @@ export function registerJumpServerTools(ctx: Context, registry: SessionRegistry,
             const blocked = requireGrant(grants, exec)
             if (blocked !== null) return blocked
             const bundle = bundleFor(exec, registry)
-            const services: GateServices = { getConfig, manager: bundle.manager, approval: ctx.get('approval') }
+            const services: GateServices = { getConfig, manager: bundle.manager, approval: ctx.get('approval'), resolveCredential }
             const rawTasks = Array.isArray(args.tasks) ? (args.tasks as unknown as Array<Record<string, unknown>>) : []
             const tasks = rawTasks.filter((t) => t !== null && typeof t === 'object')
             if (tasks.length === 0) {

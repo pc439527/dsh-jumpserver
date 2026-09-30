@@ -26,11 +26,10 @@ import { registerCollectionTools } from './tools/inspection.js'
 import { JobStore } from './runtime/job-store.js'
 import { BaselineStore } from './runtime/baseline-store.js'
 import { jumpHomeBaselines, jumpHomeBootMarker, jumpHomeClientTrace, jumpHomeConsole, jumpHomeKnownHosts } from './runtime/paths.js'
-import { readOverlay, writeOverlayPatch } from './runtime/config-store.js'
 import { interruptSession } from './runtime/interrupt.js'
-import { startConsoleServer, type ConsoleHandle } from './runtime/console.js'
+import { DEFAULT_CONSOLE_PORT, startConsoleServer, type ConsoleHandle } from './runtime/console.js'
 import { OpsCaseRegistry } from './ops/evidence.js'
-import { manualPolicyOf, resolveConcurrency, resolveConnection } from './config/types.js'
+import { manualPolicyOf, resolveConcurrency, resolveConnection, unwrapConfig } from './config/types.js'
 import { Semaphore } from './jumpserver/concurrency.js'
 import { requireTargetAllowed } from './security/target-scope.js'
 import { classifyManual, manualGate, menuManualKind } from './security/manual-policy.js'
@@ -101,13 +100,22 @@ export function apply(ctx: Context, config: JumpServerConfig): void {
   let auditDomain: { close(): Promise<void> } | undefined
   let auditTable: { put(key: string, value: unknown): Promise<void> } | undefined
 
+  // DSH Host configuration is the single source of connection settings. Every
+  // reader must use this projection so status, settings views and the actual
+  // SSH identity can never disagree.
+  //
+  // Unwrapping is mandatory, not cosmetic: a field declared `.volatile()` (which
+  // every field in config/schema.ts is, so the Host will serve this namespace at
+  // all) arrives as a Volatile REFERENCE, not a value. Reading it directly yields
+  // `[object Object]`, which then leaks into connection errors such as
+  // "password is not configured (set [object Object])".
+  const effectiveConfig = (): Config => unwrapConfig(source())
+
   // V0.5.0/V0.5.11: the effective connection is resolved per call so a
   // settings change (or a different selected profile) takes effect on the next
   // connect without restarting the Host. The profile wins field by field.
   const getConfig = (): Config => {
-    // V0.4.2: the settings card writes an explicit overlay file; it wins over
-    // the composed config so the UI can configure the plugin on any DSH build.
-    const cfg = { ...source(), ...readOverlay() } as Config
+    const cfg = effectiveConfig()
     const conn = resolveConnection(cfg)
     const knownHostsPath = typeof cfg.knownHostsPath === 'string' && cfg.knownHostsPath.length > 0
       ? cfg.knownHostsPath
@@ -115,35 +123,9 @@ export function apply(ctx: Context, config: JumpServerConfig): void {
     return { ...cfg, host: conn.host, port: conn.port, username: conn.username, passwordEnv: conn.passwordEnv, knownHostsPath }
   }
 
-  /** Store a credential value when the host's credential service supports it. */
-  const storeCredential = async (ref: string, value: string): Promise<boolean> => {
-    try {
-      const credentials = ctx.get('credentials') as
-        | { set?: (r: string, v: string) => unknown; write?: (r: string, v: string) => unknown; store?: (r: string, v: string) => unknown }
-        | undefined
-      const write = credentials?.set ?? credentials?.write ?? credentials?.store
-      if (typeof write !== 'function') return false
-      await Promise.resolve(write.call(credentials, ref, value))
-      return true
-    } catch {
-      return false
-    }
-  }
-
-  /** The settings card's read view: effective values, secrets stripped. */
-  const configView = (): { value: Record<string, unknown>; user: Record<string, unknown>; secrets: string[] } => {
-    const cfg = getConfig() as unknown as Record<string, unknown>
-    const { password, ...rest } = cfg
-    return {
-      value: { ...rest, passwordConfigured: typeof password === 'string' && password.length > 0 },
-      user: readOverlay(),
-      secrets: ['password'],
-    }
-  }
-
   /** Where the live identity comes from (never the value itself). */
   const connectionSource = (): { source: string; profileId?: string; profileLabel?: string } => {
-    const conn = resolveConnection(source())
+    const conn = resolveConnection(effectiveConfig())
     return {
       source: conn.source,
       ...(conn.profileId !== undefined ? { profileId: conn.profileId } : {}),
@@ -245,41 +227,74 @@ export function apply(ctx: Context, config: JumpServerConfig): void {
     return bundle.manager.close()
   }
 
-  // Live settings seam; supports current provider API and the legacy helper.
+  // DSH 0.2.x settings: the Loader already publishes this entry's Config under
+  // its profile entry id, so the plugin only has to (a) allow the UI to
+  // auto-generate a page for this instance and (b) react to live edits.
+  //
+  // The previous installSection()/installSettingsSection() calls were a 0.1-era
+  // API: neither exists in @deepseek-ai/dsh-settings 0.2.x, so both branches
+  // silently no-op'd, the namespace was never served, and the settings card
+  // never mounted - with no error anywhere.
   ctx.effect(
-    async () => {
+    () => {
       mark('settings:start')
-      mark('settings:resolve')
       const settings = (ctx as unknown as { get?: (name: string) => unknown }).get?.('settings') as
-        | { installSection?: (...args: unknown[]) => void }
+        | {
+            configure?: (presentation: { auto?: boolean }, owner?: unknown) => () => void
+            describe?: () => Array<{ ns?: string; autoGenerate?: boolean }>
+          }
         | undefined
-      const hooks = {
-        setSource: (current: () => Config) => {
-          source = current
-        },
-        onChange: () => {
-          registry.applyScrollback(Math.max(200, source().terminalScrollback))
-        },
-      }
-      if (settings !== undefined && typeof settings.installSection === 'function') {
-        settings.installSection(ctx, JS_SETTINGS_NAMESPACE, Config, config, hooks)
+      if (settings === undefined) {
+        mark('settings:absent')
+        ctx.logger.warn('[jumpserver] no settings service on this Host; configuration is composition-only')
         return () => undefined
       }
+      const dispose = typeof settings.configure === 'function' ? settings.configure({ auto: true }, ctx) : undefined
+      mark('settings:configured')
       try {
-        const mod = (await import('@deepseek-ai/dsh-settings')) as unknown as {
-          installSettingsSection?: (owner: Context, ns: string, schema: unknown, entry: JumpServerConfig, hk: typeof hooks) => void
-        }
-        if (typeof mod.installSettingsSection === 'function') {
-          mod.installSettingsSection(ctx, JS_SETTINGS_NAMESPACE, Config, config, hooks)
-          return () => undefined
-        }
-      } catch {
-        /* provider-less deployment: keep the composition entry */
+        const served = (typeof settings.describe === 'function' ? settings.describe() : []).map((d) => String(d.ns ?? ''))
+        mark('settings:namespaces:' + served.join(','))
+        mark(served.includes(JS_SETTINGS_NAMESPACE) ? 'settings:namespace-ok' : 'settings:namespace-missing')
+      } catch (error) {
+        mark('settings:describe-failed')
       }
-      ctx.logger.warn('[jumpserver] no settings seam available; using composition config only')
-      return () => undefined
+      // One confirmation probe: the namespace must actually be served, because a
+      // A Config that fails the Host's volatile projection is skipped SILENTLY and
+      // the settings card never mounts, so keep one cheap assertion on record.
+      // tests/config-volatile.test.ts pins the schema side.
+      try {
+        const served = (typeof settings.describe === 'function' ? settings.describe() : []).map((d) => String(d.ns ?? ''))
+        mark(served.includes(JS_SETTINGS_NAMESPACE) ? 'settings:namespace-ok' : 'settings:namespace-missing')
+        if (!served.includes(JS_SETTINGS_NAMESPACE)) {
+          ctx.logger.warn('[jumpserver] settings namespace not served; the settings card will not mount')
+        }
+      } catch (error) {
+        mark('settings:describe-failed')
+        ctx.logger.warn('[jumpserver] settings.describe() failed: ' + String(error))
+      }
+      return () => {
+        try {
+          dispose?.()
+        } catch {
+          /* policy already released */
+        }
+      }
     },
-    'jumpserver: settings section',
+    'jumpserver: settings page policy',
+  )
+
+  // Live edits: re-budget the terminal observers when the operator changes it.
+  ctx.effect(
+    () => {
+      const settings = (ctx as unknown as { get?: (name: string) => unknown }).get?.('settings') as
+        | { subscribe?: (listener: () => void) => () => void }
+        | undefined
+      const off = typeof settings?.subscribe === 'function' ? settings.subscribe(() => {
+        registry.applyScrollback(Math.max(200, getConfig().terminalScrollback))
+      }) : undefined
+      return () => { try { off?.() } catch { /* already disposed */ } }
+    },
+    'jumpserver: settings live updates',
   )
 
   // Audit sink via the DSH-native storage domain.
@@ -342,6 +357,7 @@ export function apply(ctx: Context, config: JumpServerConfig): void {
           terminateConversationJumpServer,
           (sessionId) => recentAudits.get(sessionId) ?? [],
           (sessionId) => consoleUrlFor(sessionId),
+          resolvePassword,
         ))
       })
       mark('tools:ops')
@@ -628,13 +644,6 @@ export function apply(ctx: Context, config: JumpServerConfig): void {
 
       return { ok: false, code: 'NOT_NAVIGABLE', message: '会话状态 ' + st.state + ' 下无法执行人工输入（先连接并进入服务器）', state: st.state, sessionId }
     },
-    credentialWriteFor: storeCredential,
-    configReadFor: () => configView(),
-    configWriteFor: (patch) => {
-      writeOverlayPatch(patch as Record<string, unknown>)
-      registry.applyScrollback(Math.max(200, getConfig().terminalScrollback))
-      return configView()
-    },
     consoleUrlFor: (sessionId) => (sessionId === undefined || sessionId.length === 0 ? consoleUrlFor('') : consoleUrlFor(sessionId)),
     diagFor: (event, detail) => {
       try {
@@ -674,16 +683,16 @@ export function apply(ctx: Context, config: JumpServerConfig): void {
     },
   }
 
-  // V0.4.0: the desktop-friendly console. It needs no client plugin and no
-  // webServer route, so it starts whenever the plugin does; the sidebar tab
-  // (which needs dsh-better-sidebar) stays optional and independent of it.
+  // Desktop 0.2.x: the loopback console. It needs no webServer route, so it
+  // starts whenever the plugin does; the native sidebarRight Browser Tab that
+  // opens it is independent of the console's own lifetime.
   ctx.effect(
     () => {
       mark('console:start')
       if (getConfig().consoleEnabled === false) { mark('console:disabled'); return () => undefined }
       let disposed = false
       let handle: ConsoleHandle | undefined
-      void startConsoleServer(bridgeServices, { port: getConfig().consolePort ?? 0 })
+      void startConsoleServer(bridgeServices, { port: getConfig().consolePort ?? DEFAULT_CONSOLE_PORT })
         .then((started) => {
           if (disposed) {
             void started.close()
@@ -692,10 +701,9 @@ export function apply(ctx: Context, config: JumpServerConfig): void {
           handle = started
           mark('console:bound:' + String(started.port))
           consoleUrlFor = (sessionId: string) => started.urlFor(sessionId)
-          writeStateFile(jumpHomeConsole(), { port: started.port, token: started.token, url: started.urlFor(undefined) })
-          ctx.logger.warn(
-            '[dsh-jumpserver] console: ' + started.urlFor(undefined) + ' (append &session=<conversationId>, or read consoleUrl from jumpserver_status)',
-          )
+          // The token never leaves Host memory and the HttpOnly cookie.
+          writeStateFile(jumpHomeConsole(), { port: started.port, url: started.urlFor(undefined) })
+          ctx.logger.warn('[dsh-jumpserver] console: ' + started.urlFor(undefined))
         })
         .catch((error) => {
           failures.push('console: ' + (error instanceof Error ? error.message : String(error)))

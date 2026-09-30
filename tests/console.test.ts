@@ -1,13 +1,14 @@
 /**
- * Embedded console (V0.4.0): the desktop-friendly way in.
+ * Embedded console (Desktop 0.2.x): the native Browser Tab way in.
  *
  * These pin the security model, because the console exposes a PTY mirror and
  * manual execution:
- *   1. loopback bind only;
- *   2. every request needs the per-process token (page URL or header);
- *   3. the API is the plugin's existing bridge surface — no extra route, no
+ *   1. loopback bind only, with Host/Origin/Sec-Fetch-Site checks;
+ *   2. the bearer token never leaves Host memory / an HttpOnly cookie;
+ *   3. the API is the plugin's existing bridge surface - no extra route, no
  *      second policy.
  */
+import { connect } from 'node:net'
 import { afterEach, describe, expect, it } from 'vitest'
 import { startConsoleServer, type ConsoleHandle } from '../src/runtime/console.js'
 import type { BridgeServices } from '../src/bridge/bridge.js'
@@ -50,6 +51,18 @@ function services(): BridgeServices {
   }
 }
 
+/** Minimal raw HTTP/1.1 request so tests can forge headers fetch() forbids. */
+async function rawRequest(port: number, request: string): Promise<string> {
+  return new Promise<string>((resolve, reject) => {
+    const socket = connect(port, '127.0.0.1', () => socket.write(request))
+    let received = ''
+    socket.setEncoding('utf8')
+    socket.on('data', (chunk: string) => { received += chunk })
+    socket.on('end', () => resolve(received))
+    socket.on('error', reject)
+  })
+}
+
 const started: ConsoleHandle[] = []
 afterEach(async () => {
   for (const handle of started.splice(0)) await handle.close()
@@ -61,55 +74,69 @@ async function start(): Promise<ConsoleHandle> {
   return handle
 }
 
-describe('V0.4.0 embedded console transport', () => {
-  it('binds loopback and hands out a session-scoped token URL', async () => {
+describe('embedded console transport', () => {
+  it('binds loopback and exposes only a token-free stable URL', async () => {
     const handle = await start()
     expect(handle.port).toBeGreaterThan(0)
     expect(handle.token.length).toBeGreaterThanOrEqual(32)
     const base = handle.urlFor(undefined)
-    expect(base.startsWith('http://127.0.0.1:' + String(handle.port) + '/?token=')).toBe(true)
-    // A conversation-scoped URL carries the session so the page is not a
-    // cross-conversation view.
-    expect(handle.urlFor('conv-1')).toContain('&session=conv-1')
+    expect(base).toBe('http://127.0.0.1:' + String(handle.port) + '/')
+    // Session selection belongs in a fragment, so the URL itself is stable.
+    expect(handle.urlFor('conv-1')).toBe(base)
+    expect(base).not.toContain('token')
+    expect(base).not.toContain('session')
   })
 
-  it('refuses the page and the API without the token', async () => {
+  it('bootstraps an HttpOnly cookie and refuses API calls without it', async () => {
     const handle = await start()
-    const noToken = await fetch('http://127.0.0.1:' + String(handle.port) + '/')
-    expect(noToken.status).toBe(403)
-    expect((await noToken.json() as { code?: string }).code).toBe('CONSOLE_TOKEN_REQUIRED')
+    const page = await fetch(handle.urlFor(undefined))
+    expect(page.status).toBe(200)
+    const setCookie = page.headers.get('set-cookie') ?? ''
+    expect(setCookie).toContain('HttpOnly')
+    expect(setCookie).toContain('SameSite=Strict')
+    expect(setCookie).toContain('Path=/')
+    expect(setCookie).not.toContain('session=')
+    expect(setCookie).not.toContain('__Host-')
 
-    const wrongToken = await fetch('http://127.0.0.1:' + String(handle.port) + '/?token=deadbeef')
-    expect(wrongToken.status).toBe(403)
+    const crossSite = await fetch(handle.urlFor(undefined), { headers: { origin: 'https://example.org' } })
+    expect(crossSite.status).toBe(403)
+    // fetch() refuses to override Host, so DNS rebinding is probed on a socket.
+    expect(await rawRequest(handle.port, 'GET / HTTP/1.1\r\nHost: evil.example\r\nConnection: close\r\n\r\n'))
+      .toContain('403')
+    expect(await rawRequest(handle.port, 'GET / HTTP/1.1\r\nHost: 127.0.0.1:' + String(handle.port) + '\r\nConnection: close\r\n\r\n'))
+      .toContain('200')
 
-    const apiNoToken = await fetch('http://127.0.0.1:' + String(handle.port) + '/api/jumpserver.status', { method: 'POST', body: '{}' })
-    expect(apiNoToken.status).toBe(403)
+    const apiNoCookie = await fetch(handle.urlFor(undefined) + 'api/jumpserver.status', { method: 'POST', body: '{}' })
+    expect(apiNoCookie.status).toBe(403)
+    expect((await apiNoCookie.json() as { code?: string }).code).toBe('CONSOLE_COOKIE_REQUIRED')
   })
 
-  it('serves the page with the token and the conversation embedded', async () => {
+  it('serves a self-contained page without embedding token or conversation id', async () => {
     const handle = await start()
     const res = await fetch(handle.urlFor('conv-1'))
     expect(res.status).toBe(200)
     const html = await res.text()
     expect(html).toContain('JumpServer 控制台')
-    expect(html).toContain(JSON.stringify(handle.token))
-    expect(html).toContain(JSON.stringify('conv-1'))
-    // Self-contained: no remote asset may be referenced.
+    expect(html).not.toContain(handle.token)
+    expect(html).not.toContain('conv-1')
+    expect(html).not.toContain('__TOKEN__')
     expect(html).not.toMatch(/https?:\/\//)
   })
 
-  it('exposes exactly the bridge routes behind the token', async () => {
+  it('exposes exactly the bridge routes behind the cookie', async () => {
     const handle = await start()
     const base = 'http://127.0.0.1:' + String(handle.port)
+    const page = await fetch(base + '/')
+    const cookie = (page.headers.get('set-cookie') ?? '').split(';', 1)[0] ?? ''
     const status = await fetch(base + '/api/jumpserver.status', {
       method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-console-token': handle.token },
+      headers: { 'content-type': 'application/json', cookie },
       body: JSON.stringify({ sessionId: 'conv-1' }),
     })
     expect(status.status).toBe(200)
     expect((await status.json() as { ok?: boolean }).ok).toBe(true)
 
-    const unknown = await fetch(base + '/api/jumpserver.nope', { method: 'POST', headers: { 'x-console-token': handle.token }, body: '{}' })
+    const unknown = await fetch(base + '/api/jumpserver.nope', { method: 'POST', headers: { cookie }, body: '{}' })
     expect(unknown.status).toBe(404)
   })
 

@@ -308,18 +308,51 @@ export function resolveApiKey(config: RiskJudgeConfig, env: NodeJS.ProcessEnv = 
 export async function judgeCommandRisk(
   command: string,
   config: RiskJudgeConfig | undefined,
+  resolveCredential?: (ref: string) => Promise<string | undefined>,
 ): Promise<RiskJudgeVerdict | null> {
-  if (config === undefined || config.enabled !== true) return null
+  return (await judgeCommandRiskDetailed(command, config, resolveCredential)).verdict
+}
+
+/** Why the judge produced no verdict. Never changes the gate's decision. */
+export type RiskJudgeError = 'disabled' | 'no-command' | 'no-credential' | 'unreachable' | 'timeout' | 'http-error' | 'bad-payload'
+
+/**
+ * Why the judge produced no verdict.
+ *
+ * The settings card stores the API key in the DSH credential domain, NOT in
+ * process.env, so the original env-only lookup could never see a key the user
+ * actually saved and the judge stayed silent forever. `resolveCredential` is
+ * the same credential seam the SSH password already uses.
+ *
+ * The reason is reported so "configured but not working" stops looking
+ * identical to "not configured". It never changes the gate's decision.
+ */
+export async function judgeCommandRiskDetailed(
+  command: string,
+  config: RiskJudgeConfig | undefined,
+  resolveCredential?: (ref: string) => Promise<string | undefined>,
+): Promise<{ verdict: RiskJudgeVerdict | null; error?: RiskJudgeError }> {
+  if (config === undefined || config.enabled !== true) return { verdict: null, error: 'disabled' }
   const trimmed = command.trim()
-  if (trimmed.length === 0) return null
+  if (trimmed.length === 0) return { verdict: null, error: 'no-command' }
 
   const key = redactCommandForJudge(trimmed, config.redactNetwork)
   const now = Date.now()
   const hit = cache.get(key)
-  if (hit !== undefined && hit.expiresAt > now) return { ...hit.verdict, cached: true, latencyMs: 0 }
+  if (hit !== undefined && hit.expiresAt > now) return { verdict: { ...hit.verdict, cached: true, latencyMs: 0 } }
 
-  const apiKey = resolveApiKey(config)
-  if (apiKey.length === 0) return null
+  // DSH credential domain first (where the settings card writes), then the
+  // historical env/file lookup for deployments that still export the variable.
+  let apiKey = ''
+  if (resolveCredential !== undefined && config.apiKeyEnv.trim().length > 0) {
+    try {
+      apiKey = (await resolveCredential(config.apiKeyEnv)) ?? ''
+    } catch {
+      apiKey = ''
+    }
+  }
+  if (apiKey.trim().length === 0) apiKey = resolveApiKey(config)
+  if (apiKey.trim().length === 0) return { verdict: null, error: 'no-credential' }
 
   const started = Date.now()
   let payload: unknown
@@ -330,17 +363,18 @@ export async function judgeCommandRisk(
       body: JSON.stringify({ state: buildState(key), model: config.model, questions: JUDGE_QUESTIONS }),
       signal: AbortSignal.timeout(Math.max(200, config.timeoutMs)),
     })
-    if (response.ok !== true) return null
+    if (response.ok !== true) return { verdict: null, error: 'http-error' }
     payload = await response.json()
-  } catch {
-    return null
+  } catch (error) {
+    const name = error instanceof Error ? error.name : ''
+    return { verdict: null, error: name === 'TimeoutError' || name === 'AbortError' ? 'timeout' : 'unreachable' }
   }
 
   const parsed = parseVerdict(payload)
-  if (parsed === null) return null
+  if (parsed === null) return { verdict: null, error: 'bad-payload' }
   const verdict: RiskJudgeVerdict = { ...parsed, cached: false, latencyMs: Date.now() - started }
   remember(key, verdict, config.cacheTtlSeconds, now)
-  return verdict
+  return { verdict }
 }
 
 /** True only for a real, finite probability — a missing field is not "safe". */
