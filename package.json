@@ -61,7 +61,7 @@
     "@deepseek-ai/schemastery": "^3.18.1"
   },
   "devDependencies": {
-    "esbuild": "^0.24.0",
+    "esbuild": "^0.21.5",
     "@deepseek-ai/cordis": "^4.0.1",
     "@deepseek-ai/cordis-plugin-include": "^1.0.9",
     "@deepseek-ai/cordis-plugin-timer": "^1.1.4",
