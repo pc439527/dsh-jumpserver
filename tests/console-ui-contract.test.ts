@@ -41,3 +41,36 @@ describe('console interrupt control', () => {
     expect(page).toContain('runningJobs');
   })
 })
+describe('console asset picker', () => {
+  it('passes search, group and refresh through to the bridge', () => {
+    // The route already accepted these; the pane ignored all of them.
+    expect(page).toContain('payload.filter');
+    expect(page).toContain('payload.group');
+    expect(page).toContain('payload.refresh');
+  })
+
+  it('offers search, group filter and refresh controls', () => {
+    expect(page).toContain('id="assetQuery"');
+    expect(page).toContain('id="assetGroup"');
+    expect(page).toContain('id="assetRefresh"');
+  })
+
+  it('lets an operator enter an asset from its row', () => {
+    expect(page).toContain('data-enter');
+    expect(page).toContain('enterAsset');
+  })
+
+  it('debounces search so each keystroke is not a bastion command', () => {
+    expect(page).toContain('assetTimer');
+    expect(page).toContain('clearTimeout(assetTimer)');
+  })
+})
+
+describe('console terminal scrollback', () => {
+  it('caps the DOM so a long stream cannot grow the document forever', () => {
+    expect(page).toContain('TERM_MAX_ROWS');
+    expect(page).toContain('trimTerm');
+    // Old rows are dropped in one batch, not one layout per line.
+    expect(page).toContain('TERM_TRIM_BATCH');
+  })
+})
