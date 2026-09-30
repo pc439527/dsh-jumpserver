@@ -224,7 +224,7 @@ async function recordRefusal(
     batchId?: string
     batchIndex?: number
   },
-): Promise<void> {
+): Promise<string | undefined> {
   try {
     await services.manager.recordDenied({
       operation: input.operation,
@@ -238,9 +238,25 @@ async function recordRefusal(
       batchId: input.batchId,
       batchIndex: input.batchIndex,
     })
-  } catch {
-    /* never let an audit failure alter the gate's decision */
+    return undefined
+  } catch (error) {
+    // An audit failure must never change the gate's decision, but it MUST be
+    // visible: "a refusal always leaves a trace" is a safety promise, and a
+    // silently swallowed write makes a broken promise indistinguishable from a
+    // refusal that was simply never recorded. The caller attaches this to the
+    // thrown error so it reaches the tool result and the console.
+    return error instanceof Error ? (error.stack ?? error.message) : String(error)
   }
+}
+
+/** Re-throw the gate's decision, carrying an audit-write failure when there was one. */
+function rethrowWithAuditFailure(error: unknown, auditFailure: string | undefined): never {
+  if (auditFailure === undefined) throw error
+  const code = error instanceof JumpServerError ? error.code : 'COMMAND_BLOCKED'
+  const message = error instanceof Error ? error.message : String(error)
+  const prior = error instanceof JumpServerError ? error.detail : undefined
+  const detail = (prior !== undefined && prior.length > 0 ? prior + ' | ' : '') + 'AUDIT_WRITE_FAILED: ' + auditFailure
+  throw new JumpServerError(code, message, detail)
 }
 
 function verifyTarget(services: GateServices): void {
@@ -278,7 +294,7 @@ export async function gateCommand(services: GateServices, exec: ToolRunContext, 
     } catch (error) {
       // V0.5.9: exec's approval runs inline (exec has no beforeExec), so this is
       // the only place a DENIED record can come from on the exec path.
-      await recordRefusal(services, exec, {
+      const auditFailure = await recordRefusal(services, exec, {
         operation: 'exec',
         command,
         classification,
@@ -286,7 +302,7 @@ export async function gateCommand(services: GateServices, exec: ToolRunContext, 
         kind: 'denied',
         riskJudge: judge.note,
       })
-      throw error
+      rethrowWithAuditFailure(error, auditFailure)
     }
     return {
       risk: classification.risk,
@@ -297,14 +313,17 @@ export async function gateCommand(services: GateServices, exec: ToolRunContext, 
     }
   }
   // V0.5.9: a rule refusal is recorded, not only thrown.
-  await recordRefusal(services, exec, {
+  const auditFailure = await recordRefusal(services, exec, {
     operation: 'exec',
     command,
     classification,
     reason: decision.reason,
     kind: 'blocked',
   })
-  throw new JumpServerError('COMMAND_BLOCKED', command + ' -- ' + decision.reason)
+  rethrowWithAuditFailure(
+    new JumpServerError('COMMAND_BLOCKED', command + ' -- ' + decision.reason),
+    auditFailure,
+  )
 }
 
 /**
