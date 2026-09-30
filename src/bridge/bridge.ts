@@ -77,6 +77,12 @@ export interface BridgeServices {
    * <dsh home>/jumpserver/client-trace.jsonl.
    */
   diagFor?: (event: string, detail?: Record<string, unknown>) => void
+  /**
+   * True when a console page for this session pinged recently. Lets the client
+   * decide whether to open another console tab without stacking duplicates: the
+   * browser tab type is multiple, so the right column cannot dedupe it itself.
+   */
+  consoleActiveFor?: (sessionId: string) => boolean
   /** V0.4.0: streaming jobs of one conversation (never another's). */
   jobsFor?: (sessionId: string) => Promise<Array<Record<string, unknown>>>
   /** V0.4.5: idempotent job stop (one Ctrl+C, shared verdict). */
@@ -404,6 +410,27 @@ export function registerBridgeRoutes(webServer: {
           json(res, 200, result)
         } catch (error) {
           json(res, 500, { ok: false, code: 'INTERRUPT_FAILED', message: error instanceof Error ? error.message : String(error) })
+        }
+      })()
+    },
+  }))
+
+  disposers.push(webServer.register({
+    kind: 'exact',
+    path: '/api/jumpserver.consoleAlive',
+    handler: (req, res) => {
+      if (!requirePost(req, res)) return
+      void (async () => {
+        try {
+          const body = await readJsonBody(req)
+          const sessionId = validSessionId(body.sessionId)
+          if (sessionId === null) {
+            json(res, 400, { ok: false, code: 'INVALID_REQUEST', message: 'valid sessionId is required' })
+            return
+          }
+          json(res, 200, { ok: true, active: services.consoleActiveFor?.(sessionId) === true })
+        } catch (error) {
+          json(res, 500, { ok: false, code: 'CONSOLE_ALIVE_FAILED', message: error instanceof Error ? error.message : String(error) })
         }
       })()
     },

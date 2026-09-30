@@ -71,29 +71,27 @@ function diag(event: string, detail?: Record<string, unknown>): void {
 }
 
 /**
- * Sessions whose console tab we already opened, persisted so a page reload does
- * not stack another identical tab in the right column.
+ * Ask the Host whether a console page for this session is currently open.
  *
- * A module-level Set was not enough: it is reset on every reload, so each visit
- * to the settings page opened another JumpServer console tab (observed: three
- * side by side). sessionStorage survives reloads within the same window, and it
- * is cleared when the window closes - exactly the lifetime we want.
+ * The right column cannot dedupe for us - the browser tab type is registered as
+ * `multiple`, so every openTab makes a new tab. A module Set reset on every
+ * reload (which stacked duplicates) and a sessionStorage record (which kept
+ "opening" permanently recorded and so refused to open again after the
+ * operator closed the tab) are both wrong. Live presence is the only signal that
+ * answers both questions correctly.
  */
-const OPENED_KEY = 'dsh-jumpserver:console-opened'
-
-function alreadyOpened(sessionId: string): boolean {
+async function consoleAlreadyOpen(sessionId: string): Promise<boolean> {
   try {
-    const raw = globalThis.sessionStorage?.getItem(OPENED_KEY)
-    const parsed: unknown = raw === null || raw === undefined ? [] : JSON.parse(raw)
-    const ids: string[] = Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === 'string') : []
-    const list = ids
-    if (list.includes(sessionId)) return true
-    list.push(sessionId)
-    // Bound the record so a long-lived window cannot grow it without limit.
-    globalThis.sessionStorage?.setItem(OPENED_KEY, JSON.stringify(list.slice(-50)))
-    return false
+    const response = await fetch('/api/jumpserver.consoleAlive', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ sessionId }),
+    })
+    if (!response.ok) return false
+    const value = await response.json() as { active?: unknown }
+    return value.active === true
   } catch {
-    // A blocked/absent sessionStorage must not stop the console from opening.
+    // Never block the console on a failed probe.
     return false
   }
 }
@@ -137,12 +135,15 @@ export function apply(ctx: BrowserCtx): void {
     const maybeOpen = (): void => {
       const sessionId = current.getSnapshot().key
       if (typeof sessionId !== 'string' || sessionId.length === 0 || inFlight) return
-      if (alreadyOpened(sessionId)) return
       if ((scope.getSnapshot().value ?? {})['autoOpenTerminal'] !== true) return
       if (side.sidebarRightTabs.get('browser') === undefined) return
       inFlight = true
-      void fetchStatus(sessionId, undefined)
-        .then((status) => {
+      void Promise.all([fetchStatus(sessionId, undefined), consoleAlreadyOpen(sessionId)])
+        .then(([status, alreadyOpen]) => {
+          // Live presence: a console is already showing this conversation, so do
+          // not stack another tab beside it. Once it is closed the heartbeat
+          // stops and the next tick opens a fresh one.
+          if (alreadyOpen) return
           if (disposed || status?.granted !== true || typeof status.consoleUrl !== 'string') return
           // The conversation id travels in the fragment: it never reaches the Host,
           // so it cannot leak into access logs or the discovery file.

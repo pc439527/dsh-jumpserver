@@ -139,6 +139,29 @@ export function apply(ctx: Context, config: JumpServerConfig): void {
   const sessionGate = new Semaphore(resolveConcurrency(getConfig()).maxSessions)
 
   /**
+   * Console pages heartbeat here while they are open.
+   *
+   * The right column cannot dedupe for us: the browser tab type is registered as
+   * `multiple`, so every openTab creates a new tab. Tracking presence here lets the
+   * client open a console only when none is currently showing it - and, crucially,
+   * open again as soon as the operator closes the previous one.
+   */
+  const consoleSeen = new Map<string, number>()
+  const CONSOLE_ALIVE_MS = 12000
+  const noteConsoleAlive = (sessionId: string): void => {
+    consoleSeen.set(sessionId, Date.now())
+  }
+  const consoleActiveFor = (sessionId: string): boolean => {
+    const at = consoleSeen.get(sessionId)
+    if (at === undefined) return false
+    if (Date.now() - at > CONSOLE_ALIVE_MS) {
+      consoleSeen.delete(sessionId)
+      return false
+    }
+    return true
+  }
+
+  /**
    * Resolve password per connection; never cache or log it.
    * V0.3.1: an optional credential-ref (env name) override lets the bridge's
    * draft connection test resolve against the DRAFT passwordEnv instead of the
@@ -645,7 +668,12 @@ export function apply(ctx: Context, config: JumpServerConfig): void {
       return { ok: false, code: 'NOT_NAVIGABLE', message: '会话状态 ' + st.state + ' 下无法执行人工输入（先连接并进入服务器）', state: st.state, sessionId }
     },
     consoleUrlFor: (sessionId) => (sessionId === undefined || sessionId.length === 0 ? consoleUrlFor('') : consoleUrlFor(sessionId)),
+    consoleActiveFor,
     diagFor: (event, detail) => {
+      if (event === 'console:alive' && detail !== undefined) {
+        const sid = typeof detail['sessionId'] === 'string' ? detail['sessionId'] : ''
+        if (sid.length > 0) noteConsoleAlive(sid)
+      }
       try {
         appendFileSync(jumpHomeClientTrace(), JSON.stringify({ at: new Date().toISOString(), event, detail }) + '\n', 'utf8')
       } catch {
