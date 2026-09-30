@@ -98,9 +98,10 @@ describe('an audit write failure must not vanish', () => {
     const manager = await connectedManager(sink, 'AUTO')
     const broken = Object.create(manager) as Record<string, unknown>
     broken['recordDenied'] = async () => { throw new Error('sink exploded') }
+    const brokenManager = broken as unknown as SessionManager
     const services = {
       getConfig: () => ({ permissionMode: 'AUTO' as const }),
-      manager: broken,
+      manager: brokenManager,
       approval: { request: async () => 'rejected' } as never,
     }
     // A broken sink must NOT flip the decision: the command stays refused, and the
