@@ -203,11 +203,16 @@ export function parseLoadavg(text: string): number[] | null {
   return nums.every((n) => Number.isFinite(n)) ? nums : null
 }
 
+/** `free` prints localised row labels: Mem/内存, Swap/交换, Buffers/缓冲. */
+const MEM_ROW = /^(?:mem|\u5185\u5b58)\s*[:：]/i
+
 export function parseMemory(text: string): HostInventory['memory'] {
   const out: HostInventory['memory'] = { totalMb: null, usedMb: null, availableMb: null, usedPct: null }
   for (const raw of text.split('\n')) {
     const line = raw.trim()
-    if (line.toLowerCase().startsWith('mem:')) {
+    // A zh_CN host prints 内存: / 交换:, so matching the English label alone
+    // silently reported no memory at all on every localised system.
+    if (MEM_ROW.test(line)) {
       const nums = line.match(/\d+/g)
       // `free -m` Mem line: total used free shared buff/cache available (6 numbers).
       // Older `free` and some BusyBox builds only emit total/used/free (3 numbers);
@@ -224,6 +229,7 @@ export function parseMemory(text: string): HostInventory['memory'] {
   }
   return out
 }
+
 
 export function parseDisks(text: string): DiskEntry[] {
   const out: DiskEntry[] = []
