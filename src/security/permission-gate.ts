@@ -386,10 +386,25 @@ export async function gateCommandForNavigation(services: GateServices, exec: Too
     judgeNote: judge.note,
     beforeExec: async () => {
       verifyTarget(services)
-      await askApproval(services, exec, command, classification, verdict, {
-        autoAllowEnabled,
-        autoAllowRefusal: judge.reason,
-      })
+      // The approval runs HERE (deferred until the asset is entered), so this is
+      // the only place a DENIED record can come from on the run path. Without
+      // it a rejected jumpserver_run left no audit trace at all.
+      try {
+        await askApproval(services, exec, command, classification, verdict, {
+          autoAllowEnabled,
+          autoAllowRefusal: judge.reason,
+        })
+      } catch (error) {
+        const auditFailure = await recordRefusal(services, exec, {
+          operation: 'run',
+          command,
+          classification,
+          reason: APPROVAL_DENIED_REASON,
+          kind: 'denied',
+          riskJudge: judge.note,
+        })
+        rethrowWithAuditFailure(error, auditFailure)
+      }
     },
   }
 }
@@ -477,10 +492,25 @@ export async function gateCommandsForNavigation(
     for (const item of stillPending) {
       item.gated.beforeExec = async () => {
         verifyTarget(services)
-        await askApproval(services, exec, item.command, item.gated.classification, verdicts.get(item) ?? null, {
-          autoAllowEnabled,
-          autoAllowRefusal: refusals.get(item) ?? '',
-        })
+        // Deferred approval: this is the only place a DENIED batch item can be
+        // recorded, exactly as on the single-command run path.
+        try {
+          await askApproval(services, exec, item.command, item.gated.classification, verdicts.get(item) ?? null, {
+            autoAllowEnabled,
+            autoAllowRefusal: refusals.get(item) ?? '',
+          })
+        } catch (error) {
+          const auditFailure = await recordRefusal(services, exec, {
+            operation: 'batch',
+            command: item.command,
+            classification: item.gated.classification,
+            reason: APPROVAL_DENIED_REASON,
+            kind: 'denied',
+            riskJudge: item.gated.judgeNote,
+            batchIndex: stillPending.indexOf(item),
+          })
+          rethrowWithAuditFailure(error, auditFailure)
+        }
       }
     }
     return gated.map((item) => item.gated)
@@ -510,6 +540,22 @@ export async function gateCommandsForNavigation(
     } catch (error) {
       state = 'failed'
       failure = error
+      // A grouped approval covers every pending item, so record each command
+      // that was refused rather than only the first one.
+      for (const item of stillPending) {
+        const auditFailure = await recordRefusal(services, exec, {
+          operation: 'batch',
+          command: item.command,
+          classification: item.gated.classification,
+          reason: APPROVAL_DENIED_REASON,
+          kind: 'denied',
+          riskJudge: item.gated.judgeNote,
+          batchIndex: stillPending.indexOf(item),
+        })
+        if (auditFailure !== undefined) {
+          rethrowWithAuditFailure(error, auditFailure)
+        }
+      }
       throw error
     }
   }
