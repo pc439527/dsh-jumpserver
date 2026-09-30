@@ -123,7 +123,8 @@ export async function inspectTargets(
         if (step === undefined) return
         if (cmd.error !== null) return
         if (cmd.exitCode !== null && cmd.exitCode !== 0 && cmd.output.trim().length === 0) return
-        applyProbe(inventory, step.id, cmd.output, cmd.exitCode)
+        // Pass the command so the parser can drop the shell's echo first.
+        applyProbe(inventory, step.id, cmd.output, cmd.exitCode, step.command)
       })
       inventory.roles = detectRoles(inventory)
       return inventory
