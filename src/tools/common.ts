@@ -23,6 +23,8 @@ export const RESULT_SCHEMA = {
     commandStatus: { type: 'string' },
     /** V0.5.8: the semantic judge's verdict when it decided (or tried to decide). */
     riskJudge: { type: 'string' },
+    /** Why an exit-0 command produced no output (dropped over-long PTY line). */
+    outputNote: { type: 'string' },
     /** V0.5.2: deferred connection completeness (CONFIG_INCOMPLETE reporting). */
     connectionComplete: { type: 'boolean' },
     connectionMissing: { type: 'array', items: { type: 'string' } },
@@ -163,6 +165,40 @@ function completedFailure(outcome: { commandStatus: string; exitCode: number; ex
     executionState: outcome.executionState,
   })
   return failure === null ? {} : { code: failure.code, message: failure.message }
+}
+
+/**
+ * Commands that legitimately produce no output, so an empty result is not
+ * suspicious. Anything else returning empty with exit 0 is.
+ */
+const SILENT_COMMANDS = /^(true|:|exit|sleep|cd|pushd|popd|export|umask|set|stty|clear|reset|nop)$/
+
+/**
+ * Why an exit-0 command can still come back with no output.
+ *
+ * A PTY's canonical line discipline caps one line at roughly 4KB, so a large
+ * single-line response (a minified JSON API payload, a base64 blob) is silently
+ * discarded by the far end while the command itself exits 0. That looks
+ * identical to "the command succeeded and printed nothing", which is exactly
+ * the wrong conclusion. The bastion cannot be changed from here, so the result
+ * says so instead.
+ *
+ * @returns a note for the caller to attach, or undefined when output is present.
+ */
+export function emptyOutputNote(command: string, output: string, exitCode: number | null): string | undefined {
+  if (exitCode !== 0) return undefined
+  if (output.trim().length > 0) return undefined
+  const first = command.trim().split(/[|;&]/, 1)[0]?.trim() ?? ''
+  if (first.length === 0) return undefined
+  // Compare the executable alone: `cd /tmp`, `export X=1` and `stty -echo` are
+  // just as silent as the bare form.
+  const executable = first.split(/\s+/, 1)[0] ?? ''
+  if (SILENT_COMMANDS.test(executable)) return undefined
+  return (
+    'no output captured although the command exited 0. A PTY drops single lines ' +
+    'longer than about 4KB, so a large one-line response (JSON, base64) can vanish. ' +
+    'Pipe it (| wc -c, | head, | jq .) or use fold -w 200 to bring it back.'
+  )
 }
 
 export function execOutcomeToValue(status: SessionStatus & { configured: boolean; permissionMode: string }, outcome: ExecOutcome): ResultValue {

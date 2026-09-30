@@ -82,7 +82,7 @@ export function apply(ctx: BrowserCtx): void {
   const form = ctx.configForms.get(NS)
   const scope = scopeFace(form)
   const api = credentialsFace(ctx)
-  diag('form:bound', { snapshot: form.getSnapshot()?.status ?? 'none', writable: form.getSnapshot()?.writable })
+  diag('form:bound', { snapshot: form.getSnapshot()?.status ?? 'none' })
 
   // `settings.section` is the Settings page's own section slot - the one that
   // renders entries like "OpenCode Go" in the left navigation. `plugins.item`
