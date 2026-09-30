@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { auditFailed, auditRefusalLabel, auditRefused } from '../src/client/audit-view.js'
+import { auditFailed, auditRefusalLabel, auditRefused } from '../src/runtime/audit-view.js'
 
 /**
  * Desktop 0.2.x: the console renders in the loopback page, so these semantics

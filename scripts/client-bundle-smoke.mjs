@@ -56,7 +56,7 @@ for (const name of OPTIONAL) {
 
 globalThis.fetch = async () => ({
   ok: true,
-  json: async () => ({ ok: true, granted: true, consoleUrl: 'http://127.0.0.1:8765/' }),
+  json: async () => ({ ok: true, granted: true, consoleUrl: 'http://127.0.0.1:8766/' }),
 })
 
 const registrations = []
@@ -120,7 +120,7 @@ if (registrations.includes('plugins.item')) {
 for (const name of OPTIONAL) {
   if (!injected.includes(name)) throw new Error('BUNDLE_SMOKE_FAIL: ctx.inject did not request ' + name)
 }
-if (opens.length !== 1 || opens[0].kind !== 'browser' || opens[0].options.params.url !== 'http://127.0.0.1:8765/#session=session-1') {
+if (opens.length !== 1 || opens[0].kind !== 'browser' || opens[0].options.params.url !== 'http://127.0.0.1:8766/#session=session-1') {
   throw new Error('BUNDLE_SMOKE_FAIL: native browser tab mismatch ' + JSON.stringify(opens))
 }
 

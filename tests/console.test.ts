@@ -75,16 +75,21 @@ async function start(): Promise<ConsoleHandle> {
 }
 
 describe('embedded console transport', () => {
-  it('binds loopback and exposes only a token-free stable URL', async () => {
+  it('binds loopback and exposes a token-free, session-scoped URL', async () => {
     const handle = await start()
     expect(handle.port).toBeGreaterThan(0)
     expect(handle.token.length).toBeGreaterThanOrEqual(32)
     const base = handle.urlFor(undefined)
     expect(base).toBe('http://127.0.0.1:' + String(handle.port) + '/')
-    // Session selection belongs in a fragment, so the URL itself is stable.
-    expect(handle.urlFor('conv-1')).toBe(base)
+    // A tool hands this URL to a person, so it must already name the
+    // conversation. The id rides in the fragment, which the Host never sees.
+    expect(handle.urlFor('conv-1')).toBe(base + '#session=conv-1')
+    expect(handle.urlFor('conv 1')).toContain('#session=conv%201')
+    expect(handle.urlFor('')).toBe(base)
     expect(base).not.toContain('token')
     expect(base).not.toContain('session')
+    // The conversation id must never reach the server's request path.
+    expect(handle.urlFor('conv-1').split('#')[0]).toBe(base)
   })
 
   it('bootstraps an HttpOnly cookie and refuses API calls without it', async () => {

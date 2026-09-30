@@ -1191,6 +1191,8 @@ export class SessionManager {
     reason: string
     /** 'blocked' = the rules refused it outright; 'denied' = no human approval. */
     kind: 'blocked' | 'denied'
+    /** Who acted: the agent, or a person typing in the console. Default AGENT. */
+    actor?: 'AGENT' | 'HUMAN' | 'SYSTEM_PROFILE'
     target?: string | null
     hostname?: string | null
     riskJudge?: string
@@ -1201,6 +1203,7 @@ export class SessionManager {
     const session = this.session
     await this.audit({
       operation: input.operation,
+      actor: input.actor ?? 'AGENT',
       target: input.target === undefined ? (session?.currentTarget ?? null) : input.target,
       hostname: input.hostname === undefined ? (session?.currentHostname ?? null) : input.hostname,
       command: input.command,

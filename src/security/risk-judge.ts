@@ -159,6 +159,12 @@ export function redactCommandForJudge(command: string, redactNetwork = true): st
   return value
 }
 
+/**
+ * Bump when the prompt or the verdict parsing changes shape, so a redeploy cannot
+ * keep serving answers produced by the previous judge.
+ */
+const JUDGE_CACHE_VERSION = 'v1'
+
 // ---------------- verdict cache ----------------
 
 interface CacheEntry {
@@ -336,7 +342,21 @@ export async function judgeCommandRiskDetailed(
   const trimmed = command.trim()
   if (trimmed.length === 0) return { verdict: null, error: 'no-command' }
 
-  const key = redactCommandForJudge(trimmed, config.redactNetwork)
+  // The verdict belongs to the (command, model, endpoint) triple. Keying on the
+  // command alone meant switching model or endpoint kept serving the previous
+  // judge's answer for the whole TTL - the operator changed the judge and got
+  // the old one's opinion.
+  // The command text the judge actually sees. Kept separate from the cache key
+  // below: folding endpoint and model into the prompt string was how the judge
+  // ended up being asked about a cache key instead of a command.
+  const judgeInput = redactCommandForJudge(trimmed, config.redactNetwork)
+  const key = [
+    JUDGE_CACHE_VERSION,
+    config.endpoint,
+    config.model,
+    config.redactNetwork ? 'redact' : 'raw',
+    judgeInput,
+  ].join('\u0000')
   const now = Date.now()
   const hit = cache.get(key)
   if (hit !== undefined && hit.expiresAt > now) return { verdict: { ...hit.verdict, cached: true, latencyMs: 0 } }
@@ -360,7 +380,7 @@ export async function judgeCommandRiskDetailed(
     const response = await fetch(config.endpoint, {
       method: 'POST',
       headers: { Authorization: 'Bearer ' + apiKey, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ state: buildState(key), model: config.model, questions: JUDGE_QUESTIONS }),
+      body: JSON.stringify({ state: buildState(judgeInput), model: config.model, questions: JUDGE_QUESTIONS }),
       signal: AbortSignal.timeout(Math.max(200, config.timeoutMs)),
     })
     if (response.ok !== true) return { verdict: null, error: 'http-error' }

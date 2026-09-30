@@ -18,45 +18,15 @@ export function consolePage(): string {
  * switching, no buttons and no polling. Raw keeps every backslash the
  * browser's own parser is meant to see.
  */
+import { CONSOLE_STYLES } from '../console/styles.js'
+
 const PAGE = String.raw`<!doctype html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>JumpServer 控制台</title>
-<style>
-  :root { color-scheme: dark; }
-  * { box-sizing: border-box; }
-  body { margin: 0; background: #0d1117; color: #c9d1d9; font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-  header { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; padding: 8px 12px; border-bottom: 1px solid #21262d; }
-  header .chip { padding: 1px 8px; border: 1px solid #30363d; border-radius: 999px; font-size: 11px; }
-  header .chip[data-tone=ok] { border-color: rgba(63,185,80,.5); color: #3fb950; }
-  header .chip[data-tone=warn] { border-color: rgba(210,153,34,.5); color: #d29922; }
-  header .chip[data-tone=err] { border-color: rgba(248,81,73,.5); color: #f85149; }
-  nav { display: flex; gap: 4px; padding: 6px 12px; border-bottom: 1px solid #21262d; }
-  nav button { background: transparent; color: #8b949e; border: 1px solid transparent; border-radius: 6px; padding: 3px 10px; cursor: pointer; font: inherit; }
-  nav button[data-active] { color: #e6edf3; border-color: #30363d; background: #161b22; }
-  main { padding: 10px 12px; }
-  #term { height: calc(100vh - 220px); overflow-y: auto; background: #010409; border: 1px solid #21262d; border-radius: 8px; padding: 8px 10px; white-space: pre-wrap; word-break: break-all; }
-  .in { color: #d29922; } .out { color: #c9d1d9; } .meta { color: #58a6ff; } .err { color: #f85149; }
-  .input { display: flex; gap: 8px; margin-top: 8px; }
-  input[type=text] { flex: 1; background: #0d1117; color: #e6edf3; border: 1px solid #30363d; border-radius: 6px; padding: 6px 8px; font: inherit; }
-  input[type=text]:disabled { opacity: .5; }
-  button.act { background: #161b22; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px; padding: 6px 10px; cursor: pointer; font: inherit; }
-  button.act[disabled] { opacity: .45; cursor: default; }
-  button.act.danger { border-color: rgba(248,81,73,.5); color: #f85149; }
-  button.act[data-on] { border-color: rgba(63,185,80,.55); color: #3fb950; }
-  table { width: 100%; border-collapse: collapse; }
-  th, td { text-align: left; padding: 4px 8px; border-bottom: 1px solid #161b22; font-size: 12px; }
-  th { color: #8b949e; font-weight: 600; }
-  .badge { padding: 0 6px; border: 1px solid #30363d; border-radius: 999px; font-size: 11px; }
-  .badge.refused { border-color: rgba(88,166,255,.5); color: #58a6ff; }
-  .badge.bad { border-color: rgba(248,81,73,.5); color: #f85149; }
-  .badge.good { border-color: rgba(63,185,80,.5); color: #3fb950; }
-  .muted { color: #8b949e; }
-  .notice { margin: 6px 0; padding: 5px 8px; border: 1px solid #30363d; border-radius: 6px; color: #d29922; cursor: pointer; }
-  .row { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; flex-wrap: wrap; }
-</style>
+${CONSOLE_STYLES}
 </head>
 <body>
 <header>
@@ -86,7 +56,15 @@ const PAGE = String.raw`<!doctype html>
     </div>
     <div id="confirm" class="notice" style="display:none"></div>
   </section>
-  <section id="pane-assets" style="display:none"></section>
+  <section id="pane-assets" style="display:none">
+    <div class="row">
+      <input id="assetQuery" type="search" placeholder="搜索名称 / IP / 备注 / 节点" />
+      <select id="assetGroup"></select>
+      <button class="act" id="assetRefresh">刷新</button>
+      <span class="muted" id="assetNote"></span>
+    </div>
+    <div id="assetList"></div>
+  </section>
   <section id="pane-jobs" style="display:none">
     <div class="row">
       <button class="act" id="jobsRefresh">刷新</button>
@@ -96,7 +74,7 @@ const PAGE = String.raw`<!doctype html>
     <div id="jobList"></div>
   </section>
   <section id="pane-audit" style="display:none">
-    <div class="row"><button class="act" id="auditRefresh">刷新</button><span class="muted" id="auditNote"></span></div>
+    <div class="row"><button class="act" id="auditRefresh">刷新</button><button class="act" id="auditCsv">导出 CSV</button><button class="act" id="auditJson">导出 JSON</button><span class="muted" id="auditNote"></span></div>
     <div id="auditList"></div>
   </section>
 </main>
@@ -128,52 +106,79 @@ function esc(s) {
     return c === '&' ? '&amp;' : c === '<' ? '&lt;' : c === '>' ? '&gt;' : '&quot;';
   });
 }
-function strip(s) {
-  // Terminal semantics, matching src/client/ansi.ts's line framer:
-  //   ESC [ ... CSI  -> dropped
-  //   ESC ] ... BEL  -> dropped (OSC title)
-  //   CRLF / LF      -> line break
-  //   lone CR        -> cursor to column 0 and OVERWRITE (progress redraw);
-  //                     treating it as a newline produced the '???0.5' garbage
-  //   BS             -> erase the previous character
-  //   other controls -> dropped
-  var text = String(s == null ? '' : s);
-  var out = '';
+/**
+ * Stateful PTY stream renderer.
+ *
+ * A PTY delivers a byte STREAM, not messages: an escape sequence, a CR or a BS
+ * can be split across two reads. The previous strip() rebuilt its line state on
+ * every event, so anything crossing a chunk boundary decoded twice and rendered
+ * wrong (50%\r + 100% came out as 5100%, a half CSI leaked as literal text).
+ *
+ * The framer therefore keeps the pending escape prefix, the current logical
+ * line and the carry-over between calls, mirroring src/client/ansi.ts. Tests
+ * assert the required property: for every corpus entry and EVERY split point,
+ * rendering the chunks equals rendering the whole string.
+ */
+function makeRenderer() {
+  var esc = '';
   var line = '';
-  var i = 0;
-  var n = text.length;
-  function flush() { out += line + '\n'; line = ''; }
-  while (i < n) {
-    var c = text.charAt(i);
-    if (c === '\u001b') {
-      var next = text.charAt(i + 1);
-      if (next === '[') {
-        var j = i + 2;
-        while (j < n && !/[A-Za-z@-~]/.test(text.charAt(j))) j++;
-        i = j + 1;
-      } else if (next === ']') {
-        var k = i + 2;
-        while (k < n && text.charAt(k) !== '\u0007') k++;
-        i = text.charAt(k) === '\u0007' ? k + 1 : k;
-      } else {
+  // A CR at the very end of a chunk is ambiguous: CRLF if the next chunk starts
+  // with LF, a cursor-to-column-0 overwrite otherwise. Deciding immediately
+  // discards a whole line whenever the LF turns out to arrive next.
+  var crPending = false;
+  function flush() { var out = line + '\n'; line = ''; return out; }
+  function render(chunk) {
+    var text = String(chunk == null ? '' : chunk);
+    var out = '';
+    if (crPending) {
+      crPending = false;
+      if (text.charAt(0) === '\n') { out += flush(); text = text.slice(1); }
+      else { line = ''; }
+    }
+    text = esc + text;
+    var i = 0;
+    var n = text.length;
+    esc = '';
+    while (i < n) {
+      var c = text.charAt(i);
+      if (c === '\u001b') {
+        var next = text.charAt(i + 1);
+        if (next === '[') {
+          var j = i + 2;
+          while (j < n && !/[A-Za-z@-~]/.test(text.charAt(j))) j++;
+          if (j >= n) { esc = text.slice(i); return out; }
+          i = j + 1;
+          continue;
+        }
+        if (next === ']') {
+          var k = i + 2;
+          while (k < n && text.charAt(k) !== '\u0007') k++;
+          if (k >= n) { esc = text.slice(i); return out; }
+          i = k + 1;
+          continue;
+        }
+        if (next === '') { esc = c; return out; }
         i += 2;
+        continue;
       }
-      continue;
-    }
-    if (c === '\n') { flush(); i += 1; continue; }
-    if (c === '\r') {
-      if (text.charAt(i + 1) === '\n') { flush(); i += 2; continue; }
-      line = '';
+      if (c === '\n') { out += flush(); i += 1; continue; }
+      if (c === '\r') {
+        if (i + 1 >= n) { crPending = true; i += 1; continue; }
+        if (text.charAt(i + 1) === '\n') { out += flush(); i += 2; continue; }
+        line = '';
+        i += 1;
+        continue;
+      }
+      if (c === '\b') { line = line.slice(0, -1); i += 1; continue; }
+      if (c === '\t' || c >= ' ') { line += c; i += 1; continue; }
       i += 1;
-      continue;
     }
-    if (c === '\b') { line = line.slice(0, -1); i += 1; continue; }
-    if (c === '\t' || c >= ' ') { line += c; i += 1; continue; }
-    i += 1;
+    return out;
   }
-  if (line.length > 0) out += line;
-  else if (out.charAt(out.length - 1) === '\n') out = out.slice(0, -1);
-  return out;
+  // The not-yet-terminated line belongs to the next event, so keep it and
+  // hand back only what is safe to append now.
+  function renderTake(chunk) { var out = render(chunk); return { out: out, pending: line }; }
+  return { render: render, renderTake: renderTake };
 }
 
 function api(path, body, method) {
@@ -208,17 +213,19 @@ function api(path, body, method) {
 function heartbeat() {
   if (SESSION.length === 0) return;
   try {
-    fetch('/api/jumpserver.diag', {
+    fetch('/api/jumpserver.consoleAlive', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ event: 'console:alive', detail: { sessionId: SESSION } }),
+      body: JSON.stringify({ sessionId: SESSION, heartbeat: true }),
       credentials: 'same-origin',
     }).catch(function () {});
   } catch (e) {
     /* telemetry must never break the console */
   }
 }
-setInterval(heartbeat, 4000);
+// 10s beats the 60s Host TTL with room for timer throttling in a hidden window.
+heartbeat();
+setInterval(heartbeat, 10000);
 
 function setTab(next) {
   tab = next;
@@ -236,13 +243,55 @@ function setTab(next) {
   if (next === 'audit') loadAudit();
 }
 
+/**
+ * Hard cap on terminal rows kept in the DOM.
+ *
+ * The observer already ring-buffers on the Host, but the page appended a <div>
+ * per line forever: a long-running tail -f grew the document without bound.
+ * Old rows are dropped in one batch (not one call per line, which would force a
+ * layout each time) once the cap is exceeded by a margin.
+ */
+var TERM_MAX_ROWS = 5000;
+var TERM_TRIM_BATCH = 500;
+
+function trimTerm(term) {
+  var excess = term.childElementCount - TERM_MAX_ROWS;
+  if (excess < TERM_TRIM_BATCH) return;
+  for (var i = 0; i < excess; i++) term.removeChild(term.firstElementChild);
+}
+
 function append(text, cls) {
   var term = el('term');
   var div = document.createElement('div');
   div.className = cls || 'out';
   div.textContent = text;
   term.appendChild(div);
+  trimTerm(term);
   if (following) term.scrollTop = term.scrollHeight;
+}
+
+// One renderer for the terminal pane: it must survive across events, since a
+// CR/BS/escape can be split between two of them.
+var terminal = makeRenderer();
+
+/**
+ * Append one PTY chunk: completed lines as their own rows, and the line still
+ * being written into a single reusable row so a partial line is never frozen
+ * into the scrollback (or duplicated when its tail arrives).
+ */
+function termRender(chunk) {
+  var step = terminal.renderTake(chunk);
+  if (step.out.length > 0) append(step.out.replace(/\n$/, ''), 'out');
+  var box = el('term');
+  var live = el('termLive');
+  if (live === null) {
+    live = document.createElement('div');
+    live.id = 'termLive';
+    box.appendChild(live);
+  }
+  live.className = 'out';
+  live.textContent = step.pending;
+  if (following) box.scrollTop = box.scrollHeight;
 }
 
 function renderStatus(st) {
@@ -263,8 +312,7 @@ function renderStatus(st) {
   el('cmd').placeholder = st.state === 'JUMPSERVER_MENU'
     ? '菜单态：p 列资产 / IP 或名称 进入 / q 结束会话'
     : '在已进入的资产上执行一条命令';
-  el('interrupt').disabled = !granted;
-  el('interrupt2').disabled = !granted;
+  renderInterrupt(st.state);
 }
 
 function renderConfirm(req) {
@@ -280,33 +328,46 @@ function renderConfirm(req) {
         if (res.data && res.data.ok === true) append('$ ' + String(req.command), 'in');
         else append('确认执行失败：' + String((res.data && (res.data.message || res.data.code)) || res.status), 'err');
         confirmReq = null;
-        poll();
       });
   };
 }
 
-function poll() {
-  api('/api/jumpserver.status', { sessionId: SESSION }).then(function (statusRes) {
-    var st = statusRes.data || {};
-    el('net').textContent = st.code ? String(st.code) : '';
-    renderStatus(st);
-    return api('/api/jumpserver.snapshot', { sessionId: SESSION, sinceSeq: sinceSeq });
-  }).then(function (snap) {
-    var data = snap.data || {};
-    if (data.lastSeq !== undefined && Number(data.lastSeq) >= sinceSeq) sinceSeq = Number(data.lastSeq) + 1;
-    var events = Array.isArray(data.events) ? data.events : [];
-    for (var i = 0; i < events.length; i++) {
-      var ev = events[i];
-      if (ev.visibility === 'internal') continue;
-      if (ev.type === 'input') append('$ ' + strip(ev.data), 'in');
-      else if (ev.type === 'output') append(strip(ev.data), 'out');
-      else if (ev.type === 'state') append('[state] ' + String(ev.prev || '?') + ' -> ' + String(ev.state || '?'), 'meta');
-      else if (ev.type === 'target') append('[target] ' + String(ev.target || '') + (ev.hostname ? ' (' + ev.hostname + ')' : ''), 'meta');
-      else if (ev.type === 'error') append('[error] ' + String(ev.message || ''), 'err');
-    }
-  }).catch(function () { el('net').textContent = '连接控制台失败'; });
+/**
+ * One in-flight snapshot at a time, chained.
+ *
+ * The snapshot route long-polls (it waits for the next PTY event), so a
+ * setInterval poll overlapped requests: a 2s timer against a route that holds
+ * for up to 12s stacked roughly six concurrent snapshots, each re-reading the
+ * same events and racing on sinceSeq. Chaining means exactly one request exists
+ * at any moment and sinceSeq can only move forward.
+ *
+ * Status rides along in the snapshot payload, so the separate /status round
+ * trip per cycle is gone too.
+ */
+function pump() {
+  api('/api/jumpserver.snapshot', { sessionId: SESSION, sinceSeq: sinceSeq })
+    .then(function (snap) {
+      var data = snap.data || {};
+      if (data.lastSeq !== undefined && Number(data.lastSeq) >= sinceSeq) sinceSeq = Number(data.lastSeq) + 1;
+      el('net').textContent = data.code ? String(data.code) : '';
+      if (typeof data.timeZone === 'string' && data.timeZone.length > 0) auditZone = data.timeZone;
+      renderStatus(data);
+      var events = Array.isArray(data.events) ? data.events : [];
+      for (var i = 0; i < events.length; i++) {
+        var ev = events[i];
+        if (ev.visibility === 'internal') continue;
+        // Input events echo the command we sent; they are not part of the PTY
+        // output stream, so they must not consume renderer state.
+        if (ev.type === 'input') append('$ ' + String(ev.data == null ? '' : ev.data), 'in');
+        else if (ev.type === 'output') termRender(ev.data);
+        else if (ev.type === 'state') append('[state] ' + String(ev.prev || '?') + ' -> ' + String(ev.state || '?'), 'meta');
+        else if (ev.type === 'target') append('[target] ' + String(ev.target || '') + (ev.hostname ? ' (' + ev.hostname + ')' : ''), 'meta');
+        else if (ev.type === 'error') append('[error] ' + String(ev.message || ''), 'err');
+      }
+    })
+    .catch(function () { el('net').textContent = '连接控制台失败'; })
+    .then(function () { setTimeout(pump, 50); });
 }
-
 function send() {
   var input = el('cmd');
   var command = input.value.trim();
@@ -318,36 +379,119 @@ function send() {
       renderConfirm({ command: command, risk: data.risk, confirmToken: data.confirmToken });
       return;
     }
-    if (data.ok === true) append('$ ' + command, 'in');
-    else append('执行失败：' + String(data.message || data.code || res.status), 'err');
-    poll();
+    // No optimistic echo of the command: SessionManager records it through the
+    // observer, so appending here showed every manual command twice.
+    if (data.ok !== true) append('执行失败：' + String(data.message || data.code || res.status), 'err');
   });
 }
 
-function loadAssets() {
-  var pane = el('pane-assets');
-  pane.innerHTML = '<div class="muted">加载中…</div>';
-  api('/api/jumpserver.assets', { sessionId: SESSION }).then(function (res) {
+/**
+ * Asset picker: search, group filter, refresh and one-click enter.
+ *
+ * The bridge route already accepted filter/group/refresh and returned the group
+ * names; the pane never used any of it, so a 100+ row bastion inventory stayed
+ * one undifferentiated table with no way to act on a row.
+ */
+function loadAssets(overrides) {
+  var opts = overrides || {};
+  var note = el('assetNote');
+  var list = el('assetList');
+  note.textContent = '加载中…';
+  var payload = { sessionId: SESSION };
+  var query = opts.filter !== undefined ? opts.filter : el('assetQuery').value.trim();
+  if (query.length > 0) payload.filter = query;
+  var group = opts.group !== undefined ? opts.group : el('assetGroup').value;
+  if (group.length > 0) payload.group = group;
+  if (opts.refresh === true) payload.refresh = true;
+  api('/api/jumpserver.assets', payload).then(function (res) {
     var data = res.data || {};
+    fillGroups(data.groups, data.group);
     if (!Array.isArray(data.rows)) {
-      pane.innerHTML = '<div class="muted">资产列表需要在堡垒机菜单态获取：' + esc(data.message || data.code || '') + '</div>';
+      list.innerHTML = '<div class="muted">资产列表需要在堡垒机菜单态获取：' + esc(data.message || data.code || '') + '</div>';
+      note.textContent = '不可用';
       return;
     }
     var rows = data.rows;
-    var head = '<div class="muted">共 ' + String(data.count || rows.length) + (data.reportedTotal ? ' / ' + String(data.reportedTotal) : '') + ' 台（健康度 ' + esc(data.health || '?') + '）</div>';
-    var body = '<table><thead><tr><th>名称</th><th>IP</th><th>系统</th><th>节点</th></tr></thead><tbody>';
-    for (var i = 0; i < rows.length; i++) {
-      body += '<tr><td>' + esc(rows[i].name) + '</td><td>' + esc(rows[i].ip) + '</td><td>' + esc(rows[i].platform) + '</td><td>' + esc(rows[i].node) + '</td></tr>';
+    note.textContent = '共 ' + String(data.count || rows.length)
+      + (data.reportedTotal ? ' / ' + String(data.reportedTotal) : '')
+      + ' 台（健康度 ' + String(data.health || '?') + '）';
+    if (rows.length === 0) {
+      list.innerHTML = '<div class="muted">没有匹配的资产</div>';
+      return;
     }
-    pane.innerHTML = head + body + '</tbody></table>';
-  });
+    var body = '<table><thead><tr><th>名称</th><th>IP</th><th>系统</th><th>节点</th><th></th></tr></thead><tbody>';
+    for (var i = 0; i < rows.length; i++) {
+      var row = rows[i];
+      body += '<tr><td>' + esc(row.name) + '</td><td>' + esc(row.ip) + '</td><td>' + esc(row.platform)
+        + '</td><td>' + esc(row.node) + '</td><td><button class="act" data-enter="'
+        + esc(row.ip || row.name) + '">进入</button></td></tr>';
+    }
+    list.innerHTML = body + '</tbody></table>';
+    var buttons = list.querySelectorAll('[data-enter]');
+    for (var k = 0; k < buttons.length; k++) {
+      buttons[k].onclick = function () { enterAsset(this.dataset.enter); };
+    }
+  }).catch(function () { note.textContent = '加载失败'; });
+}
+
+/** Populate the group picker once, keeping the current selection. */
+function fillGroups(groups, selected) {
+  var box = el('assetGroup');
+  if (box.dataset.filled === '1') return;
+  if (!Array.isArray(groups)) return;
+  var html = '<option value="">全部资产组</option>';
+  for (var i = 0; i < groups.length; i++) {
+    html += '<option value="' + esc(groups[i]) + '"' + (groups[i] === selected ? ' selected' : '') + '>' + esc(groups[i]) + '</option>';
+  }
+  box.innerHTML = html;
+  box.dataset.filled = '1';
+}
+
+/** Enter an asset from the menu, sharing the manual path and its confirm gate. */
+function enterAsset(target) {
+  if (typeof target !== 'string' || target.length === 0) return;
+  el('assetNote').textContent = '正在进入 ' + target + '…';
+  api('/api/jumpserver.manual', { sessionId: SESSION, command: target }).then(function (res) {
+    var data = res.data || {};
+    if (data.code === 'MANUAL_CONFIRM_REQUIRED') {
+      renderConfirm({ command: target, risk: data.risk, confirmToken: data.confirmToken });
+      el('assetNote').textContent = '需要在终端确认';
+      return;
+    }
+    el('assetNote').textContent = data.ok === true ? '已请求进入 ' + target : ('进入失败：' + String(data.message || data.code || res.status));
+  }).catch(function () { el('assetNote').textContent = '进入失败'; });
+}
+
+/** Running streaming jobs for this conversation; drives the interrupt button. */
+var runningJobs = 0;
+
+/**
+ * Enable "interrupt" only when there is something to interrupt.
+ *
+ * It used to key off granted alone, so it sat red and clickable while the
+ * session was merely parked at the bastion menu. The label follows too: with
+ * nothing running the control is simply disabled, not an invitation.
+ */
+function renderInterrupt(state) {
+  var running = state === 'COMMAND_RUNNING' || runningJobs > 0;
+  var granted = el('grant').textContent === '已授权';
+  var off = !granted || !running;
+  el('interrupt').disabled = off;
+  el('interrupt2').disabled = off;
+  el('interrupt2').textContent = running ? '中断运行' : '中断';
 }
 
 function loadJobs() {
   api('/api/jumpserver.jobs', { sessionId: SESSION }).then(function (res) {
     var data = res.data || {};
     var jobs = Array.isArray(data.jobs) ? data.jobs : [];
+    // Track running jobs here: the interrupt button is enabled by TASK state,
+    // not merely by "granted" - a red interrupt button with nothing to stop
+    // invites the operator to press it for no reason.
+    runningJobs = 0;
+    for (var n = 0; n < jobs.length; n++) if (jobs[n].state === 'RUNNING') runningJobs++;
     el('jobsNote').textContent = jobs.length === 0 ? '本对话没有流式任务' : String(jobs.length) + ' 个任务';
+    renderInterrupt();
     if (jobs.length === 0) {
       el('jobList').innerHTML = '<div class="muted">用 jumpserver_job_start 启动 tail -f / journalctl -f / tcpdump 后在此查看与停止</div>';
       return;
@@ -371,19 +515,64 @@ function loadJobs() {
   });
 }
 
+/** Effective zone reported by the Host; the page never guesses one. */
+var auditZone = 'UTC';
+
 function fmtTime(value) {
   var d = new Date(String(value || ''));
   if (isNaN(d.getTime())) return String(value || '');
   try {
-    return new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }).format(d);
-  } catch (e) { return d.toLocaleTimeString(); }
+    return new Intl.DateTimeFormat('zh-CN', { timeZone: auditZone, hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }).format(d);
+  } catch (e) {
+    // An unusable zone must still show the record, never blank it out.
+    return d.toISOString().replace('T', ' ').slice(0, 19);
+  }
+}
+
+function fmtFull(value) {
+  var d = new Date(String(value || ''));
+  if (isNaN(d.getTime())) return String(value || '');
+  try {
+    return new Intl.DateTimeFormat('zh-CN', { timeZone: auditZone, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }).format(d);
+  } catch (e) {
+    return d.toISOString().replace('T', ' ').slice(0, 19);
+  }
+}
+
+/**
+ * Download the audit trail as CSV or JSON.
+ *
+ * The serialisation is done by the Host (one tested implementation shared with
+ * the settings surface) rather than re-implemented here, so the two can never
+ * disagree about what an export contains.
+ */
+function exportAudit(format) {
+  el('auditNote').textContent = '正在导出…';
+  api('/api/jumpserver.auditExport', { sessionId: SESSION, format: format }).then(function (res) {
+    var data = res.data || {};
+    if (data.ok !== true || typeof data.content !== 'string') {
+      el('auditNote').textContent = '导出失败：' + String(data.message || data.code || res.status);
+      return;
+    }
+    var type = format === 'csv' ? 'text/csv' : 'application/json';
+    var blob = new Blob([data.content], { type: type + ';charset=utf-8' });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = 'jumpserver-audit-' + new Date().toISOString().slice(0, 19).replace(/[:T]/g, '') + '.' + format;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(function () { URL.revokeObjectURL(url); }, 5000);
+    el('auditNote').textContent = '已导出 ' + String(data.count || 0) + ' 条（' + format.toUpperCase() + '）';
+  }).catch(function () { el('auditNote').textContent = '导出失败'; });
 }
 
 function loadAudit() {
   api('/api/jumpserver.audit', { sessionId: SESSION }).then(function (res) {
     var data = res.data || {};
     var rows = Array.isArray(data.records) ? data.records.slice().reverse() : [];
-    el('auditNote').textContent = rows.length === 0 ? '本对话尚无审计记录' : '最近 ' + String(rows.length) + ' 条（存储 UTC，显示 UTC+8）';
+    el('auditNote').textContent = rows.length === 0 ? '本对话尚无审计记录' : '最近 ' + String(rows.length) + ' 条（存储 UTC，显示 ' + auditZone + '）';
     if (rows.length === 0) { el('auditList').innerHTML = ''; return; }
     var html = '<table><thead><tr><th>时间</th><th>操作</th><th>目标</th><th>风险</th><th>结果</th><th>命令 / 原因</th></tr></thead><tbody>';
     for (var i = 0; i < rows.length; i++) {
@@ -408,7 +597,12 @@ function loadAudit() {
   }
   el('cmd').addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); send(); } });
   el('send').onclick = send;
-  el('clear').onclick = function () { el('term').textContent = ''; };
+  el('clear').onclick = function () {
+    el('term').textContent = '';
+    // Fresh renderer too: a half-written line from before the clear must not
+    // reappear when its tail arrives.
+    terminal = makeRenderer();
+  };
   el('follow').onclick = function () { setFollow(!following); };
   el('term').addEventListener('scroll', function () {
     var t = el('term');
@@ -417,24 +611,36 @@ function loadAudit() {
   setFollow(true);
   el('jobsRefresh').onclick = loadJobs;
   el('auditRefresh').onclick = loadAudit;
+  el('assetRefresh').onclick = function () { loadAssets({ refresh: true }); };
+  el('assetGroup').onchange = function () { loadAssets({ group: this.value }); };
+  // Debounce: the search box posts on every keystroke otherwise, and each call
+  // drives the bastion PTY.
+  var assetTimer = null;
+  el('assetQuery').oninput = function () {
+    var value = this.value;
+    if (assetTimer !== null) clearTimeout(assetTimer);
+    assetTimer = setTimeout(function () { loadAssets({ filter: value.trim() }); }, 300);
+  };
+  el('auditCsv').onclick = function () { exportAudit('csv'); };
+  el('auditJson').onclick = function () { exportAudit('json'); };
   var interrupt = function () {
     api('/api/jumpserver.interrupt', { sessionId: SESSION }).then(function (res) {
       var data = res.data || {};
       el('jobsNote').textContent = String(data.message || (data.ok ? '中断信号已发送' : '没有可中断的任务'));
       append('[interrupt] ' + String(data.message || data.code || ''), 'meta');
-      poll();
       if (tab === 'jobs') loadJobs();
     });
   };
   el('interrupt').onclick = interrupt;
   el('interrupt2').onclick = interrupt;
   setTab('term');
-  poll();
+  // One chained long-poll for the terminal. The other tabs keep their own slow
+  // refresh, so switching away never leaves the terminal loop running twice.
+  pump();
   setInterval(function () {
-    if (tab === 'term') poll();
-    else if (tab === 'jobs') loadJobs();
+    if (tab === 'jobs') loadJobs();
     else if (tab === 'audit') loadAudit();
-  }, 2000);
+  }, 5000);
 })();
 </script>
 </body>

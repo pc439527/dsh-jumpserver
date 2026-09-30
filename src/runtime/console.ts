@@ -18,8 +18,13 @@ import { consolePage } from './console-page.js'
 // __Host- requires Secure; HTTP loopback cookies must use a host-only name.
 const CONSOLE_COOKIE = 'dsh_jumpserver_console'
 
-/** Stable Desktop sidebar port; the right-column URL must survive restarts. */
-export const DEFAULT_CONSOLE_PORT = 8765
+/**
+ * Stable Desktop sidebar port; the right-column URL must survive restarts.
+ *
+ * 8765 is the WorkBuddy console port on this workstation, so the plugin takes
+ * its own port and both consoles can run side by side.
+ */
+export const DEFAULT_CONSOLE_PORT = 8766
 
 export interface ConsoleHandle {
   port: number
@@ -27,6 +32,8 @@ export interface ConsoleHandle {
   token: string
   /** Stable public loopback address. Session selection belongs in a URL fragment. */
   urlFor(sessionId: string | undefined): string
+  /** True when the preferred port was taken and the OS chose one. */
+  usingFallbackPort: boolean
   close(): Promise<void>
 }
 
@@ -114,18 +121,56 @@ export function startConsoleServer(services: BridgeServices, options: ConsoleOpt
     handler(req, res)
   })
 
-  return new Promise<ConsoleHandle>((resolve, reject) => {
-    server.once('error', reject)
-    server.listen(options.port ?? DEFAULT_CONSOLE_PORT, '127.0.0.1', () => {
+  /**
+   * Bind the preferred port, falling back to an ephemeral one.
+   *
+   * A fixed port is what keeps the sidebar URL stable across restarts, but a
+   * single occupied port must not take the whole console offline - another tool
+   * on 8765/8766 would otherwise mean "JumpServer console unavailable" with no
+   * way forward. EADDRINUSE falls back to a loopback port the OS picks.
+   */
+  const listenOnce = (port: number): Promise<void> =>
+    new Promise<void>((done, fail) => {
+      const onError = (error: NodeJS.ErrnoException): void => {
+        server.removeListener('listening', onListening)
+        fail(error)
+      }
+      const onListening = (): void => {
+        server.removeListener('error', onError)
+        done()
+      }
+      server.once('error', onError)
+      server.once('listening', onListening)
+      server.listen(port, '127.0.0.1')
+    })
+
+  return (async (): Promise<ConsoleHandle> => {
+    const preferred = options.port ?? DEFAULT_CONSOLE_PORT
+    try {
+      await listenOnce(preferred)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EADDRINUSE') throw error
+      // Port 0 asks the OS for a free loopback port.
+      await listenOnce(0)
+    }
+    return await new Promise<ConsoleHandle>((resolve, reject) => {
       const bound = server.address()
       const port = typeof bound === 'object' && bound !== null ? bound.port : 0
       const baseUrl = 'http://127.0.0.1:' + String(port) + '/'
       resolve({
         port,
         token,
-        urlFor: () => baseUrl,
+        // A tool's consoleUrl is opened by a person, so it must already point
+        // at THAT conversation. The id rides in the fragment, which never
+        // reaches the Host, so nothing about it lands in access logs.
+        urlFor: (sessionId) => {
+          const id = (sessionId ?? '').trim()
+          if (id.length === 0) return baseUrl
+          return baseUrl + '#session=' + encodeURIComponent(id)
+        },
         close: () => new Promise<void>((done) => server.close(() => done())),
+        usingFallbackPort: port !== (options.port ?? DEFAULT_CONSOLE_PORT),
       })
     })
-  })
+  })()
 }

@@ -78,11 +78,11 @@ npm run build
 # ② 安装 dsh-jumpserver
 
 ## 本地源码方式（等价于 DSH「添加插件」弹窗里复制出的命令）：
-dsh plugin --profile web add "file:<本插件所在路径>"
+dsh plugin --profile desktop add "file:<本插件所在路径>"
 ## 发布到 npm 后可直接：
-dsh plugin --profile web add dsh-jumpserver
+dsh plugin --profile desktop add dsh-jumpserver
 ## 或直接从 GitHub 仓库安装（收录清单要求的可安装方式）：
-dsh plugin --profile web add github:pc439527/dsh-jumpserver
+dsh plugin --profile desktop add github:pc439527/dsh-jumpserver
 ```
 
 **更新已安装的插件**（Host 与浏览器 half 分开发布，只改源码不会生效）：
@@ -91,7 +91,9 @@ dsh plugin --profile web add github:pc439527/dsh-jumpserver
 npm run sync        # build（tsc + client bundle + build-meta）+ sync-profile 同步进 profile 安装副本
 ```
 
-然后重启 `dsh web`（Host 启动时加载），并**硬刷新浏览器**（Ctrl/Cmd+Shift+R）——侧栏头部会以 Host/Client 版本不一致提示你这一条。
+`sync-profile` 按 `JS_PROFILE_PKG` → `DSH_PROFILE_DIR` → **自动探测** `~/.dsh/profiles/*` 的顺序解析目标；在普通终端里没有 `DSH_PROFILE_DIR`，会自动探测并优先选择 desktop profile，不需要手动指定。
+
+然后**完全重启 DSH Desktop**（Host 在启动时加载插件；仅替换磁盘文件不会生效），并硬刷新界面。侧栏头部会以 Host/Client 版本不一致提示你这一条。
 
 ## 快速开始
 
@@ -157,7 +159,7 @@ jumpserver_job_read(jobId="jsjob_xxxx")                          # 只取增量
 | assetGroups | {} | 资产组别名：组名 → 关键词列表 |
 | runbooks | {} | 命名 runbook：`{ title, steps[] }`，步骤为 profile 或只读 command，可带 `expect` 断言 |
 | riskJudge | {} | 可选语义裁决：`{ enabled, endpoint, apiKeyEnv, model, timeoutMs, cacheTtlSeconds, redactNetwork, autoAllow{...} }`，**默认关闭**；API Key 只经 credential-ref 解析 |
-| consoleEnabled / consolePort | true / 8765 | 内置控制台：仅绑定 127.0.0.1，默认 8765 固定回环端口；URL 由 `jumpserver_status` 返回 |
+| consoleEnabled / consolePort | true / 8766 | 内置控制台：仅绑定 127.0.0.1，默认 8766 固定回环端口（避开 WorkBuddy 的 8765）；URL 由 `jumpserver_status` 返回 |
 | autoReconnect / enableAudit | true / true | 空闲断线自动重连（最多 2 次）/ 命令审计 |
 | autoOpenTerminal / terminalScrollback | true / 5000 | 进会话页自动打开侧栏标签 / 终端保留行数 |
 
@@ -280,7 +282,7 @@ Desktop 版使用 DSH 原生服务：设置页经 `ctx.configForms.get('jumpserv
 | 现象 | 处置 |
 |---|---|
 | JUMPSERVER_NOT_ARMED | 会话未授权：先执行 `/jumpserver <任务>` 或 `/jumpserver on` |
-| 侧栏显示版本不一致 | 重启 dsh web Host 进程，再以 `jumpserver_status` 核对 pluginVersion / hostBuild |
+| 侧栏显示版本不一致 | 重启 DSH Desktop，再以 `jumpserver_status` 核对 pluginVersion / hostBuild |
 | NOT_CONFIGURED | 检查设置页 host/username/密码，或 `profiles` 选中项 |
 | DISABLED | 设置页"启用 JumpServer"被关闭 |
 | TARGET_DENIED | 目标不在 `allowedTargets` 或命中 `deniedTargets`：改配置或换目标 |
@@ -305,7 +307,7 @@ npm run build              # tsc -> lib/ + esbuild -> lib/client.js + build-meta
 npm run smoke:client       # 浏览器 bundle 物化冒烟
 npm run smoke              # 实机冒烟（需 JS_USER + JUMPSERVER_PASSWORD，可选 JS_HOST/JS_TARGET_x）
 node scripts/plugin-load-smoke.mjs   # 已安装包加载冒烟
-npm run sync               # build + 把 lib/ + package.json 同步进 web profile 安装副本
+npm run sync               # build + 把 lib/ + package.json 同步进 Desktop profile 安装副本
 ```
 
 测试覆盖亮点：`tests/console.test.ts`（控制台令牌/路由/端口释放）、`tests/jobs.test.ts`（单次 Ctrl+C / 幂等停止 / 对话隔离 / 游标读）、`tests/inspection-tools.test.ts`（结构化画像 + 基线漂移往返）、`tests/risk-judge-gate.test.ts`（advisory / 失败降级 / autoAllow 与分布否决）、`tests/context-budget.test.ts`（工具表 schema 预算 28 KB）、`tests/classifier-corpus.test.ts`（READ 误判 <2%、0 误放）。
