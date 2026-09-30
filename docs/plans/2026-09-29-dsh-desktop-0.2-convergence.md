@@ -11,7 +11,7 @@
 ---
 
 ### Task 1: Secure and stabilize the loopback console
-- Change the default console port to 8765.
+- Change the default console port to 8766.
 - Bootstrap authentication with an HttpOnly SameSite cookie from the loopback page.
 - Remove tokens from URL factories, HTML, logs, state files, schemas, and tool results.
 - Keep optional conversation selection outside server-visible credentials.

@@ -116,7 +116,7 @@ export const Config = z.object({
     .volatile()
     .description('同时进入的目标数上限（1..' + MAX_SESSIONS_CEILING + '，进程级 Semaphore，仅在 batchConcurrency > 1 时生效）'),
   consoleEnabled: z.boolean().default(true).volatile().description('内置运维控制台（仅绑定 127.0.0.1）：终端镜像 / 资产 / 任务 / 审计，稳定 URL 由 jumpserver_status 返回，认证 Token 不进入 URL/日志/工具结果'),
-  consolePort: z.number().min(0).max(65535).default(8765).volatile().description('控制台端口；默认 8765，提供稳定的 Desktop 右栏地址'),
+  consolePort: z.number().min(0).max(65535).default(8766).volatile().description('控制台端口；默认 8766，提供稳定的 Desktop 右栏地址'),
   autoReconnect: z.boolean().default(true).volatile().description('空闲断线自动重连（最多 2 次）'),
   assetCacheTtlSeconds: z
     .number()

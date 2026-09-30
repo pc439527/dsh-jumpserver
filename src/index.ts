@@ -147,9 +147,14 @@ export function apply(ctx: Context, config: JumpServerConfig): void {
    * open again as soon as the operator closes the previous one.
    */
   const consoleSeen = new Map<string, number>()
-  const CONSOLE_ALIVE_MS = 12000
+  // A hidden or minimised Desktop throttles page timers hard, so a short TTL
+  // would report a perfectly healthy console as closed and re-open it.
+  const CONSOLE_ALIVE_MS = 60000
   const noteConsoleAlive = (sessionId: string): void => {
     consoleSeen.set(sessionId, Date.now())
+  }
+  const forgetConsoleAlive = (sessionId: string): void => {
+    consoleSeen.delete(sessionId)
   }
   const consoleActiveFor = (sessionId: string): boolean => {
     const at = consoleSeen.get(sessionId)
@@ -224,6 +229,7 @@ export function apply(ctx: Context, config: JumpServerConfig): void {
       recentAudits.delete(sessionId)
       cases.deleteConversation(sessionId)
       confirmTokens.delete(sessionId)
+      forgetConsoleAlive(sessionId)
       grants.revoke(sessionId)
     },
   })
@@ -669,11 +675,12 @@ export function apply(ctx: Context, config: JumpServerConfig): void {
     },
     consoleUrlFor: (sessionId) => (sessionId === undefined || sessionId.length === 0 ? consoleUrlFor('') : consoleUrlFor(sessionId)),
     consoleActiveFor,
+    noteConsoleAlive,
     diagFor: (event, detail) => {
-      if (event === 'console:alive' && detail !== undefined) {
-        const sid = typeof detail['sessionId'] === 'string' ? detail['sessionId'] : ''
-        if (sid.length > 0) noteConsoleAlive(sid)
-      }
+      // Presence is a heartbeat, not telemetry: writing it would append
+      // synchronously every few seconds and grow client-trace.jsonl without
+      // bound (900 lines/hour per open console). It only touches memory.
+      if (event === 'console:alive') return
       try {
         appendFileSync(jumpHomeClientTrace(), JSON.stringify({ at: new Date().toISOString(), event, detail }) + '\n', 'utf8')
       } catch {

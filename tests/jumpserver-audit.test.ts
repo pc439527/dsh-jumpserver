@@ -63,7 +63,7 @@ function harness(entries: Array<Record<string, unknown>>, overrides: Partial<Jum
     undefined,
     () => entries,
     // Desktop 0.2.x: stable token-free loopback console URL.
-    () => 'http://127.0.0.1:8765/',
+    () => 'http://127.0.0.1:8766/',
   )
   const def = defs.find((d) => d.name === 'jumpserver_audit')!
   const execFor = (sessionId: string) => ({ agent: { session: { header: { id: sessionId } } }, signal: new AbortController().signal, name: 'jumpserver_audit', callId: 'c1' })
@@ -104,7 +104,7 @@ describe('jumpserver_status console handover', () => {
     h.grants.arm('conversation-A', 'persistent')
     const status = h.defs.find((d) => d.name === 'jumpserver_status')!
     const value = await status.execute({}, h.execFor('conversation-A'))
-    expect(value.consoleUrl).toBe('http://127.0.0.1:8765/')
+    expect(value.consoleUrl).toBe('http://127.0.0.1:8766/')
   })
 })
 

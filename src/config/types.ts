@@ -157,7 +157,7 @@ export interface JumpServerConfig {
    * Absent means enabled (the schema default); only `false` turns it off.
    */
   consoleEnabled?: boolean
-  /** Console port; default 8765 provides a stable Desktop sidebar URL. */
+  /** Console port; default 8766 provides a stable Desktop sidebar URL. */
   consolePort?: number
   /** Auto reconnect at most 2 times with 1s/3s backoff when idle (default true) */
   autoReconnect: boolean

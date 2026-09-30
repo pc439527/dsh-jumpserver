@@ -36,6 +36,8 @@ function makeServices(granted: boolean, calls: { manual: number; assets: number;
         cursorSeq: 1,
         oldestSeq: 1,
         snapshotSince: () => [],
+        // The route parks on the observer now instead of polling its cursor.
+        waitForChange: async () => true,
       } as unknown as TerminalObserver
     },
     auditFor: () => { calls.audit++; return [] },
@@ -67,6 +69,9 @@ function drive(handler: (req: IncomingMessage, res: ServerResponse) => void, bod
       writableEnded: false,
       destroyed: false,
       status: 0,
+      // The snapshot route parks on the observer and detaches when the client goes.
+      once() { return this },
+      on() { return this },
       writeHead(status: number) { this.status = status },
       end(text: string) {
         clearTimeout(timer)
