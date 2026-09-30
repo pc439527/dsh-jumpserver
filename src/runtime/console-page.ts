@@ -197,6 +197,29 @@ function api(path, body, method) {
   });
 }
 
+/**
+ * Tell the Host this console is on screen.
+ *
+ * The right column registers the browser tab type as multiple, so it cannot
+ * tell one console from another. This heartbeat is what lets the client open a
+ * console only when none is already showing this conversation - and open again
+ * as soon as this one is closed.
+ */
+function heartbeat() {
+  if (SESSION.length === 0) return;
+  try {
+    fetch('/api/jumpserver.diag', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ event: 'console:alive', detail: { sessionId: SESSION } }),
+      credentials: 'same-origin',
+    }).catch(function () {});
+  } catch (e) {
+    /* telemetry must never break the console */
+  }
+}
+setInterval(heartbeat, 4000);
+
 function setTab(next) {
   tab = next;
   var buttons = document.querySelectorAll('nav button');
