@@ -71,14 +71,25 @@ function diag(event: string, detail?: Record<string, unknown>): void {
 }
 
 /**
- * Ask the Host whether a console page for this session is currently open.
+ * When this client last opened a console for a session, per page load.
  *
- * The right column cannot dedupe for us - the browser tab type is registered as
- * `multiple`, so every openTab makes a new tab. A module Set reset on every
- * reload (which stacked duplicates) and a sessionStorage record (which kept
- "opening" permanently recorded and so refused to open again after the
- * operator closed the tab) are both wrong. Live presence is the only signal that
- * answers both questions correctly.
+ * Presence alone is not enough to stop a storm: a freshly opened tab needs
+ * seconds to load and send its first heartbeat, while the poll runs every
+ * 2.5s, so every empty-heartbeat window opened ANOTHER tab (observed: a stack
+ * of them). The cooldown covers that gap from the client side.
+ *
+ * Deliberately in-memory: it only has to bridge one page load's polling, and a
+ * reload must be free to open again once the operator closed every tab.
+ */
+const openedAt = new Map<string, number>()
+const OPEN_COOLDOWN_MS = 60000
+
+/**
+ * Ask the Host whether a console page for this session is currently on screen.
+ *
+ * Presence answers "is it open right now", which survives a reload without ever
+ * locking the console shut. An earlier sessionStorage record did the opposite:
+ * it stayed written after the operator closed the tab, so nothing opened again.
  */
 async function consoleAlreadyOpen(sessionId: string): Promise<boolean> {
   try {
@@ -91,10 +102,11 @@ async function consoleAlreadyOpen(sessionId: string): Promise<boolean> {
     const value = await response.json() as { active?: unknown }
     return value.active === true
   } catch {
-    // Never block the console on a failed probe.
+    // A failed probe must never block the console from opening.
     return false
   }
 }
+
 
 
 export function apply(ctx: BrowserCtx): void {
@@ -135,6 +147,8 @@ export function apply(ctx: BrowserCtx): void {
     const maybeOpen = (): void => {
       const sessionId = current.getSnapshot().key
       if (typeof sessionId !== 'string' || sessionId.length === 0 || inFlight) return
+      // Cover the load gap: a tab we just opened cannot have heartbeated yet.
+      if (Date.now() - (openedAt.get(sessionId) ?? 0) < OPEN_COOLDOWN_MS) return
       if ((scope.getSnapshot().value ?? {})['autoOpenTerminal'] !== true) return
       if (side.sidebarRightTabs.get('browser') === undefined) return
       inFlight = true
@@ -150,6 +164,7 @@ export function apply(ctx: BrowserCtx): void {
           const separator = status.consoleUrl.includes('#') ? '&' : '#'
           // revealIfOpened keeps a repeat open on the existing tab instead of
           // stacking another one beside it.
+          openedAt.set(sessionId, Date.now())
           side.sidebarRight.openTab('browser', {
             revealIfOpened: true,
             params: { url: status.consoleUrl + separator + 'session=' + encodeURIComponent(sessionId) },
