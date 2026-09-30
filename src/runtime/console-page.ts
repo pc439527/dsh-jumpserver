@@ -86,7 +86,15 @@ const PAGE = String.raw`<!doctype html>
     </div>
     <div id="confirm" class="notice" style="display:none"></div>
   </section>
-  <section id="pane-assets" style="display:none"></section>
+  <section id="pane-assets" style="display:none">
+    <div class="row">
+      <input id="assetQuery" type="search" placeholder="搜索名称 / IP / 备注 / 节点" />
+      <select id="assetGroup"></select>
+      <button class="act" id="assetRefresh">刷新</button>
+      <span class="muted" id="assetNote"></span>
+    </div>
+    <div id="assetList"></div>
+  </section>
   <section id="pane-jobs" style="display:none">
     <div class="row">
       <button class="act" id="jobsRefresh">刷新</button>
@@ -265,12 +273,30 @@ function setTab(next) {
   if (next === 'audit') loadAudit();
 }
 
+/**
+ * Hard cap on terminal rows kept in the DOM.
+ *
+ * The observer already ring-buffers on the Host, but the page appended a <div>
+ * per line forever: a long-running tail -f grew the document without bound.
+ * Old rows are dropped in one batch (not one call per line, which would force a
+ * layout each time) once the cap is exceeded by a margin.
+ */
+var TERM_MAX_ROWS = 5000;
+var TERM_TRIM_BATCH = 500;
+
+function trimTerm(term) {
+  var excess = term.childElementCount - TERM_MAX_ROWS;
+  if (excess < TERM_TRIM_BATCH) return;
+  for (var i = 0; i < excess; i++) term.removeChild(term.firstElementChild);
+}
+
 function append(text, cls) {
   var term = el('term');
   var div = document.createElement('div');
   div.className = cls || 'out';
   div.textContent = text;
   term.appendChild(div);
+  trimTerm(term);
   if (following) term.scrollTop = term.scrollHeight;
 }
 
@@ -389,23 +415,81 @@ function send() {
   });
 }
 
-function loadAssets() {
-  var pane = el('pane-assets');
-  pane.innerHTML = '<div class="muted">加载中…</div>';
-  api('/api/jumpserver.assets', { sessionId: SESSION }).then(function (res) {
+/**
+ * Asset picker: search, group filter, refresh and one-click enter.
+ *
+ * The bridge route already accepted filter/group/refresh and returned the group
+ * names; the pane never used any of it, so a 100+ row bastion inventory stayed
+ * one undifferentiated table with no way to act on a row.
+ */
+function loadAssets(overrides) {
+  var opts = overrides || {};
+  var note = el('assetNote');
+  var list = el('assetList');
+  note.textContent = '加载中…';
+  var payload = { sessionId: SESSION };
+  var query = opts.filter !== undefined ? opts.filter : el('assetQuery').value.trim();
+  if (query.length > 0) payload.filter = query;
+  var group = opts.group !== undefined ? opts.group : el('assetGroup').value;
+  if (group.length > 0) payload.group = group;
+  if (opts.refresh === true) payload.refresh = true;
+  api('/api/jumpserver.assets', payload).then(function (res) {
     var data = res.data || {};
+    fillGroups(data.groups, data.group);
     if (!Array.isArray(data.rows)) {
-      pane.innerHTML = '<div class="muted">资产列表需要在堡垒机菜单态获取：' + esc(data.message || data.code || '') + '</div>';
+      list.innerHTML = '<div class="muted">资产列表需要在堡垒机菜单态获取：' + esc(data.message || data.code || '') + '</div>';
+      note.textContent = '不可用';
       return;
     }
     var rows = data.rows;
-    var head = '<div class="muted">共 ' + String(data.count || rows.length) + (data.reportedTotal ? ' / ' + String(data.reportedTotal) : '') + ' 台（健康度 ' + esc(data.health || '?') + '）</div>';
-    var body = '<table><thead><tr><th>名称</th><th>IP</th><th>系统</th><th>节点</th></tr></thead><tbody>';
-    for (var i = 0; i < rows.length; i++) {
-      body += '<tr><td>' + esc(rows[i].name) + '</td><td>' + esc(rows[i].ip) + '</td><td>' + esc(rows[i].platform) + '</td><td>' + esc(rows[i].node) + '</td></tr>';
+    note.textContent = '共 ' + String(data.count || rows.length)
+      + (data.reportedTotal ? ' / ' + String(data.reportedTotal) : '')
+      + ' 台（健康度 ' + String(data.health || '?') + '）';
+    if (rows.length === 0) {
+      list.innerHTML = '<div class="muted">没有匹配的资产</div>';
+      return;
     }
-    pane.innerHTML = head + body + '</tbody></table>';
-  });
+    var body = '<table><thead><tr><th>名称</th><th>IP</th><th>系统</th><th>节点</th><th></th></tr></thead><tbody>';
+    for (var i = 0; i < rows.length; i++) {
+      var row = rows[i];
+      body += '<tr><td>' + esc(row.name) + '</td><td>' + esc(row.ip) + '</td><td>' + esc(row.platform)
+        + '</td><td>' + esc(row.node) + '</td><td><button class="act" data-enter="'
+        + esc(row.ip || row.name) + '">进入</button></td></tr>';
+    }
+    list.innerHTML = body + '</tbody></table>';
+    var buttons = list.querySelectorAll('[data-enter]');
+    for (var k = 0; k < buttons.length; k++) {
+      buttons[k].onclick = function () { enterAsset(this.dataset.enter); };
+    }
+  }).catch(function () { note.textContent = '加载失败'; });
+}
+
+/** Populate the group picker once, keeping the current selection. */
+function fillGroups(groups, selected) {
+  var box = el('assetGroup');
+  if (box.dataset.filled === '1') return;
+  if (!Array.isArray(groups)) return;
+  var html = '<option value="">全部资产组</option>';
+  for (var i = 0; i < groups.length; i++) {
+    html += '<option value="' + esc(groups[i]) + '"' + (groups[i] === selected ? ' selected' : '') + '>' + esc(groups[i]) + '</option>';
+  }
+  box.innerHTML = html;
+  box.dataset.filled = '1';
+}
+
+/** Enter an asset from the menu, sharing the manual path and its confirm gate. */
+function enterAsset(target) {
+  if (typeof target !== 'string' || target.length === 0) return;
+  el('assetNote').textContent = '正在进入 ' + target + '…';
+  api('/api/jumpserver.manual', { sessionId: SESSION, command: target }).then(function (res) {
+    var data = res.data || {};
+    if (data.code === 'MANUAL_CONFIRM_REQUIRED') {
+      renderConfirm({ command: target, risk: data.risk, confirmToken: data.confirmToken });
+      el('assetNote').textContent = '需要在终端确认';
+      return;
+    }
+    el('assetNote').textContent = data.ok === true ? '已请求进入 ' + target : ('进入失败：' + String(data.message || data.code || res.status));
+  }).catch(function () { el('assetNote').textContent = '进入失败'; });
 }
 
 /** Running streaming jobs for this conversation; drives the interrupt button. */
@@ -557,6 +641,16 @@ function loadAudit() {
   setFollow(true);
   el('jobsRefresh').onclick = loadJobs;
   el('auditRefresh').onclick = loadAudit;
+  el('assetRefresh').onclick = function () { loadAssets({ refresh: true }); };
+  el('assetGroup').onchange = function () { loadAssets({ group: this.value }); };
+  // Debounce: the search box posts on every keystroke otherwise, and each call
+  // drives the bastion PTY.
+  var assetTimer = null;
+  el('assetQuery').oninput = function () {
+    var value = this.value;
+    if (assetTimer !== null) clearTimeout(assetTimer);
+    assetTimer = setTimeout(function () { loadAssets({ filter: value.trim() }); }, 300);
+  };
   el('auditCsv').onclick = function () { exportAudit('csv'); };
   el('auditJson').onclick = function () { exportAudit('json'); };
   var interrupt = function () {
