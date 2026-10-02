@@ -47,9 +47,9 @@ describe('risk judge credential resolution', () => {
       const out = await judgeCommandRiskDetailed(
         'some-unknown-binary',
         cfg(),
-        async (ref) => (ref === 'JEV_TEST_KEY_REF' ? 'sk-from-credential-domain' : undefined),
+        async (ref) => (ref === 'JEV_TEST_KEY_REF' ? 'test-key-not-a-secret' : undefined),
       )
-      expect(sawAuth).toBe('Bearer sk-from-credential-domain')
+      expect(sawAuth).toBe('Bearer test-key-not-a-secret')
       // The stub payload is not a verdict, so this surfaces the parse failure
       // rather than pretending the judge answered.
       expect(out.verdict).toBeNull()
@@ -62,7 +62,7 @@ describe('risk judge credential resolution', () => {
 
   it('reports timeout and http errors distinctly', async () => {
     const original = process.env['JEV_TEST_KEY_REF']
-    process.env['JEV_TEST_KEY_REF'] = 'sk-env'
+    process.env['JEV_TEST_KEY_REF'] = 'test-env-key-not-a-secret'
     const originalFetch = globalThis.fetch
     try {
       globalThis.fetch = (async () => { throw Object.assign(new Error('slow'), { name: 'TimeoutError' }) }) as never

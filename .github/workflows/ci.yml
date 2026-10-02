@@ -40,6 +40,24 @@ jobs:
       - name: Client bundle smoke
         run: npm run smoke:client
 
+  # This repository is published publicly, so every tracked file is a
+  # disclosure surface. Gate it: fail the build when a credential, a real
+  # internal address, a corporate domain or a local absolute path sneaks in.
+  # Ubuntu only - it is a pure text scan, no toolchain variance.
+  sanitize:
+    name: no secrets or real internal identifiers
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.19.0
+      - name: Tracked files are sanitized
+        run: npm run check:sanitize
+
+
   # lib/ ships in the repo so GitHub installs work without a local toolchain.
   # That only holds if lib/ never lags src/, so gate it: rebuild from scratch and
   # fail when the committed output is not what this commit's sources produce.
