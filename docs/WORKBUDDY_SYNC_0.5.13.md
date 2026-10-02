@@ -23,7 +23,7 @@ v0.5.5 不可达快速失败 / v0.5.7+5.8 语义风险裁决 / v0.5.9 拒绝审�
 | `command-status.ts` `host-key.ts` `concurrency.ts` | 新增同名 | ✅ |
 | `session.ts` `session-manager.ts` | 同名 | ✅ |
 | `host-parse.ts` `profiles.ts` `topology.ts` `inspector.ts` `runbook.ts` | 新增同名 | ✅ 已接成 inspect / topology / profile_run / baseline_* 工具 |
-| `compare.ts` | 新增同名 | 🔜 已移植，待替换 DSH 现有 `jumpserver_compare`（ops 统一） |
+| `compare.ts` | 新增同名 | ✅ 已接线：`jumpserver_compare` 已替换为 `compareTargets`（分组 + 多重集 outlier） |
 | `asset-list.ts` `command-runner.ts` `mutex.ts` `output-buffer.ts` `probe.ts` `session-registry.ts` `terminal-observer.ts` `timing.ts` | 同名 | ✅（本就一致，无需改动） |
 
 ### security/
@@ -39,7 +39,7 @@ v0.5.5 不可达快速失败 / v0.5.7+5.8 语义风险裁决 / v0.5.9 拒绝审�
 | WB 模块 | DSH 落点 | 状态 |
 |---|---|---|
 | `job-store.ts` `interrupt.ts` `time.ts` `baseline-store.ts` | `src/runtime/` 同名 | ✅ job 与 baseline 均已接线并测试 |
-| `asset-store.ts` `topology-store.ts` | `src/runtime/` 同名 | 🔜 供侧栏用，待接线 |
+| `asset-store.ts` `topology-store.ts` | `src/runtime/` 同名 | 🔜 供侧栏用，**仍未接线**（两类的实例化点全仓不存在） |
 | `paths.ts`（DSH 新建） | `src/runtime/paths.ts` | ✅ 插件状态落在 `<dsh home>/jumpserver/` |
 | `audit-store.ts`（JSONL） | — | ⛔ DSH 用 `storageDomain`（见 §3） |
 | `audit-viewer.ts`（HTTP 控制台） | — | ✅ 由 `runtime/console-page.ts` 的审计标签承担 |
@@ -62,7 +62,7 @@ v0.5.5 不可达快速失败 / v0.5.7+5.8 语义风险裁决 / v0.5.9 拒绝审�
 | `jumpserver_interrupt` `jumpserver_job_start` `jumpserver_job_read` `jumpserver_job_stop` `jumpserver_jobs` `jumpserver_snapshot` | ✅ 新增并测试 |
 | `jumpserver_inspect` `jumpserver_topology` `jumpserver_profile_run` `jumpserver_baseline_capture` `jumpserver_baseline_compare` | ✅ 已注册并测试（含 `accountByTarget`） |
 | `jumpserver_audit`（对话内读审计 + 拒绝原因） | ✅ 已注册并测试 |
-| `jumpserver_triage/compare/case/remediate`（DSH 独有 ops） | ⏳ 待按"以 WB inspector 为事实源"统一 |
+| `jumpserver_triage/compare/case/remediate`（DSH 独有 ops） | ⏳ 部分完成：`compare` 已统一；`triage`/`remediate` 仍走 `src/ops/profiles.ts` 自有 profile，未复用 inspector 固定探针 |
 | `jumpserver_console_rotate_token` `jumpserver_arm/disarm` | ⛔ DSH 无控制台令牌；DSH 的 `/jumpserver` 会话授权更强 |
 
 ### 侧栏 / 桥接
@@ -75,7 +75,7 @@ v0.5.5 不可达快速失败 / v0.5.7+5.8 语义风险裁决 / v0.5.9 拒绝审�
 
 ## 2. 已完成并验证（本分支）
 
-七个功能提交，每个都通过 `npm run typecheck`（host+client）与 `npx vitest run`（当前 399/399）：
+七个功能提交，每个都通过 `npm run typecheck`（host+client）与 `npx vitest run`（当时 399/399；当前已增至 **490/490**，60 个测试文件）：
 
 1. `2ce3924e4` 核心移植：传输层（账号选择 / 不可达冷却 / commandStatus / job PTY 归属 /
    sessionGate / 拒绝审计）、安全层（10 个新错误码、classifier 扩充、hdbsql+SAP、
@@ -112,45 +112,48 @@ v0.5.5 不可达快速失败 / v0.5.7+5.8 语义风险裁决 / v0.5.9 拒绝审�
 
 ## 4. 剩余工作（按优先级）
 
-1. **ops 统一（Phase 3b）** — `jumpserver_triage` 改用 `inspector` 的固定只读探针 + `host-parse` 的
-   `HostInventory`（证据仍进 `EvidenceLedger`）；`jumpserver_compare` 换成 `compareTargets`
-   （分组 + 多重集 outlier，失败主机保留自身错误码）；`jumpserver_remediate` 预检复用 `inspector`；
+1. **ops 统一（Phase 3b）** — 部分完成：`jumpserver_compare` 已换成 `compareTargets`
+   （分组 + 多重集 outlier，失败主机保留自身错误码）。
+   **仍待做**：`jumpserver_triage` 改用 `inspector` 的固定只读探针 + `host-parse` 的
+   `HostInventory`（证据仍进 `EvidenceLedger`）；`jumpserver_remediate` 预检复用 `inspector`；
    删除 `src/ops/{profiles,collect}.ts` 的重复度量逻辑，保留 case/证据账本。
-2. **测试移植（Phase 7）** — 把 WB 的 `node:test .mjs` 用例转成 vitest：`host-parse` / `runbook` /
-   `topology` / `concurrency` / `enter-unreachable` / `session-account-selection` / `host-key` /
-   `target-scope` / `job-start-gate`；新增 context-budget 测试（注册工具 schema < 40 KB）。
-3. **文档与版本** — README 工具表/权限矩阵重写（现为 24 个工具 + 侧栏 4 个标签）；`package.json`
-   → 0.4.0；`PLUGIN_VERSION` 同步；`tests/version-consistency` 覆盖 README 工具表。
+2. **测试移植（Phase 7）** — 大部分已完成：`host-parse` / `runbook` / `topology` /
+   `concurrency` / `enter-unreachable` / `session-account-selection` / `host-key` /
+   `target-scope` / `job-start-gate` 均有 vitest 覆盖；`tests/context-budget.test.ts` 已建立
+   （总预算 **28 KB**、单工具 3 KB）。剩余为把 WB 侧仍缺的用例继续补齐。
+3. **文档与版本** — ✅ 已完成：`package.json` → 0.4.0、`PLUGIN_VERSION` 同步（0.4.0）、
+   `PROTOCOL_VERSION` 4、README 工具表（25 个工具）/ 权限矩阵已重写并由
+   `tests/version-consistency` 覆盖。
 
 ## 5. 验证入口
 
 ```bash
 npm run typecheck          # host + client
-npx vitest run             # 399/399（新增 jobs / jobs-bridge / inspection-tools / risk-judge-gate / jumpserver-audit）
+npx vitest run             # 490/490，60 个测试文件（jobs / jobs-bridge / inspection-tools / risk-judge-gate / jumpserver-audit 等）
 node scripts/classifier-report.mjs
 npm run build && npm run smoke:client && node scripts/sync-profile.mjs
 ```
 
-## 6. 部署状态（本机）
+## 6. 部署方式（与机器无关）
 
 | 项 | 值 |
 |---|---|
-| 运行 profile | **desktop**（`$DSH_PROFILE_DIR=<dsh-home>\profiles\desktop`），DSH Desktop 0.2.0-rc.1（Node 22.19+）；本机**没有** `web` profile |
-| 已安装 | `dsh-jumpserver@0.4.0`（`node_modules/dsh-jumpserver`：`lib/` + `cordis.patch.yml` + `package.json` + `README.md`） |
-| 安装方式 | profile `package.json` 增加 `"dsh-jumpserver": "file:<plugin-workspace>"` + `dsh.profile.bundles` 追加 `dsh-jumpserver`，随后用内置 pnpm 安装（本机无 `dsh` CLI 可用） |
+| 目标 profile | **desktop**（DSH Desktop 0.2.x，Node 22.19+）。`sync-profile` 按 `JS_PROFILE_PKG` → `DSH_PROFILE_DIR` → 自动探测 `~/.dsh/profiles/*` 的顺序解析，优先选 desktop profile |
+| 安装内容 | `dsh-jumpserver@0.4.0`（`lib/` + `cordis.patch.yml` + `package.json` + `README.md`） |
+| 安装方式 | `dsh plugin --profile desktop add github:pc439527/dsh-jumpserver`；或 profile `package.json` 增加 `"dsh-jumpserver": "file:<plugin-workspace>"` 并在 `dsh.profile.bundles` 追加 `dsh-jumpserver`，随后用内置 pnpm 安装 |
 | 一致性校验 | 部署副本的 `lib/index.js`、`lib/client.js`、`package.json` 与仓库构建产物 **SHA256 逐字节一致** |
-| 依赖 | `ssh2` / `zod` 等已装；`cpu-features` 原生构建失败（无 C++ 工具链）——ssh2 会自动退回纯 JS 实现 |
-| 生效方式 | **需要重启 DSH（dsh web / 桌面应用）**，Host 在启动时装载插件；随后硬刷新浏览器 |
+| 依赖 | `ssh2` / `zod`。若运行环境缺少 C++ 工具链导致 `cpu-features` 原生构建失败，ssh2 会自动退回纯 JS 实现，功能不受影响 |
+| 生效方式 | **需要完全重启 DSH Desktop**，Host 在启动时装载插件；随后硬刷新界面 |
 
-顺带修掉两个打包缺陷（提交 `a5074c6c6`）：`files` 只含 `lib` 导致安装副本丢失 `cordis.patch.yml`（少它插件无法被装载）；`sync-profile.mjs` 写死 web profile，现按 `JS_PROFILE_PKG > $DSH_PROFILE_DIR > web 默认` 解析。
+顺带修掉两个打包缺陷（提交 `a5074c6c6`）：`files` 只含 `lib` 导致安装副本丢失 `cordis.patch.yml`（少它插件无法被装载）；`sync-profile.mjs` 写死 web profile，现按 `JS_PROFILE_PKG` → `$DSH_PROFILE_DIR` → 自动探测 的顺序解析。
 
 **Desktop 原生化已完成**：设置卡片走 `ctx.configForms`，密码走 `ctx.remote.credentials`，控制台由 `ctx.sidebarRight.openTab('browser', …)` 在右栏打开；`dsh-better-sidebar` 依赖与其注入元数据已全部移除。Host 工具（25 个）与右栏控制台均可直接使用。
 
-**回滚**：`<dsh-home>\profiles\desktop\package.json.bak-0.4.0` 是安装前的备份；恢复它并删除 `node_modules/dsh-jumpserver` 即回到安装前状态。
+**回滚**：恢复 profile `package.json` 的安装前备份（`sync-profile` 会在同步前生成带版本后缀的 `.bak-*` 副本），并删除安装副本目录 `node_modules/dsh-jumpserver`，即回到安装前状态。
 
 ## 7. 已知验证边界
 
-`scripts/plugin-load-smoke.mjs` 无法在本工作区独立运行：它需要宿主提供的 `@deepseek-ai/*` peer（如 `@deepseek-ai/dsh-storage`，被 `dsh-storage-domain` 依赖），这些在 DSH 应用内由宿主解析、workspace 中不存在。因此本轮的验证是：仓库侧 typecheck / 403 用例 / build / client bundle smoke / 工具表预算全绿，加上部署副本与构建产物的逐字节一致性；"应用真正装载"这一步需要重启后由 `jumpserver_status` 确认 `pluginVersion 0.4.0`。
+`scripts/plugin-load-smoke.mjs` 无法在本工作区独立运行：它需要宿主提供的 `@deepseek-ai/*` peer（如 `@deepseek-ai/dsh-storage`，被 `dsh-storage-domain` 依赖），这些在 DSH 应用内由宿主解析、workspace 中不存在。因此本轮的验证是：仓库侧 typecheck / **490 个用例** / build / client bundle smoke / 工具表预算全绿，加上部署副本与构建产物的逐字节一致性；"应用真正装载"这一步需要重启后由 `jumpserver_status` 确认 `pluginVersion 0.4.0`。
 
 ## 8. desktop 适配调研与内置控制台（V0.4.0）
 
@@ -168,7 +171,7 @@ npm run build && npm run smoke:client && node scripts/sync-profile.mjs
 - 只绑定 `127.0.0.1`；每进程随机令牌（HttpOnly/SameSite Cookie；Token 不进入 URL、HTML、日志或工具结果）；未注册路径一律 404；CSP 不含任何远程来源；
 - API 直接挂载插件**现有的 bridge 路由**（`registerBridgeRoutes`），所以会话授权、状态机、人工输入的一次性确认挑战、审计行为与侧栏完全一致；
 - 页面含 **终端 / 资产 / 任务 / 审计** 四个标签，拒绝记录显示为「已拦截 / 未批准 + 原因」；
-- 配置 `consoleEnabled`（默认 true）/ `consolePort`（默认 0 = 随机回环端口）；`jumpserver_status` 返回本对话的 `consoleUrl`，Host 启动日志打印基础地址。
+- 配置 `consoleEnabled`（默认 true）/ `consolePort`（默认 **8766**，提供稳定的 Desktop 右栏地址；该端口被占用时自动回退到 OS 指定的回环端口，设为 0 则直接用随机回环端口）；`jumpserver_status` 返回本对话的 `consoleUrl`，Host 启动日志打印基础地址。
 
 ## 9. 同步边界（务必如实理解）
 

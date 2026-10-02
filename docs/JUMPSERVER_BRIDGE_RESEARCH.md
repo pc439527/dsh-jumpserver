@@ -311,7 +311,7 @@ npm run smoke:client
 npm run sync
 ```
 
-然后重启 `dsh web` 并硬刷新浏览器。项目当前 profile 是物理复制目录而不是源码实时引用；如果只更新 Git/source 而没有重新 build + sync，页面仍会继续显示旧版顶部“跟随中/清屏”和旧 ANSI 行为。
+然后完全重启 DSH Desktop 并刷新界面。项目当前 profile 是物理复制目录而不是源码实时引用；如果只更新 Git/source 而没有重新 build + sync，页面仍会继续显示旧版顶部“跟随中/清屏”和旧 ANSI 行为。
 
 ---
 
