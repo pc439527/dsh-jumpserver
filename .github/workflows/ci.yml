@@ -39,3 +39,24 @@ jobs:
         run: npm run test:e2e
       - name: Client bundle smoke
         run: npm run smoke:client
+
+  # lib/ ships in the repo so GitHub installs work without a local toolchain.
+  # That only holds if lib/ never lags src/, so gate it: rebuild from scratch and
+  # fail when the committed output is not what this commit's sources produce.
+  # Ubuntu only — the check is a byte comparison, and cross-platform toolchain
+  # differences would turn it into a coin flip.
+  lib-fresh:
+    name: committed lib/ matches a fresh build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.19.0
+          cache: npm
+      - name: Install
+        run: npm ci --legacy-peer-deps
+      - name: Committed lib/ is not stale
+        run: npm run check:lib

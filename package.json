@@ -27,6 +27,7 @@
   },
   "scripts": {
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.client.json --noEmit",
+    "check:lib": "node scripts/check-lib-fresh.mjs",
     "typecheck:host": "tsc -p tsconfig.json --noEmit",
     "typecheck:client": "tsc -p tsconfig.client.json --noEmit",
     "clean": "node scripts/clean-lib.mjs",

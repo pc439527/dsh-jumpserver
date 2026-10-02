@@ -70,20 +70,21 @@ src/
 
 面向 **DSH Desktop 0.2.x**（Node 22.19+）：设置卡片走 DSH 原生 `configForms`，终端/资产/任务/审计经原生 `sidebarRight` Browser Tab 打开内置控制台，无需任何第三方侧栏插件。
 
+**GitHub / npm 安装无需本地构建**：本仓库把预构建产物 `lib/`（含 `lib/index.js` 与 `lib/client.js`）一并提交，DSH 直接从安装副本加载。只有走本地源码路径时才需要自己构建。
+
 ```bash
-# ① 构建本插件（生成 lib/，含 lib/client.js 浏览器 bundle）
-npm install --legacy-peer-deps
-npm run build
-
-# ② 安装 dsh-jumpserver
-
-## 本地源码方式（等价于 DSH「添加插件」弹窗里复制出的命令）：
-dsh plugin --profile desktop add "file:<本插件所在路径>"
+## ① 从 GitHub 仓库安装（收录清单要求的可安装方式，开箱即用）：
+dsh plugin --profile desktop add github:pc439527/dsh-jumpserver
 ## 发布到 npm 后可直接：
 dsh plugin --profile desktop add dsh-jumpserver
-## 或直接从 GitHub 仓库安装（收录清单要求的可安装方式）：
-dsh plugin --profile desktop add github:pc439527/dsh-jumpserver
+
+## ② 本地源码方式（等价于 DSH「添加插件」弹窗里复制出的命令）：
+## 需要先在本目录构建出 lib/：
+npm install --legacy-peer-deps && npm run build
+dsh plugin --profile desktop add "file:<本插件所在路径>"
 ```
+
+> `lib/build-meta.json` 里的 `hostBuild` 恒比 HEAD 落后一个提交（产物必须先构建才能提交，这是提交产物这件事本身的固有结果）。这不会触发下文「侧栏版本不一致」告警——该告警比较的 `hostBuild` 与 `clientBuild` 同源于一份 build-meta，必然一致。
 
 **更新已安装的插件**（Host 与浏览器 half 分开发布，只改源码不会生效）：
 
@@ -297,6 +298,7 @@ Desktop 版使用 DSH 原生服务：设置页经 `ctx.configForms.get('jumpserv
 | COMMAND_BLOCKED | READ_ONLY 权限拒绝，或用户拒绝审批（审计里对应 BLOCKED / DENIED） |
 | UNKNOWN_STATE | 无法确认位置；已停止执行，请 reconnect/status 后再试 |
 | 设置页看不到 JumpServer 卡片 | 确认已构建（`lib/client.js` 存在）；重启后仍无 → 检查 boot 日志里 client-modules 组合错误 |
+| GitHub 安装后插件无反应 / 卡片不出现 | 安装副本缺 `lib/` 即 Host 入口缺失，DSH 加载会**静默失败**。自查：`ls ~/.dsh/profiles/*/node_modules/dsh-jumpserver/lib`；为空说明装到的提交没有产物，换用含 `lib/` 的提交重装 |
 
 ## 开发与测试
 
@@ -308,11 +310,14 @@ npm run smoke:client       # 浏览器 bundle 物化冒烟
 npm run smoke              # 实机冒烟（需 JS_USER + JUMPSERVER_PASSWORD，可选 JS_HOST/JS_TARGET_x）
 node scripts/plugin-load-smoke.mjs   # 已安装包加载冒烟
 npm run sync               # build + 把 lib/ + package.json 同步进 Desktop profile 安装副本
+npm run check:lib          # 守卫：已提交的 lib/ 必须与 src/ 重新构建的结果逐字节一致
 ```
+
+**改完 `src/` 必须重新构建并把 `lib/` 一起提交。** GitHub 安装直接吃仓库里已提交的产物，漏提交就会让所有人装到一个「装上了但不运行」的旧版本——这正是本插件静默失效最常见的原因。`npm run check:lib`（CI 的 `lib-fresh` job）会在你漏掉时失败，并列出具体是哪些产物文件落后。
 
 测试覆盖亮点：`tests/console.test.ts`（控制台令牌/路由/端口释放）、`tests/jobs.test.ts`（单次 Ctrl+C / 幂等停止 / 对话隔离 / 游标读）、`tests/inspection-tools.test.ts`（结构化画像 + 基线漂移往返）、`tests/risk-judge-gate.test.ts`（advisory / 失败降级 / autoAllow 与分布否决）、`tests/context-budget.test.ts`（工具表 schema 预算 28 KB）、`tests/classifier-corpus.test.ts`（READ 误判 <2%、0 误放）。
 
-GitHub Actions CI（typecheck + vitest + build + classifier 门槛 + e2e + client bundle smoke）在 main 与 PR 上自动运行。
+GitHub Actions CI（typecheck + vitest + build + classifier 门槛 + e2e + client bundle smoke，以及校验已提交 `lib/` 未落后于 `src/` 的 `lib-fresh`）在 main 与 PR 上自动运行。
 
 
 ## 已知限制与故障排查（DSH Desktop 0.2.x）

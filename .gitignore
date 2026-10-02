@@ -1,7 +1,14 @@
 node_modules/
-lib/
 dist/
 *.tsbuildinfo
+
+# lib/ IS COMMITTED ON PURPOSE. The GitHub install path
+# (dsh plugin --profile desktop add github:pc439527/dsh-jumpserver) ships
+# the prebuilt plugin so it loads without a local toolchain. Regenerate with
+# `npm run build` and commit lib/ alongside src/; `npm run check:lib` guards
+# against forgetting. Only esbuild's intermediate is ignored — build-client.mjs
+# deletes it on success, so a leftover means a build died mid-flight.
+lib/_client-impl.cjs
 
 # Local scratch: npm cache routing, package extractions, probe scripts
 .tmp-*

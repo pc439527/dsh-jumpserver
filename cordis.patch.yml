@@ -2,9 +2,9 @@
 #
 # When the plugin is installed through the official CLI —
 #
-#   dsh plugin --profile web add dsh-jumpserver
+#   dsh plugin --profile desktop add dsh-jumpserver
 #   # or from source / GitHub:
-#   dsh plugin --profile web add github:pc439527/dsh-jumpserver
+#   dsh plugin --profile desktop add github:pc439527/dsh-jumpserver
 #
 # — the CLI appends dsh-jumpserver to the bundle stack and the profile boot
 # merges THIS patch (a single `insert` of the plugin row). No manual profile

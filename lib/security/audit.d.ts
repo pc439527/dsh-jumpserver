@@ -1,0 +1,36 @@
+import { z } from 'zod';
+import type { AuditRecord } from '../jumpserver/session-manager.js';
+/** zod record schema for the storageDomain audit table. */
+export declare const auditRecordSchema: z.ZodObject<{
+    timestamp: z.ZodString;
+    operation: z.ZodString;
+    gateway: z.ZodString;
+    target: z.ZodNullable<z.ZodString>;
+    hostname: z.ZodNullable<z.ZodString>;
+    command: z.ZodNullable<z.ZodString>;
+    redactedCommand: z.ZodOptional<z.ZodString>;
+    normalizedRedactedCommand: z.ZodOptional<z.ZodString>;
+    actor: z.ZodDefault<z.ZodString>;
+    risk: z.ZodString;
+    riskReason: z.ZodOptional<z.ZodString>;
+    riskRuleId: z.ZodOptional<z.ZodString>;
+    riskConfidence: z.ZodOptional<z.ZodString>;
+    classifierVersion: z.ZodOptional<z.ZodNumber>;
+    normalizedCommand: z.ZodOptional<z.ZodString>;
+    approvalRequired: z.ZodDefault<z.ZodBoolean>;
+    approvalResult: z.ZodDefault<z.ZodString>;
+    riskJudge: z.ZodOptional<z.ZodString>;
+    refusalReason: z.ZodOptional<z.ZodString>;
+    toolCallId: z.ZodOptional<z.ZodString>;
+    batchId: z.ZodOptional<z.ZodString>;
+    taskId: z.ZodOptional<z.ZodString>;
+    sequence: z.ZodOptional<z.ZodNumber>;
+    batchIndex: z.ZodOptional<z.ZodNumber>;
+    permissionMode: z.ZodString;
+    result: z.ZodString;
+    exitCode: z.ZodNullable<z.ZodNumber>;
+    durationMs: z.ZodNullable<z.ZodNumber>;
+}, z.core.$strip>;
+export type StructuredAuditRecord = z.infer<typeof auditRecordSchema>;
+export declare function toStructuredAuditRecord(record: AuditRecord): StructuredAuditRecord;
+export declare function nextAuditKey(timestampIso: string): string;
