@@ -30,6 +30,35 @@
 - **内置控制台（Desktop 友好）**：Host 在 127.0.0.1 上提供一个**自带页面**的运维控制台（终端镜像 / 资产 / 任务 / 审计），URL 由 `jumpserver_status` 返回（不含令牌；对话 ID 通过 URL fragment 传递）。它**不依赖任何第三方插件**——Desktop 直接用 DSH 原生 `sidebarRight` Browser Tab 打开。
 - **凭据安全**：密码走 DSH 凭据域 credential-ref（`passwordEnv`），连接时解析、不缓存，绝不进入 tool result / 日志 / 审计 / 终端事件 / 浏览器响应。
 
+## 当前进度与实现状态
+
+> 当前版本 **0.4.0**（`PROTOCOL_VERSION` 4）。以下状态经 `npm run typecheck` + `npm test`（**490 用例 / 60 个测试文件**）+ `npm run check:lib` 实测核对，非计划值。
+
+### 已实现且有测试覆盖
+
+会话状态机与显式迁移｜SSH/PTY 持久会话｜命令结果语义（`commandStatus`）｜多账号资产选择（`accountIndex`）｜不可达资产快速失败与冷却｜目标范围（allow/deny + CIDR/glob）｜主机密钥 TOFU/固定指纹｜资产发现（`p` + footer 校验 + 缓存）｜批量执行 target affinity｜固定只读探针巡检（inspect）｜拓扑关系图｜命名 runbook + 断言｜基线捕获与漂移检测｜流式任务（游标读/幂等停止）｜语义风险裁决（可选）｜拒绝审计（BLOCKED/DENIED）｜内置控制台四标签｜凭据 credential-ref｜25 个 Host 工具
+
+### 部分接线（功能可用，但未统一到 inspector 事实源）
+
+| 项 | 现状 |
+|---|---|
+| `jumpserver_compare` | ✅ 已替换为 `compareTargets`（分组 + 多重集 outlier，失败主机保留自身错误码） |
+| `jumpserver_triage` | ⏳ 仍走 `src/ops/profiles.ts` 的自有 profile，**未复用** `inspector` 的固定只读探针 |
+| `jumpserver_remediate` | ⏳ preCheck 同理，未复用 `inspector` |
+
+即「探针巡检（inspect）」与「诊断采集（triage）」目前是两套并行实现，度量口径可能存在细微差异。
+
+### 未接线（死代码）
+
+`src/runtime/asset-store.ts`（34 行）与 `src/runtime/topology-store.ts`（27 行）——两个类在全仓无实例化点，计划供侧栏使用。
+
+### 有意不做
+
+- WorkBuddy 的 **Topology / Stats / Sessions / Settings** 控制台标签（仅同步了终端/资产/任务/审计四标签，`ConsoleTabId` 已收窄以避免声明不存在的能力）
+- WorkBuddy 的**实例选择器**与 console token 轮换模型
+- JumpServer **REST API / Access Key / Core API Service Account**（资产发现默认走 KoKo 菜单 `p`，不强制引入管理员级注册凭据）
+- **MFA 自动处理**、RDP/VNC/SFTP/文件传输/数据库/Web Terminal
+
 ## 架构
 
 ```text
@@ -66,27 +95,42 @@ src/
 
 核心设计：**传输主机（Transport Host）≠ 逻辑目标（Logical Target）**。一个 ssh2 PTY Channel 复用于整个会话；进入目标后执行随机探针（hostname/whoami/pwd）验证，验证成功才置 `ASSET_SHELL`；命令完成用唯一 Completion Marker 判定并返回真实 exit code。
 
-## 安装
+## 操作指引
 
-面向 **DSH Desktop 0.2.x**（Node 22.19+）：设置卡片走 DSH 原生 `configForms`，终端/资产/任务/审计经原生 `sidebarRight` Browser Tab 打开内置控制台，无需任何第三方侧栏插件。
+### 1. 环境要求
+
+| 项 | 要求 |
+|---|---|
+| DSH | Desktop **0.2.x** |
+| Node | `^22.19.0 || >=24` |
+| 堡垒机 | 一个可 SSH 登录的 **JumpServer / KoKo** 账号，且该账号已被授权目标资产 |
+| 插件侧栏 | **无需任何第三方插件**（设置卡片走 DSH 原生 `configForms`，控制台走原生 `sidebarRight` Browser Tab） |
+
+面向 **DSH Desktop 0.2.x**（Node 22.19+）。
+
+### 2. 安装
 
 **GitHub / npm 安装无需本地构建**：本仓库把预构建产物 `lib/`（含 `lib/index.js` 与 `lib/client.js`）一并提交，DSH 直接从安装副本加载。只有走本地源码路径时才需要自己构建。
 
 ```bash
-## ① 从 GitHub 仓库安装（收录清单要求的可安装方式，开箱即用）：
+# ① 从 GitHub 仓库安装（收录清单要求的可安装方式，开箱即用）
 dsh plugin --profile desktop add github:pc439527/dsh-jumpserver
-## 发布到 npm 后可直接：
+
+# 发布到 npm 后可直接
 dsh plugin --profile desktop add dsh-jumpserver
 
-## ② 本地源码方式（等价于 DSH「添加插件」弹窗里复制出的命令）：
-## 需要先在本目录构建出 lib/：
+# ② 本地源码方式（等价于 DSH「添加插件」弹窗里复制出的命令），需先构建出 lib/
 npm install --legacy-peer-deps && npm run build
 dsh plugin --profile desktop add "file:<本插件所在路径>"
 ```
 
+> **可见性前提**：`github:pc439527/dsh-jumpserver` 这条命令要求该仓库对使用者**可公开访问**。若仓库处于私有状态，他人执行会失败——这不影响你自己在本机的安装。
+
 > `lib/build-meta.json` 里的 `hostBuild` 恒比 HEAD 落后一个提交（产物必须先构建才能提交，这是提交产物这件事本身的固有结果）。这不会触发下文「侧栏版本不一致」告警——该告警比较的 `hostBuild` 与 `clientBuild` 同源于一份 build-meta，必然一致。
 
-**更新已安装的插件**（Host 与浏览器 half 分开发布，只改源码不会生效）：
+### 3. 升级与回滚
+
+**升级**（Host 与浏览器 half 分开发布，只改源码不会生效）：
 
 ```bash
 npm run sync        # build（tsc + client bundle + build-meta）+ sync-profile 同步进 profile 安装副本
@@ -94,15 +138,17 @@ npm run sync        # build（tsc + client bundle + build-meta）+ sync-profile 
 
 `sync-profile` 按 `JS_PROFILE_PKG` → `DSH_PROFILE_DIR` → **自动探测** `~/.dsh/profiles/*` 的顺序解析目标；在普通终端里没有 `DSH_PROFILE_DIR`，会自动探测并优先选择 desktop profile，不需要手动指定。
 
-然后**完全重启 DSH Desktop**（Host 在启动时加载插件；仅替换磁盘文件不会生效），并硬刷新界面。侧栏头部会以 Host/Client 版本不一致提示你这一条。
+然后**完全重启 DSH Desktop**（Host 在启动时加载插件；仅替换磁盘文件不会生效），并硬刷新界面。重启后用 `jumpserver_status` 核对 `pluginVersion` / `hostBuild`；侧栏头部也会以 Host/Client 版本不一致提示你这一条。
 
-## 快速开始
+> `lib/build-meta.json` 里的 `hostBuild` 恒比 HEAD 落后一个提交（产物必须先构建才能提交，这是提交产物这件事本身的固有结果）。这不会触发「侧栏版本不一致」告警——该告警比较的 `hostBuild` 与 `clientBuild` 同源于一份 build-meta，必然一致。
 
-### 1. 在设置页配置连接
+**回滚**：恢复 profile `package.json` 的安装前备份（`npm run sync` 会生成带版本后缀的 `package.json.bak-*`），并删除安装副本目录 `node_modules/dsh-jumpserver`，再完全重启 DSH Desktop，即回到安装前状态。
+
+### 4. 在设置页配置连接
 
 **设置 → 插件 → JumpServer** 卡片填写：堡垒机 host/port、JumpServer 用户名、密码（`passwordEnv` 指向凭据域，如 `JUMPSERVER_PASSWORD`）、权限模式（推荐 `READ_ONLY`）。卡片内置 **测试连接** 按钮（独立一次性会话，不触碰正在运行的 Agent 会话）。
 
-### 2. 授权并下达任务
+### 5. 授权并下达任务
 
 ```text
 # 单轮授权（任务直接交给 Agent，本轮结束自动锁回）：
@@ -114,7 +160,7 @@ npm run sync        # build（tsc + client bundle + build-meta）+ sync-profile 
 
 > 未授权时所有 `jumpserver_*` 工具统一返回 `JUMPSERVER_NOT_ARMED`；裸 `/jumpserver` 只显示帮助、不会授权。
 
-### 3. 典型使用
+### 6. 典型使用
 
 ```text
 用户：/jumpserver 检查 web-app-01 / web-app-02 的 CPU、内存、磁盘、负载和错误日志，并对比两个节点。
@@ -160,7 +206,7 @@ jumpserver_job_read(jobId="jsjob_xxxx")                          # 只取增量
 | assetGroups | {} | 资产组别名：组名 → 关键词列表 |
 | runbooks | {} | 命名 runbook：`{ title, steps[] }`，步骤为 profile 或只读 command，可带 `expect` 断言 |
 | riskJudge | {} | 可选语义裁决：`{ enabled, endpoint, apiKeyEnv, model, timeoutMs, cacheTtlSeconds, redactNetwork, autoAllow{...} }`，**默认关闭**；API Key 只经 credential-ref 解析 |
-| consoleEnabled / consolePort | true / 8766 | 内置控制台：仅绑定 127.0.0.1，默认 8766 固定回环端口（避开 WorkBuddy 的 8765）；URL 由 `jumpserver_status` 返回 |
+| consoleEnabled / consolePort | true / 8766 | 内置控制台：仅绑定 127.0.0.1，默认 8766 固定回环端口（避开 WorkBuddy 的 8765）；**端口被占用时自动回退到随机回环端口**，此时地址以 `jumpserver_status` 返回的 `consoleUrl` 为准 |
 | autoReconnect / enableAudit | true / true | 空闲断线自动重连（最多 2 次）/ 命令审计 |
 | autoOpenTerminal / terminalScrollback | true / 5000 | 进会话页自动打开侧栏标签 / 终端保留行数 |
 
@@ -225,8 +271,8 @@ jumpserver_job_read(jobId="jsjob_xxxx")                          # 只取增量
 
 Desktop 版使用 DSH 原生服务：设置页经 `ctx.configForms.get('jumpserver')` 注册到插件设置区，密码写入 `ctx.remote.credentials`；授权后由 `ctx.sidebarRight.openTab('browser', …)` 在右栏打开控制台。不依赖任何第三方侧栏插件。
 
-- **入口**：调用 " + BT + "jumpserver_status" + BT + "，返回的 " + BT + "consoleUrl" + BT + " 就是本对话的控制台地址（Host 启动日志里也会打印基础地址）。直接粘贴进浏览器打开即可。
-- **内容**：**终端**（实时 PTY 镜像，输入黄/输出绿/系统蓝，人工输入支持菜单态 " + BT + "p" + BT + " / IP 或名称 / " + BT + "q" + BT + " / " + BT + "exit" + BT + "）、**资产**、**任务**（停止 / 中断）、**审计**（拒绝记录显示为「已拦截 / 未批准 + 原因」）。
+- **入口**：调用 `jumpserver_status`，返回的 `consoleUrl` 就是本对话的控制台地址（Host 启动日志里也会打印基础地址）。直接粘贴进浏览器打开即可。
+- **内容**：**终端**（实时 PTY 镜像，输入黄/输出绿/系统蓝，人工输入支持菜单态 `p` / IP 或名称 / `q` / `exit`）、**资产**、**任务**（停止 / 中断）、**审计**（拒绝记录显示为「已拦截 / 未批准 + 原因」）。
 - **安全模型**（三条必须同时成立）：① 只绑定 `127.0.0.1`，永不监听可路由地址；② 每进程随机令牌只存在于 Host 内存与 **HttpOnly / SameSite=Strict Cookie**（首次打开页面时下发），Token 不进入 URL、HTML、日志、`console.json` 或工具结果，且 Host/Origin/Sec-Fetch-Site 校验拒绝跨站与 Host 伪造；③ API 就是侧栏用的**同一套 bridge 接口**——会话授权、状态机、人工输入的一次性确认挑战、审计全部一致，控制台只增加通道，不新增策略。
 - **不做**：不自动拉起系统浏览器（模型只把 URL 交给你），不引入跨进程实例选择器。
 
@@ -304,25 +350,26 @@ Desktop 版使用 DSH 原生服务：设置页经 `ctx.configForms.get('jumpserv
 
 ```bash
 npm run typecheck          # host + client 双侧类型检查
-npm test                   # vitest：状态机/检测器/分类器/权限闸门/风险裁决/会话/观察者/任务/巡检/基线/授权/资产解析/ops 等 400 用例
+npm test                   # vitest：状态机/检测器/分类器/权限闸门/风险裁决/会话/观察者/任务/巡检/基线/授权/资产解析/ops 等 490 用例（60 个测试文件）
 npm run build              # tsc -> lib/ + esbuild -> lib/client.js + build-meta
 npm run smoke:client       # 浏览器 bundle 物化冒烟
 npm run smoke              # 实机冒烟（需 JS_USER + JUMPSERVER_PASSWORD，可选 JS_HOST/JS_TARGET_x）
 node scripts/plugin-load-smoke.mjs   # 已安装包加载冒烟
 npm run sync               # build + 把 lib/ + package.json 同步进 Desktop profile 安装副本
 npm run check:lib          # 守卫：已提交的 lib/ 必须与 src/ 重新构建的结果逐字节一致
+npm run check:sanitize      # 守卫：全量扫描跟踪文件，禁止凭据/真实内网地址/企业域名/本机绝对路径
 ```
 
 **改完 `src/` 必须重新构建并把 `lib/` 一起提交。** GitHub 安装直接吃仓库里已提交的产物，漏提交就会让所有人装到一个「装上了但不运行」的旧版本——这正是本插件静默失效最常见的原因。`npm run check:lib`（CI 的 `lib-fresh` job）会在你漏掉时失败，并列出具体是哪些产物文件落后。
 
 测试覆盖亮点：`tests/console.test.ts`（控制台令牌/路由/端口释放）、`tests/jobs.test.ts`（单次 Ctrl+C / 幂等停止 / 对话隔离 / 游标读）、`tests/inspection-tools.test.ts`（结构化画像 + 基线漂移往返）、`tests/risk-judge-gate.test.ts`（advisory / 失败降级 / autoAllow 与分布否决）、`tests/context-budget.test.ts`（工具表 schema 预算 28 KB）、`tests/classifier-corpus.test.ts`（READ 误判 <2%、0 误放）。
 
-GitHub Actions CI（typecheck + vitest + build + classifier 门槛 + e2e + client bundle smoke，以及校验已提交 `lib/` 未落后于 `src/` 的 `lib-fresh`）在 main 与 PR 上自动运行。
+GitHub Actions CI（typecheck + vitest + build + classifier 门槛 + e2e + client bundle smoke，以及独立 job `lib-fresh` 校验已提交 `lib/` 未落后于 `src/`、`sanitize` 校验脱敏）在 main 与 PR 上自动运行。
 
 
-## 已知限制与故障排查（DSH Desktop 0.2.x）
+## 已知行为与边界（DSH Desktop 0.2.x 实证）
 
-以下均为真实堡垒机验收中确认的行为，不是待办事项。
+以下均为真实堡垒机验收中确认的行为，**不是待办事项**，与上文的「已知限制」「故障排查」不重复。
 
 ### 命令成功但没有输出
 
@@ -355,6 +402,38 @@ BLOCKED / DENIED 都会写入审计，可用 `jumpserver_audit`（`refusalsOnly:
 ### npm run sync
 
 脚本按 `JS_PROFILE_PKG` → `DSH_PROFILE_DIR` → **自动探测** `~/.dsh/profiles/*` 的顺序解析目标。`DSH_PROFILE_DIR` 只在宿主进程里存在，普通终端中会自动探测并优先选择 desktop profile。
+
+## 公开发布前检查清单
+
+本仓库若要对外公开（提交 registry 收录、供他人 `dsh plugin add github:…` 安装），发布前逐项确认。
+
+### 必过门禁（本地与 CI 同源）
+
+```bash
+npm run check:sanitize      # ① 脱敏：凭据 / 真实内网地址 / 企业域名 / 本机绝对路径
+npm run check:lib           # ② 产物：已提交 lib/ 与 src/ 重新构建逐字节一致
+npm run typecheck           # ③ host + client 类型检查
+npm test                    # ④ 490 用例 / 60 文件
+npm run build               # ⑤ 重建产物（提交前执行，随后 check:lib 复验）
+npm run smoke:client        # ⑥ 浏览器 bundle 物化冒烟
+```
+
+### 仓库状态
+
+- [ ] **可见性**：仓库已转为 public——`github:pc439527/dsh-jumpserver` 安装命令对他人可用
+- [x] **陈旧分支已清理**（2026-10-02 完成）：`fix/classifier-v2.1-grant-hardening`、`fix/v0.3.2-mysql-audit`（关键文件与 main 逐行一致，已被超越）、`sync/workbuddy-0.5.13`（其 2 个独有提交的成果已移植进 main 工作区：凭据形态脱敏 + consolePort / web-profile 措辞订正）。现仅存 `main`。
+- [x] **topic 已修正**（2026-10-02 完成）：移除陈旧的 `dsh-better-sidebar`（该依赖已在收敛计划中移除），现为 `["dsh-plugin"]`
+- [ ] **无残留**：无 tag、无 release 资产、无含内部网络信息的 issue / Actions 日志
+- [ ] **文档中无本机特定信息**：路径、profile 名、工具链状态均已泛化
+
+### 已知可接受项（无需处理）
+
+- **历史 blob 中的 NUL 字节**：`src/jumpserver/profiles.ts` 与 `topology.ts` 的旧版本曾用 `\0` 作字符串分隔符，后已改为 `\u0000` 转义使当前文件成为纯文本。旧 blob 只含该分隔符，无敏感数据。
+- **示例中的 RFC 5737 / RFC 1918 地址**：文档示例一律使用 `203.0.113.x` / `192.0.2.x` / `192.168.79.x` 文档保留段，属刻意保留。
+
+### 已完成的脱敏核验（本次审计结论）
+
+全历史 **585 个 blob** 精确扫描：私钥 / AWS `AKIA` / GitHub token **0**、非文档段 IPv4 **0**、邮箱与企业域名 **0**、本机绝对路径 **0**。**git 历史干净，无需重写。**
 
 ## License
 
