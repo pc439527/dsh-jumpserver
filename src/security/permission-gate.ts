@@ -1,5 +1,6 @@
 /**
- * Permission gate — DSH-native approval + the WorkBuddy v0.5.x safety layers.
+ * Permission gate — DSH-native approval, layered with command risk
+ * classification, target scoping and refusal auditing.
  *
  * DSH keeps its own boundaries that the MCP port does not have:
  *  - `ctx.get('approval')` is the human approval service (no confirm:true

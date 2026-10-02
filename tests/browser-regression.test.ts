@@ -32,7 +32,7 @@ describe('minimal browser interaction regressions', () => {
     for (const tab of ['\u7ec8\u7aef', '\u8d44\u4ea7', '\u4efb\u52a1', '\u5ba1\u8ba1']) {
       expect(html).toContain('>' + tab + '<')
     }
-    // WorkBuddy-only tabs stay undeclared and unrendered.
+    // Tabs we do not ship stay undeclared and unrendered.
     for (const absent of ['\u62d3\u6251', '\u7edf\u8ba1', '\u4f1a\u8bdd']) expect(html).not.toContain('>' + absent + '<')
   })
 

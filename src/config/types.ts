@@ -188,8 +188,8 @@ export interface RiskJudgeConfig {
   apiKeyEnv: string
   /**
    * Optional file holding the API key (default ''). Consulted only when the
-   * env var above is empty, mirroring ~/.workbuddy/typesafe/ts.py. Storing the
-   * PATH here keeps the secret itself out of config.json.
+   * env var above is empty. Storing the PATH here keeps the secret itself out
+   * of config.json.
    */
   apiKeyFile: string
   /** Model alias (default jev-latest). */
@@ -498,8 +498,8 @@ export function resolveConcurrency(cfg: Pick<JumpServerConfig, 'batchConcurrency
 }
 
 /**
- * V0.4.0 (WorkBuddy) / multi-account in the DSH port: one named bastion
- * identity. A selected profile supplies the whole connection four-tuple and
+ * V0.4.0 multi-account: one named bastion identity. A selected profile
+ * supplies the whole connection four-tuple and
  * takes precedence over the settings card; the password itself is still only
  * ever a credential-ref, never stored here.
  */

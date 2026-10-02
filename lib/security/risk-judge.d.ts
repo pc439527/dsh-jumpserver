@@ -50,10 +50,10 @@ export declare function resetRiskJudgeCache(): void;
  * The API key never enters the config object, only the name of the env var
  * (and optionally a path) does.
  *
- * Resolution order mirrors ~/.workbuddy/typesafe/ts.py: `TYPESAFE_API_KEY`
- * first, then the key file — so the connector works whether it was spawned by
- * a host that inherited the env var or not. Any read failure is a miss, never
- * a throw: an unreadable key file must degrade to null, not break the gate.
+ * Resolution order: `TYPESAFE_API_KEY` first, then the key file — so the
+ * connector works whether it was spawned by a host that inherited the env var
+ * or not. Any read failure is a miss, never a throw: an unreadable key file
+ * must degrade to null, not break the gate.
  */
 export declare function resolveApiKey(config: RiskJudgeConfig, env?: NodeJS.ProcessEnv): string;
 /**

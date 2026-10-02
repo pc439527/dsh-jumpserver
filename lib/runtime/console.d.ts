@@ -2,8 +2,8 @@ import type { BridgeServices } from '../bridge/bridge.js';
 /**
  * Stable Desktop sidebar port; the right-column URL must survive restarts.
  *
- * 8765 is the WorkBuddy console port on this workstation, so the plugin takes
- * its own port and both consoles can run side by side.
+ * 8766 rather than the more common 8765, so this console can run side by side
+ * with other local tools.
  */
 export declare const DEFAULT_CONSOLE_PORT = 8766;
 export interface ConsoleHandle {
